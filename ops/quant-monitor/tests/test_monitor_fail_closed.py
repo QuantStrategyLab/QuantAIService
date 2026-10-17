@@ -888,6 +888,124 @@ class MonitorFailClosedTests(unittest.TestCase):
                     self.assertEqual(summary["telegram_alerts"], [])
                     telegram.assert_not_called()
 
+    def test_health_cycle_nonempty_finding_reaches_fake_issue_and_json_readback(self) -> None:
+        self._check_nonempty_health_cycle_issue_loop(query_failure=False)
+
+    def test_health_cycle_nonempty_finding_query_failure_blocks_create_and_reports_error(self) -> None:
+        self._check_nonempty_health_cycle_issue_loop(query_failure=True)
+
+    def _check_nonempty_health_cycle_issue_loop(self, *, query_failure: bool) -> None:
+        from quant_platform_kit.strategy_lifecycle.watch import runner as watcher
+        from quant_platform_kit.strategy_lifecycle.watch import strategy_watch
+
+        normalizer = _load_script("build_dashboard_snapshot")
+        real_dispatch = watcher.dispatch_strategy_watch_findings
+        real_builder = strategy_watch.build_strategy_monitoring_finding
+        observed_findings = []
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            observed_at = _write_fresh_lifecycle_status(root)
+            monitor = types.ModuleType("quant_platform_kit.strategy_lifecycle.performance_monitor")
+            drift = types.ModuleType("quant_platform_kit.strategy_lifecycle.drift_detector")
+            dashboard = types.ModuleType("quant_platform_kit.strategy_lifecycle.health_dashboard")
+
+            def run_monitor(domain, *, source_revision):
+                self.assertRegex(source_revision, r"^[0-9a-f]{40}$")
+                return [types.SimpleNamespace(strategy_profile=f"{domain}_profile")]
+
+            monitor.run_monitor = run_monitor
+            drift.run_drift_detection = lambda domain: [types.SimpleNamespace(
+                strategy_profile=f"{domain}_profile", drift_score=0.8 if domain == "us_equity" else 0.0,
+                baseline_available=True, alert_suppressed=False, reason="",
+            )]
+
+            def build_dashboard(*, output_dir, **_kwargs):
+                directory = Path(output_dir)
+                directory.mkdir(parents=True, exist_ok=True)
+                rows = [{"domain": domain, "strategy_profile": f"{domain}_profile",
+                         "status": "critical" if domain == "us_equity" else "healthy",
+                         "overall_score": 14.2 if domain == "us_equity" else 95.0,
+                         "as_of": observed_at} for domain in HEALTH_CYCLE.DOMAINS]
+                (directory / "strategy_health_dashboard.json").write_text(json.dumps({"strategies": rows}))
+
+            dashboard.build_dashboard = build_dashboard
+            create_issue = mock.Mock(return_value="https://github.com/QuantStrategyLab/UsEquityStrategies/issues/1")
+            list_issues = (mock.Mock(side_effect=RuntimeError("synthetic issue query unavailable"))
+                           if query_failure else mock.Mock(return_value={}))
+            list_archived = mock.Mock(return_value={})
+            read_issue = mock.Mock(side_effect=AssertionError("must not read an existing issue"))
+            comment_issue = mock.Mock(side_effect=AssertionError("must not comment on an issue"))
+
+            def dispatch(findings, **kwargs):
+                observed_findings.extend(findings)
+                return real_dispatch(findings, **kwargs, create_issue=create_issue,
+                                     list_issues=list_issues, list_archived_issues=list_archived,
+                                     read_issue=read_issue, comment_issue=comment_issue)
+
+            # Only collector/outbound seams are fake. Preserve genuine QPK parent
+            # namespaces, builder/dispatcher bodies, normalization and disk writes.
+            with (
+                mock.patch.dict(os.environ, {"QUANT_MONITOR_ROOT": str(root),
+                                            "TELEGRAM_TOKEN": "synthetic", "GLOBAL_TELEGRAM_CHAT_ID": "synthetic"}, clear=True),
+                mock.patch.dict(sys.modules, {monitor.__name__: monitor, drift.__name__: drift,
+                                             dashboard.__name__: dashboard, "build_dashboard_snapshot": normalizer}),
+                mock.patch.object(strategy_watch, "build_strategy_monitoring_finding", wraps=real_builder) as builder,
+                mock.patch.object(watcher, "dispatch_strategy_watch_findings", side_effect=dispatch) as dispatched,
+                mock.patch.object(HEALTH_CYCLE, "_run_operational_diagnosis",
+                                  return_value={"status": "skipped", "reason": "offline_test"}) as diagnosis,
+                mock.patch.object(HEALTH_CYCLE, "_send_health_telegram_target", return_value="sent") as telegram,
+                mock.patch("socket.create_connection", side_effect=AssertionError("network forbidden")),
+                mock.patch("builtins.print"),
+            ):
+                exit_code = HEALTH_CYCLE.main()
+
+            cycle_files = list((root / "data/health").glob("cycle_*.json"))
+            self.assertEqual(len(cycle_files), 1)
+            summary = json.loads(cycle_files[0].read_text())
+            normalized = json.loads((root / "data/health/strategy_health_dashboard.v1.json").read_text())
+            self._loop_receipt = {"query_failure": query_failure, "exit_code": exit_code,
+                                  "cycle": summary, "dashboard": normalized,
+                                  "fake_GH_calls": {"create": create_issue.call_count, "open": list_issues.call_count,
+                                                    "archived": list_archived.call_count, "read": read_issue.call_count,
+                                                    "comment": comment_issue.call_count},
+                                  "fake_telegram_calls": telegram.call_count}
+            builder.assert_called_once()
+            self.assertEqual(len(observed_findings), 1)
+            finding = observed_findings[0]
+            self.assertEqual((finding.snapshot.repo, finding.snapshot.profile, finding.finding_type),
+                             ("QuantStrategyLab/UsEquityStrategies", "us_equity_profile", "monitoring_trigger"))
+            dispatched.assert_called_once_with(observed_findings, dry_run=False, comment_existing=False)
+            list_issues.assert_called_once_with("QuantStrategyLab/UsEquityStrategies")
+            read_issue.assert_not_called()
+            comment_issue.assert_not_called()
+            self.assertEqual(exit_code, 2 if query_failure else 0)
+            self.assertEqual(summary["optimization_findings"], 1)
+            self.assertEqual(summary["optimization_issues_created"], 0 if query_failure else 1)
+            self.assertEqual(summary["optimization_issue_errors"], int(query_failure))
+            self.assertEqual(summary["ok"], not query_failure)
+            self.assertEqual(summary["data_errors"], [])
+            self.assertEqual((summary["snapshot_count"], summary["strategy_count"]), (4, 4))
+            self.assertEqual(summary["snapshot_data_status"], "ready")
+            self.assertEqual(normalized["data_status"], "ready")
+            self.assertEqual(normalized["summary"]["strategy_count"], 4)
+            self.assertEqual({(row["domain"], row["profile"]) for row in normalized["strategies"]},
+                             {(domain, f"{domain}_profile") for domain in HEALTH_CYCLE.DOMAINS})
+            target = next(row for row in normalized["strategies"] if row["domain"] == "us_equity")
+            self.assertEqual((target["status"], target["score"]), ("critical", 14.2))
+            self.assertEqual(normalized["policy"]["mode"], "evidence_only")
+            self.assertEqual(summary["operational_diagnosis"], {"status": "skipped", "reason": "offline_test"})
+            self.assertEqual(diagnosis.call_args.args[1], [])
+            if query_failure:
+                create_issue.assert_not_called()
+                list_archived.assert_not_called()
+                self.assertEqual(summary["telegram_alerts"], ["[optimization] issue_record_failed (1)"])
+                telegram.assert_called_once()
+            else:
+                create_issue.assert_called_once()
+                list_archived.assert_called_once_with("QuantStrategyLab/UsEquityStrategies")
+                self.assertEqual(summary["telegram_alerts"], [])
+                telegram.assert_not_called()
+
     def test_health_cycle_telegram_body_is_operational_only(self) -> None:
         body = HEALTH_CYCLE._build_alert_body(["[collector] dashboard_data_unavailable"])
 
