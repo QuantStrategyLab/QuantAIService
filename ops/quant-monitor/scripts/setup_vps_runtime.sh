@@ -243,7 +243,7 @@ fi
 python3 "${PYTHON_ISOLATION_ARGS[@]}" -m venv "$VENV"
 # Locked third-party tree only; no unbounded pip/wheel upgrade and no free-floating
 # numpy/pandas/google-cloud-storage installs.
-if ! "$VENV/bin/python" "${PYTHON_ISOLATION_ARGS[@]}" -m pip install --require-hashes --only-binary=:all: -r "$LOCK_FILE"; then
+if ! env -u PYTHONPATH "$VENV/bin/python" -I -m pip --isolated install --index-url https://pypi.org/simple --require-hashes --only-binary=:all: -r "$LOCK_FILE"; then
   echo "[setup] locked dependency install failed" >&2
   exit 1
 fi
@@ -252,12 +252,48 @@ fi
 # Reuse locked setuptools/wheel; do not download build dependencies.
 build_root=$(mktemp -d "${TMPDIR:-/tmp}/quant-monitor-qpk.XXXXXX")
 trap 'rm -rf -- "$build_root"' EXIT
-git -C "$QPK_ROOT" archive "$QPK_ARCHIVE_REF" | tar -x -C "$build_root"
-if ! "$VENV/bin/python" "${PYTHON_ISOLATION_ARGS[@]}" -m pip install --no-deps --no-build-isolation "$build_root"; then
+mkdir "$build_root/qpk" "$build_root/qas"
+git -C "$QPK_ROOT" archive "$QPK_ARCHIVE_REF" | tar -x -C "$build_root/qpk"
+if ! env -u PYTHONPATH "$VENV/bin/python" -I -m pip --isolated install --no-index --no-deps --no-build-isolation "$build_root/qpk"; then
   echo "[setup] QuantPlatformKit install failed" >&2
   exit 1
 fi
-if ! "$VENV/bin/python" "${PYTHON_ISOLATION_ARGS[@]}" -c 'from quant_platform_kit.strategy_lifecycle.watch.runner import run_watcher; from ai_service.client import TaskClient'; then
+# The SDK is from this same reviewed commit, never an ambient installation or
+# the legacy QPK AI wrapper. Build metadata stays in the temporary archive.
+git -C "$AAB_ROOT" archive "$SOURCE_SHA" | tar -x -C "$build_root/qas"
+if ! env -u PYTHONPATH "$VENV/bin/python" -I -m pip --isolated install --no-index --no-deps --no-build-isolation "$build_root/qas"; then
+  echo "[setup] QuantAIService SDK install failed" >&2
+  exit 1
+fi
+if ! env -u PYTHONPATH "$VENV/bin/python" -I - "$build_root/qas" "$VENV" <<'PY'
+import hashlib
+import importlib
+import importlib.metadata
+from pathlib import Path
+import sys
+import tomllib
+
+source = Path(sys.argv[1])
+venv = Path(sys.argv[2]).resolve()
+if Path(sys.prefix).resolve() != venv:
+    raise SystemExit("unexpected SDK interpreter")
+project = tomllib.loads((source / "pyproject.toml").read_text())["project"]
+distribution = importlib.metadata.distribution("quant-ai-service")
+if project["name"] != "quant-ai-service" or distribution.version != project["version"]:
+    raise SystemExit("SDK distribution identity mismatch")
+for name in ("ai_service.client", "ai_service.transport"):
+    module = importlib.import_module(name)
+    relative = name.replace(".", "/") + ".py"
+    installed = Path(module.__file__).resolve()
+    if (not installed.is_relative_to(venv)
+            or installed != Path(distribution.locate_file(relative)).resolve()
+            or hashlib.sha256(installed.read_bytes()).digest()
+            != hashlib.sha256((source / "src" / relative).read_bytes()).digest()):
+        raise SystemExit("SDK import provenance mismatch")
+from ai_service.client import TaskClient
+from quant_platform_kit.strategy_lifecycle.watch.runner import run_watcher
+PY
+then
   echo "[setup] approved V2 runtime packages are unavailable; deployment refused" >&2
   exit 1
 fi
@@ -278,4 +314,4 @@ if ! command -v gcloud >/dev/null 2>&1; then
   echo "[setup] warning: gcloud not installed; telegram env load may fail" >&2
 fi
 
-echo "[setup] ok venv=$VENV qpk=$QPK_ROOT sha=$QPK_RUNTIME_SHA"
+echo "[setup] ok venv=$VENV qpk=$QPK_ROOT sha=$QPK_RUNTIME_SHA qas_source=$SOURCE_SHA"
