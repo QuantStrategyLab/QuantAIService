@@ -53,10 +53,17 @@ class DeployScriptTests(unittest.TestCase):
             git.chmod(0o755)
             python = fake_bin / "python3"
             # Execute only setup's standard-library platform preflight. No venv/pip.
+            platform_probe = (
+                "import os, platform, sys\nfrom collections import namedtuple\n"
+                "sys.version_info = namedtuple('Version', 'major minor micro releaselevel serial')(3,12,0,'final',0)\n"
+                "platform.system=lambda:'Linux'\nplatform.machine=lambda:'x86_64'\n"
+                "platform.python_implementation=lambda:'CPython'\nos.confstr=lambda key:'glibc 2.35'\n"
+                "exec(compile(sys.stdin.read(), '<platform-fixture>', 'exec'))\n"
+            )
             python.write_text(
                 "#!/bin/bash\nset -euo pipefail\n"
                 '[[ "$*" == - || "$*" == "-I -" ]] || exit 92\n'
-                f'exec "{sys.executable}" "$@"\n',
+                f'exec "{sys.executable}" -I -c {shlex.quote(platform_probe)}\n',
                 encoding="utf-8",
             )
             python.chmod(0o755)
@@ -72,6 +79,7 @@ class DeployScriptTests(unittest.TestCase):
                     "QUANT_PROJECTS_ROOT": str(mirror.parent),
                     "LIFECYCLE_LOCAL_ROOT": str(root / "lifecycle-store"),
                     "QUANT_MONITOR_VENV": str(stage),
+                    "QUANT_MONITOR_V2_RUNTIME_READY": "true",
                 },
                 capture_output=True, text=True, timeout=10, check=False,
             )
@@ -113,7 +121,7 @@ class DeployScriptTests(unittest.TestCase):
             pip_probe = (
                 "#!/bin/bash\nset -euo pipefail\nargs=()\n"
                 'if [[ "${1:-}" == -I ]]; then args=(-I); shift; fi\n'
-                '[[ "$1" == -m && "$2" == pip && "$3" == install ]] || exit 93\n'
+                '[[ "$1" == -m && "$2" == pip && "$3" == --isolated && "$4" == install ]] || exit 93\n'
                 f'exec {shlex.quote(sys.executable)} "${{args[@]}}" -c {shlex.quote(probe)} "$@"\n'
             )
             fake_bin = root / "bin"
@@ -130,10 +138,17 @@ class DeployScriptTests(unittest.TestCase):
             )
             git.chmod(0o755)
             python = fake_bin / "python3"
+            platform_probe = (
+                "import os, platform, sys\nfrom collections import namedtuple\n"
+                "sys.version_info = namedtuple('Version', 'major minor micro releaselevel serial')(3,12,0,'final',0)\n"
+                "platform.system=lambda:'Linux'\nplatform.machine=lambda:'x86_64'\n"
+                "platform.python_implementation=lambda:'CPython'\nos.confstr=lambda key:'glibc 2.35'\n"
+                "exec(compile(sys.stdin.read(), '<platform-fixture>', 'exec'))\n"
+            )
             python.write_text(
                 "#!/bin/bash\nset -euo pipefail\nargs=()\n"
                 'if [[ "${1:-}" == -I ]]; then args=(-I); shift; fi\n'
-                f'if [[ "$*" == - ]]; then exec {shlex.quote(sys.executable)} "${{args[@]}}" -; fi\n'
+                f'if [[ "$*" == - ]]; then exec {shlex.quote(sys.executable)} "${{args[@]}}" -c {shlex.quote(platform_probe)}; fi\n'
                 '[[ "$#" == 3 && "$1" == -m && "$2" == venv ]] || exit 92\n'
                 'mkdir "$3/bin"\n'
                 f'printf %s {shlex.quote(pip_probe)} > "$3/bin/python"\n'
@@ -149,6 +164,7 @@ class DeployScriptTests(unittest.TestCase):
                     "QUANT_MONITOR_ROOT": str(monitor), "AIAUDIT_BRIDGE_ROOT": str(aab),
                     "QUANT_PLATFORM_KIT_ROOT": str(mirror), "QUANT_PROJECTS_ROOT": str(mirror.parent),
                     "LIFECYCLE_LOCAL_ROOT": str(root / "lifecycle-store"), "QUANT_MONITOR_VENV": str(stage),
+                    "QUANT_MONITOR_V2_RUNTIME_READY": "true",
                 },
                 capture_output=True, text=True, timeout=10, check=False,
             )
@@ -156,7 +172,7 @@ class DeployScriptTests(unittest.TestCase):
             self.assertIn("locked dependency install failed", result.stderr)
             self.assertNotIn("[setup] ok", result.stdout)
             observed = json.loads(receipt.read_text())
-            self.assertEqual(observed["argv"][:-1], ["-m", "pip", "install", "--require-hashes", "--only-binary=:all:", "-r"])
+            self.assertEqual(observed["argv"][:-1], ["-m", "pip", "--isolated", "install", "--index-url", "https://pypi.org/simple", "--require-hashes", "--only-binary=:all:", "-r"])
             self.assertEqual(observed["isolated"], 1)
             self.assertFalse(observed["old_mirror_pip"])
             self.assertFalse(observed["pythonpath_in_child_env"])
@@ -2059,6 +2075,221 @@ sys.argv = ['offline-fixture', 'synthetic-checkout'] + ([{str(root)!r}, '12345']
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("locked dependency install failed", result.stderr)
             self.assertNotIn("[setup] ok", result.stdout)
+
+
+class SDKDependencySetupTests(unittest.TestCase):
+    """SDK provenance fixtures cannot grant full monitor readiness."""
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.base = Path(temporary.name)
+        self.source = self.base / "QuantAIService"
+        self.qpk = self.base / "QuantPlatformKit"
+        self.log = self.base / "commands.jsonl"
+        self.count = 0
+        for repo in (self.source, self.qpk):
+            repo.mkdir()
+            self.git(repo, "init", "--initial-branch=main")
+            self.git(repo, "config", "user.name", "Offline fixture")
+            self.git(repo, "config", "user.email", "fixture@example.invalid")
+        # The real pinned QPK has no watch package (E-DEP-C1). Never invent it
+        # to make a full setup pass. This models absence, not a pin qualification.
+        package = self.qpk / "src/quant_platform_kit/strategy_lifecycle"
+        package.mkdir(parents=True)
+        for directory in (package, package.parent):
+            (directory / "__init__.py").write_text("")
+        (self.qpk / "pyproject.toml").write_text('[project]\nname="quant-platform-kit"\nversion="1.0.0"\n')
+        self.git(self.qpk, "add", ".")
+        self.git(self.qpk, "commit", "-m", "fixed QPK fixture")
+        self.pin = self.git(self.qpk, "rev-parse", "HEAD")
+        self.monitor = self.source / "ops/quant-monitor"
+        (self.monitor / "scripts").mkdir(parents=True)
+        for relative in ("scripts/common_env.sh", "requirements-linux-py312.lock"):
+            shutil.copyfile(ROOT / relative, self.monitor / relative)
+        (self.monitor / "qpk-runtime.sha").write_text(self.pin + "\n")
+        sdk = self.source / "src/ai_service"
+        sdk.mkdir(parents=True)
+        for name in ("__init__.py", "client.py", "transport.py"):
+            shutil.copyfile(ROOT.parents[1] / "src/ai_service" / name, sdk / name)
+        shutil.copyfile(ROOT.parents[1] / "pyproject.toml", self.source / "pyproject.toml")
+        self.git(self.source, "add", ".")
+        self.git(self.source, "commit", "-m", "fixed QAS and lock fixture")
+        self.sha = self.git(self.source, "rev-parse", "HEAD")
+        self.live = self.monitor / ".venv"
+        self.live.mkdir()
+        (self.live / "preserve").write_text("live fixture\n")
+        self.bin = self.base / "bin"
+        self.bin.mkdir()
+        python = self.bin / "python3"
+        python.write_text(f"#!{sys.executable}\n" + textwrap.dedent('''\
+            import json, os, pathlib, platform, shutil, sys
+            path = pathlib.Path
+            args = sys.argv[1:]
+            with open(os.environ['FIXTURE_LOG'], 'a') as out:
+                out.write(json.dumps({'command': 'python', 'args': args, 'pythonpath': 'PYTHONPATH' in os.environ}) + '\\n')
+            if args[:1] == ['-I']:
+                assert 'PYTHONPATH' not in os.environ
+                args = args[1:]
+            fault = os.environ.get('FIXTURE_FAULT', '')
+            venv = path(__file__).resolve().parent.parent
+            site = venv / 'fixture-site'
+            if args[:2] == ['-m', 'venv']:
+                target = path(args[-1]) / 'bin/python'
+                target.parent.mkdir(parents=True)
+                shutil.copyfile(__file__, target)
+                target.chmod(0o755)
+            elif args[:2] == ['-m', 'pip']:
+                args = args[2:]
+                if args[:1] == ['--isolated']:
+                    args = args[1:]
+                if args == ['check']:
+                    raise SystemExit(0)
+                assert args[:1] == ['install']
+                if '--require-hashes' in args:
+                    raise SystemExit(17 if fault == 'dependencies' else 0)
+                assert '--no-deps' in args and '--no-build-isolation' in args
+                source = path(args[-1])
+                qas = 'quant-ai-service' in (source / 'pyproject.toml').read_text()
+                if qas and fault == 'qas_install':
+                    raise SystemExit(18)
+                for package in (source / 'src').iterdir():
+                    shutil.copytree(package, site / package.name, dirs_exist_ok=True)
+                if qas:
+                    metadata = site / 'quant_ai_service-2.0.13.dist-info/METADATA'
+                    metadata.parent.mkdir()
+                    metadata.write_text('Name: quant-ai-service\\nVersion: ' + ('0.0.0' if fault == 'version' else '2.0.13') + '\\n')
+                    if fault == 'digest':
+                        with (site / 'ai_service/client.py').open('a') as out:
+                            out.write('\\n# changed fixture bytes\\n')
+            elif args[:1] == ['-']:
+                code = sys.stdin.read()
+                if 'glibc' in code and 'need 3.12' in code:
+                    from collections import namedtuple
+                    sys.version_info = namedtuple('Version', 'major minor micro releaselevel serial')(3, 11 if fault == 'platform' else 12, 0, 'final', 0)
+                    platform.system = lambda: 'Linux'
+                    platform.machine = lambda: 'x86_64'
+                    platform.python_implementation = lambda: 'CPython'
+                    os.confstr = lambda key: 'glibc 2.35'
+                else:
+                    sys.prefix = str(venv)
+                    sys.path[:] = [str(site), *[p for p in sys.path if 'site-packages' not in p]]
+                    if fault == 'origin':
+                        sys.path.insert(0, str(path(os.environ['AIAUDIT_BRIDGE_ROOT']) / 'src'))
+                sys.argv = ['-', *args[1:]]
+                exec(compile(code, '<setup-offline-fixture>', 'exec'), {'__name__': '__main__'})
+            else:
+                raise SystemExit('unexpected Python call: ' + repr(args))
+            '''))
+        python.chmod(0o755)
+        real_git = shutil.which("git")
+        git = self.bin / "git"
+        git.write_text(f"#!{sys.executable}\n" +
+                       "import json, os, sys\n" +
+                       "args=sys.argv[1:]\n" +
+                       "assert not set(args) & {'fetch', 'clone', 'push', 'checkout'}\n" +
+                       "with open(os.environ['FIXTURE_LOG'], 'a') as out: out.write(json.dumps({'command':'git','args':args})+'\\n')\n" +
+                       f"os.execv({real_git!r}, ['git', *args])\n")
+        git.chmod(0o755)
+        for name in ("gh", "gcloud", "ssh", "systemctl"):
+            command = self.bin / name
+            command.write_text(f"#!{sys.executable}\n" +
+                               "import json,os,sys\n" +
+                               f"name={name!r}\n" +
+                               "with open(os.environ['FIXTURE_LOG'],'a') as out: out.write(json.dumps({'command':name,'args':sys.argv[1:]})+'\\n')\n" +
+                               "raise SystemExit(0 if name=='gh' and sys.argv[1:]==['auth','status'] else 95)\n")
+            command.chmod(0o755)
+
+    def git(self, repo, *args):
+        return subprocess.check_output(["git", "-C", str(repo), *args], text=True,
+                                       stderr=subprocess.DEVNULL,
+                                       env={"PATH": os.environ["PATH"], "GIT_CONFIG_GLOBAL": os.devnull,
+                                            "GIT_CONFIG_NOSYSTEM": "1"}).strip()
+
+    def run_setup(self, *, ready=True, fault="", sha=None, venv=None):
+        self.count += 1
+        self.stage = venv or self.base / f"stage-{self.count}"
+        environment = {"PATH": f"{self.bin}:/usr/bin:/bin", "HOME": str(self.base), "TMPDIR": str(self.base),
+                       "QUANT_MONITOR_ROOT": str(self.monitor), "AIAUDIT_BRIDGE_ROOT": str(self.source),
+                       "QUANT_PLATFORM_KIT_ROOT": str(self.qpk), "QUANT_MONITOR_VENV": str(self.stage),
+                       "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1",
+                       "FIXTURE_LOG": str(self.log), "FIXTURE_FAULT": fault, "PYTHONDONTWRITEBYTECODE": "1"}
+        if ready:
+            environment["QUANT_MONITOR_V2_RUNTIME_READY"] = "true"
+        return subprocess.run(["/bin/bash", str(ROOT / "scripts/setup_vps_runtime.sh"), sha or self.sha, str(self.source)],
+                              env=environment, capture_output=True, text=True, timeout=20)
+
+    def test_default_readiness_refuses_before_any_command_or_install(self):
+        result = self.run_setup(ready=False)
+        self.assertEqual(result.returncode, 2)
+        self.assertFalse(self.log.exists())
+        self.assertFalse(self.stage.exists())
+
+    def test_missing_watcher_refuses_full_setup_after_sdk_verification(self):
+        before = self.git(self.qpk, "status", "--porcelain", "--untracked-files=all")
+        result = self.run_setup()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("No module named 'quant_platform_kit.strategy_lifecycle.watch'", result.stderr)
+        self.assertIn("approved V2 runtime packages are unavailable", result.stderr)
+        self.assertNotIn("SDK import provenance mismatch", result.stderr)
+        self.assertNotIn("SDK distribution identity mismatch", result.stderr)
+        self.assertNotIn("[setup] ok", result.stdout)
+        self.assertFalse((self.qpk / "src/quant_platform_kit/strategy_lifecycle/watch").exists())
+        records = [json.loads(line) for line in self.log.read_text().splitlines()]
+        archives = [r["args"] for r in records if r["command"] == "git" and "archive" in r["args"]]
+        self.assertIn(["-C", str(self.source), "archive", self.sha], archives)
+        self.assertIn(["-C", str(self.qpk), "archive", self.pin], archives)
+        self.assertEqual(sum(r["command"] == "python" and "--no-build-isolation" in r["args"] for r in records), 2)
+        self.assertEqual(self.git(self.qpk, "status", "--porcelain", "--untracked-files=all"), before)
+        self.assertEqual((self.live / "preserve").read_text(), "live fixture\n")
+        self.assertFalse(list(self.base.glob("quant-monitor-qpk.*")))
+        self.assertFalse(any(r["command"] in {"ssh", "systemctl", "gh", "gcloud"} for r in records))
+
+    def test_sdk_origin_version_and_bytes_must_match_archive(self):
+        for fault in ("origin", "version", "digest"):
+            with self.subTest(fault=fault):
+                result = self.run_setup(fault=fault)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertNotIn("[setup] ok", result.stdout)
+                self.assertIn("approved V2 runtime packages are unavailable", result.stderr)
+                self.assertIn("SDK distribution identity mismatch" if fault == "version"
+                              else "SDK import provenance mismatch", result.stderr)
+                self.assertNotIn("No module named 'quant_platform_kit.strategy_lifecycle.watch'", result.stderr)
+
+    def test_dependency_or_sdk_install_failure_cannot_report_ready(self):
+        for fault in ("dependencies", "qas_install"):
+            with self.subTest(fault=fault):
+                result = self.run_setup(fault=fault)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertNotIn("[setup] ok", result.stdout)
+                self.assertIn("locked dependency install failed" if fault == "dependencies"
+                              else "QuantAIService SDK install failed", result.stderr)
+                self.assertFalse(list(self.base.glob("quant-monitor-qpk.*")))
+
+    def test_source_drift_and_unsupported_platform_fail_before_install(self):
+        for arguments in ({"sha": "0" * 40}, {"fault": "platform"}, {"venv": self.source / "new-stage"}):
+            with self.subTest(arguments=arguments):
+                self.log.unlink(missing_ok=True)
+                result = self.run_setup(**arguments)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(self.stage.exists())
+                records = [json.loads(line) for line in self.log.read_text().splitlines()]
+                self.assertFalse(any("pip" in r["args"] for r in records))
+
+    def test_linux_lock_contains_sdk_and_python312_marker_dependencies(self):
+        versions = dict(re.findall(r"(?m)^([A-Za-z0-9_-]+)==([^ ]+)", (ROOT / "requirements-linux-py312.lock").read_text()))
+        for name in ("jsonschema", "PyJWT", "attrs", "jsonschema-specifications", "referencing", "rpds-py", "typing-extensions"):
+            self.assertIn(name, versions)
+
+    def test_sdk_package_ci_cannot_invoke_full_monitor_readiness(self):
+        workflow = (ROOT.parents[1] / ".github/workflows/ci.yml").read_text()
+        blocks = re.findall(r"(?m)^        run: \|\n((?:^          .*\n|^\n)*)", workflow)
+        package_steps = [block for block in blocks if 'monitor-sdk-qpk' in block]
+        self.assertEqual(len(package_steps), 1)
+        step = package_steps[0]
+        self.assertNotIn("QUANT_MONITOR_V2_RUNTIME_READY", step)
+        self.assertNotIn("setup_vps_runtime.sh", step)
+        self.assertNotRegex(step, r"systemctl|deploy_to_vps|health_cycle\.py|gh auth|gcloud")
 
 
 if __name__ == "__main__":
