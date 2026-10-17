@@ -2078,7 +2078,7 @@ sys.argv = ['offline-fixture', 'synthetic-checkout'] + ([{str(root)!r}, '12345']
 
 
 class SDKDependencySetupTests(unittest.TestCase):
-    """Exercise the real setup shell with local archives and fake installations."""
+    """SDK provenance fixtures cannot grant full monitor readiness."""
 
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
@@ -2093,11 +2093,12 @@ class SDKDependencySetupTests(unittest.TestCase):
             self.git(repo, "init", "--initial-branch=main")
             self.git(repo, "config", "user.name", "Offline fixture")
             self.git(repo, "config", "user.email", "fixture@example.invalid")
-        package = self.qpk / "src/quant_platform_kit/strategy_lifecycle/watch"
+        # The real pinned QPK has no watch package (E-DEP-C1). Never invent it
+        # to make a full setup pass. This models absence, not a pin qualification.
+        package = self.qpk / "src/quant_platform_kit/strategy_lifecycle"
         package.mkdir(parents=True)
-        for directory in (package, package.parent, package.parent.parent):
+        for directory in (package, package.parent):
             (directory / "__init__.py").write_text("")
-        (package / "runner.py").write_text("def run_watcher(): pass\n")
         (self.qpk / "pyproject.toml").write_text('[project]\nname="quant-platform-kit"\nversion="1.0.0"\n')
         self.git(self.qpk, "add", ".")
         self.git(self.qpk, "commit", "-m", "fixed QPK fixture")
@@ -2224,11 +2225,16 @@ class SDKDependencySetupTests(unittest.TestCase):
         self.assertFalse(self.log.exists())
         self.assertFalse(self.stage.exists())
 
-    def test_same_reviewed_archive_installs_sdk_without_touching_live_state(self):
+    def test_missing_watcher_refuses_full_setup_after_sdk_verification(self):
         before = self.git(self.qpk, "status", "--porcelain", "--untracked-files=all")
         result = self.run_setup()
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn(f"qas_source={self.sha}", result.stdout)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("No module named 'quant_platform_kit.strategy_lifecycle.watch'", result.stderr)
+        self.assertIn("approved V2 runtime packages are unavailable", result.stderr)
+        self.assertNotIn("SDK import provenance mismatch", result.stderr)
+        self.assertNotIn("SDK distribution identity mismatch", result.stderr)
+        self.assertNotIn("[setup] ok", result.stdout)
+        self.assertFalse((self.qpk / "src/quant_platform_kit/strategy_lifecycle/watch").exists())
         records = [json.loads(line) for line in self.log.read_text().splitlines()]
         archives = [r["args"] for r in records if r["command"] == "git" and "archive" in r["args"]]
         self.assertIn(["-C", str(self.source), "archive", self.sha], archives)
@@ -2237,7 +2243,7 @@ class SDKDependencySetupTests(unittest.TestCase):
         self.assertEqual(self.git(self.qpk, "status", "--porcelain", "--untracked-files=all"), before)
         self.assertEqual((self.live / "preserve").read_text(), "live fixture\n")
         self.assertFalse(list(self.base.glob("quant-monitor-qpk.*")))
-        self.assertFalse(any(r["command"] in {"ssh", "systemctl", "gcloud"} for r in records))
+        self.assertFalse(any(r["command"] in {"ssh", "systemctl", "gh", "gcloud"} for r in records))
 
     def test_sdk_origin_version_and_bytes_must_match_archive(self):
         for fault in ("origin", "version", "digest"):
@@ -2246,6 +2252,9 @@ class SDKDependencySetupTests(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertNotIn("[setup] ok", result.stdout)
                 self.assertIn("approved V2 runtime packages are unavailable", result.stderr)
+                self.assertIn("SDK distribution identity mismatch" if fault == "version"
+                              else "SDK import provenance mismatch", result.stderr)
+                self.assertNotIn("No module named 'quant_platform_kit.strategy_lifecycle.watch'", result.stderr)
 
     def test_dependency_or_sdk_install_failure_cannot_report_ready(self):
         for fault in ("dependencies", "qas_install"):
@@ -2253,6 +2262,8 @@ class SDKDependencySetupTests(unittest.TestCase):
                 result = self.run_setup(fault=fault)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertNotIn("[setup] ok", result.stdout)
+                self.assertIn("locked dependency install failed" if fault == "dependencies"
+                              else "QuantAIService SDK install failed", result.stderr)
                 self.assertFalse(list(self.base.glob("quant-monitor-qpk.*")))
 
     def test_source_drift_and_unsupported_platform_fail_before_install(self):
@@ -2269,6 +2280,16 @@ class SDKDependencySetupTests(unittest.TestCase):
         versions = dict(re.findall(r"(?m)^([A-Za-z0-9_-]+)==([^ ]+)", (ROOT / "requirements-linux-py312.lock").read_text()))
         for name in ("jsonschema", "PyJWT", "attrs", "jsonschema-specifications", "referencing", "rpds-py", "typing-extensions"):
             self.assertIn(name, versions)
+
+    def test_sdk_package_ci_cannot_invoke_full_monitor_readiness(self):
+        workflow = (ROOT.parents[1] / ".github/workflows/ci.yml").read_text()
+        blocks = re.findall(r"(?m)^        run: \|\n((?:^          .*\n|^\n)*)", workflow)
+        package_steps = [block for block in blocks if 'monitor-sdk-qpk' in block]
+        self.assertEqual(len(package_steps), 1)
+        step = package_steps[0]
+        self.assertNotIn("QUANT_MONITOR_V2_RUNTIME_READY", step)
+        self.assertNotIn("setup_vps_runtime.sh", step)
+        self.assertNotRegex(step, r"systemctl|deploy_to_vps|health_cycle\.py|gh auth|gcloud")
 
 
 if __name__ == "__main__":

@@ -35,7 +35,7 @@ jobs:
           python -m pip install pytest
           python -m ruff check ops/quant-monitor/quant_monitor_domain/briefing_consumer.py ops/quant-monitor/quant_monitor_domain/briefing_summary_operation.py scripts/consume_daily_briefing.py tests/test_consume_daily_briefing.py tests/test_briefing_summary_operation.py
           python -m pytest -q -p no:cacheprovider tests/test_consume_daily_briefing.py tests/test_briefing_summary_operation.py
-      - name: Validate SDK setup with offline command fixtures
+      - name: Validate SDK provenance and full setup refusal with offline fixtures
         run: |
           bash -n ops/quant-monitor/scripts/setup_vps_runtime.sh
           python -I -B ops/quant-monitor/tests/test_deploy_scripts.py -v \
@@ -43,7 +43,7 @@ jobs:
             DeployScriptTests.test_runtime_setup_requires_exact_checkout_and_never_resyncs_aab_main \
             DeployScriptTests.test_staging_preflight_ignores_shared_mirror_python_startup \
             DeployScriptTests.test_staging_pip_and_backend_environment_ignore_shared_mirror
-      - name: Validate the monitor SDK combination in an inactive temporary venv
+      - name: Validate SDK packages without monitor readiness in a temporary venv
         run: |
           pin=$(cat ops/quant-monitor/qpk-runtime.sha)
           [[ "$pin" =~ ^[0-9a-f]{40}$ ]]
@@ -52,22 +52,25 @@ jobs:
           git -C "$qpk" fetch --depth=1 https://github.com/QuantStrategyLab/QuantPlatformKit.git "$pin"
           git -C "$qpk" checkout --detach FETCH_HEAD
           [[ "$(git -C "$qpk" rev-parse HEAD)" == "$pin" ]]
-          # Only packaging/imports are real here. Never probe GitHub credentials.
-          fixture_bin="$RUNNER_TEMP/monitor-sdk-readiness-fixture"
-          mkdir "$fixture_bin"
-          cat > "$fixture_bin/gh" <<'SH'
-          #!/bin/sh
-          [ "$*" = 'auth status' ]
-          SH
-          cp "$fixture_bin/gh" "$fixture_bin/gcloud"
-          chmod 755 "$fixture_bin/gh" "$fixture_bin/gcloud"
-          PATH="$fixture_bin:$PATH" \
-            QUANT_MONITOR_V2_RUNTIME_READY=true \
-            QUANT_MONITOR_ROOT="$GITHUB_WORKSPACE/ops/quant-monitor" \
-            AIAUDIT_BRIDGE_ROOT="$GITHUB_WORKSPACE" \
-            QUANT_PLATFORM_KIT_ROOT="$qpk" \
-            QUANT_MONITOR_VENV="$RUNNER_TEMP/monitor-sdk-inactive-venv" \
-            bash ops/quant-monitor/scripts/setup_vps_runtime.sh "$GITHUB_SHA" "$GITHUB_WORKSPACE"
+          # Package compatibility only: the fixed QPK lacks watcher capability.
+          # Full monitor readiness remains refused by the unchanged setup gate.
+          sdk_venv="$RUNNER_TEMP/monitor-sdk-packages-venv"
+          python -I -m venv "$sdk_venv"
+          env -u PYTHONPATH "$sdk_venv/bin/python" -I -m pip --isolated install \
+            --index-url https://pypi.org/simple --require-hashes --only-binary=:all: \
+            -r ops/quant-monitor/requirements-linux-py312.lock
+          build_root=$(mktemp -d "$RUNNER_TEMP/monitor-sdk-qpk-archive.XXXXXX")
+          trap 'rm -rf -- "$build_root"' EXIT
+          git -C "$qpk" archive "$pin" | tar -x -C "$build_root"
+          env -u PYTHONPATH "$sdk_venv/bin/python" -I -m pip --isolated install \
+            --no-index --no-deps --no-build-isolation "$build_root"
+          # Reuse the exact QAS wheel built earlier by this same CI checkout.
+          env -u PYTHONPATH "$sdk_venv/bin/python" -I -m pip --isolated install \
+            --no-index --no-deps dist/*.whl
+          env -u PYTHONPATH "$sdk_venv/bin/python" -I -m pip --isolated check
+          version=$(python -I -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
+          env -u PYTHONPATH "$sdk_venv/bin/python" -I scripts/verify_release_install.py --version "$version"
+          echo 'SDK package checks complete; full monitor readiness is not qualified.'
       - name: Validate monitor tests with explicit optional-dependency skips
         env:
           PYTHONPATH: ops/quant-monitor
