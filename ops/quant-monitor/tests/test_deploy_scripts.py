@@ -2397,6 +2397,31 @@ class WatcherSourceProbeTests(unittest.TestCase):
         finally:
             self.client.TaskClient = original
 
+    def test_linux_ci_import_probe_checks_source_without_invoking_watcher(self):
+        workflow = (self.qas / ".github/workflows/ci.yml").read_text()
+        marker = '\"$pin\" <<\'PY\'\n'
+        self.assertIn(marker, workflow, "Linux package check must import the installed watcher source")
+        body = workflow.split(marker, 1)[1].split("\n          PY\n", 1)[0]
+        tree = ast.parse(textwrap.dedent(body))
+        symbols = next(node.value for node in tree.body if isinstance(node, ast.Assign)
+                       and any(isinstance(target, ast.Name) and target.id == "symbols" for target in node.targets))
+        expected = {
+            "quant_platform_kit.strategy_lifecycle.watch.runner": "dispatch_strategy_watch_findings",
+            "quant_platform_kit.strategy_lifecycle.watch.strategy_watch": "build_strategy_monitoring_finding",
+        }
+        self.assertEqual(ast.literal_eval(symbols), expected)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                name = node.func.id if isinstance(node.func, ast.Name) else getattr(node.func, "attr", "")
+                self.assertNotIn(name, expected.values())
+                self.assertNotIsInstance(node.func, ast.Call, "getattr(...)(...) would invoke a watcher")
+        self.assertIn('distribution("quant-platform-kit")', body)
+        self.assertIn("installed.is_relative_to(prefix)", body)
+        self.assertIn("package.locate_file(relative)", body)
+        self.assertIn("hashlib.sha256(installed.read_bytes())", body)
+        self.assertIn("hashlib.sha256((source / 'src' / relative).read_bytes())", body)
+        self.assertIn('"watcher_invoked": False', body)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -52,8 +52,8 @@ jobs:
           git -C "$qpk" fetch --depth=1 https://github.com/QuantStrategyLab/QuantPlatformKit.git "$pin"
           git -C "$qpk" checkout --detach FETCH_HEAD
           [[ "$(git -C "$qpk" rev-parse HEAD)" == "$pin" ]]
-          # Package compatibility only: the fixed QPK lacks watcher capability.
-          # Full monitor readiness remains refused by the unchanged setup gate.
+          # Package/source imports only; watcher imports do not qualify full
+          # monitor readiness or invoke its issue-writing entrypoints.
           sdk_venv="$RUNNER_TEMP/monitor-sdk-packages-venv"
           python -I -m venv "$sdk_venv"
           env -u PYTHONPATH "$sdk_venv/bin/python" -I -m pip --isolated install \
@@ -68,6 +68,37 @@ jobs:
           env -u PYTHONPATH "$sdk_venv/bin/python" -I -m pip --isolated install \
             --no-index --no-deps dist/*.whl
           env -u PYTHONPATH "$sdk_venv/bin/python" -I -m pip --isolated check
+          env -u PYTHONPATH "$sdk_venv/bin/python" -I - "$build_root" "$pin" <<'PY'
+          import hashlib
+          import importlib
+          from importlib.metadata import distribution
+          import json
+          from pathlib import Path
+          import sys
+          import tomllib
+
+          source = Path(sys.argv[1])
+          prefix = Path(sys.prefix).resolve()
+          package = distribution("quant-platform-kit")
+          if package.version != tomllib.loads((source / "pyproject.toml").read_text())["project"]["version"]:
+              raise ValueError("installed QPK version differs from reviewed archive")
+          symbols = {
+              "quant_platform_kit.strategy_lifecycle.watch.runner": "dispatch_strategy_watch_findings",
+              "quant_platform_kit.strategy_lifecycle.watch.strategy_watch": "build_strategy_monitoring_finding",
+          }
+          for name, symbol in symbols.items():
+              module = importlib.import_module(name)
+              relative = name.replace('.', '/') + '.py'
+              installed = Path(module.__file__).resolve()
+              if (not installed.is_relative_to(prefix)
+                      or installed != Path(package.locate_file(relative)).resolve()
+                      or hashlib.sha256(installed.read_bytes()).digest()
+                      != hashlib.sha256((source / 'src' / relative).read_bytes()).digest()
+                      or not callable(getattr(module, symbol, None))):
+                  raise ValueError("installed watcher entrypoint provenance mismatch")
+          print(json.dumps({"source_pin": sys.argv[2], "installed_watcher_modules_checked": len(symbols),
+                            "watcher_entrypoints_checked": len(symbols), "watcher_invoked": False}, sort_keys=True))
+          PY
           version=$(python -I -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
           env -u PYTHONPATH "$sdk_venv/bin/python" -I scripts/verify_release_install.py --version "$version"
           echo 'SDK package checks complete; full monitor readiness is not qualified.'
