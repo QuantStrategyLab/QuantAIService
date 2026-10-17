@@ -291,7 +291,8 @@ for name in ("ai_service.client", "ai_service.transport"):
             != hashlib.sha256((source / "src" / relative).read_bytes()).digest()):
         raise SystemExit("SDK import provenance mismatch")
 from ai_service.client import TaskClient
-from quant_platform_kit.strategy_lifecycle.watch.runner import run_watcher
+from quant_platform_kit.strategy_lifecycle.watch.runner import dispatch_strategy_watch_findings
+from quant_platform_kit.strategy_lifecycle.watch.strategy_watch import build_strategy_monitoring_finding
 PY
 then
   echo "[setup] approved V2 runtime packages are unavailable; deployment refused" >&2
