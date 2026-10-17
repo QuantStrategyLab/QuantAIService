@@ -1,3 +1,6 @@
+import ast
+import builtins
+import importlib
 import json
 import os
 import re
@@ -2093,8 +2096,8 @@ class SDKDependencySetupTests(unittest.TestCase):
             self.git(repo, "init", "--initial-branch=main")
             self.git(repo, "config", "user.name", "Offline fixture")
             self.git(repo, "config", "user.email", "fixture@example.invalid")
-        # The real pinned QPK has no watch package (E-DEP-C1). Never invent it
-        # to make a full setup pass. This models absence, not a pin qualification.
+        # Deliberately model a missing capability for refusal coverage. Never
+        # invent watcher symbols or treat this fixture as the selected real pin.
         package = self.qpk / "src/quant_platform_kit/strategy_lifecycle"
         package.mkdir(parents=True)
         for directory in (package, package.parent):
@@ -2290,6 +2293,134 @@ class SDKDependencySetupTests(unittest.TestCase):
         self.assertNotIn("QUANT_MONITOR_V2_RUNTIME_READY", step)
         self.assertNotIn("setup_vps_runtime.sh", step)
         self.assertNotRegex(step, r"systemctl|deploy_to_vps|health_cycle\.py|gh auth|gcloud")
+
+
+class WatcherSourceProbeTests(unittest.TestCase):
+    """Import-only source acceptance; no setup/watcher/gh operation is run.
+
+    An explicitly supplied real reviewed checkout is required. Absence is a
+    skip, never a synthetic successful watcher or an installation qualification.
+    This test-only environment variable does not enter the runtime setup path.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        supplied = os.environ.get("QAS_WATCHER_TEST_SOURCE")
+        if not supplied:
+            raise unittest.SkipTest("real reviewed QPK source required for import-only acceptance")
+        cls.qpk = Path(supplied).resolve()
+        cls.expected_pin = "c798d6aa56cfbe6db042b7d6e1d0f7ae3d7d8f54"
+        cls.qas = ROOT.parents[1]
+        head = subprocess.check_output(["/usr/bin/git", "-C", str(cls.qpk), "rev-parse", "HEAD"], text=True).strip()
+        if head != cls.expected_pin:
+            raise RuntimeError("test source is not the reviewed watcher commit")
+        for name in ("__init__.py", "automation_contracts.py", "runner.py", "strategy_watch.py"):
+            relative = "src/quant_platform_kit/strategy_lifecycle/watch/" + name
+            reference = subprocess.check_output(["/usr/bin/git", "-C", str(cls.qpk), "show", head + ":" + relative])
+            if reference != (cls.qpk / relative).read_bytes():
+                raise RuntimeError("reviewed watcher source bytes changed")
+        previous_path = list(sys.path)
+        cls.addClassCleanup(lambda: sys.path.__setitem__(slice(None), previous_path))
+        sys.path[:0] = [str(cls.qpk / "src"), str(cls.qas / "src")]
+        cls.runner = importlib.import_module("quant_platform_kit.strategy_lifecycle.watch.runner")
+        cls.watch = importlib.import_module("quant_platform_kit.strategy_lifecycle.watch.strategy_watch")
+        cls.client = importlib.import_module("ai_service.client")
+        for module, source in ((cls.runner, cls.qpk), (cls.watch, cls.qpk), (cls.client, cls.qas)):
+            if not Path(module.__file__).resolve().is_relative_to(source / "src"):
+                raise RuntimeError("import resolved outside the exact source checkout")
+
+    def probe(self):
+        setup = (ROOT / "scripts/setup_vps_runtime.sh").read_text()
+        marker = '<<\'PY\'\nimport hashlib\n'
+        start = setup.index(marker) + len("<<'PY'\n")
+        body = setup[start:setup.index("\nPY\nthen", start)]
+        nodes = [node for node in ast.parse(body).body if isinstance(node, ast.ImportFrom)
+                 and (node.module == "ai_service.client" or node.module.startswith("quant_platform_kit."))]
+        return nodes, compile(ast.fix_missing_locations(ast.Module(body=nodes, type_ignores=[])), "<actual-setup-imports-only>", "exec")
+
+    def test_pin_is_exact_reviewed_maintenance_source(self):
+        self.assertEqual((ROOT / "qpk-runtime.sha").read_text().strip(), self.expected_pin)
+
+    def test_probe_names_both_actual_entrypoints_and_sdk_only(self):
+        nodes, _ = self.probe()
+        self.assertEqual([(n.module, [a.name for a in n.names]) for n in nodes], [
+            ("ai_service.client", ["TaskClient"]),
+            ("quant_platform_kit.strategy_lifecycle.watch.runner", ["dispatch_strategy_watch_findings"]),
+            ("quant_platform_kit.strategy_lifecycle.watch.strategy_watch", ["build_strategy_monitoring_finding"]),
+        ])
+
+    def test_actual_imports_succeed_without_business_context(self):
+        _, probe = self.probe()
+        namespace = {}
+        exec(probe, namespace)
+        self.assertIs(namespace["TaskClient"], self.client.TaskClient)
+        self.assertIs(namespace["dispatch_strategy_watch_findings"], self.runner.dispatch_strategy_watch_findings)
+        self.assertIs(namespace["build_strategy_monitoring_finding"], self.watch.build_strategy_monitoring_finding)
+        self.assertFalse(hasattr(self.runner, "run_watcher"))
+        self.assertFalse(any(key.startswith("AI_SERVICE_") or key == "QUANT_MONITOR_V2_RUNTIME_READY" for key in os.environ))
+
+    def test_missing_real_package_is_rejected(self):
+        _, probe = self.probe()
+        original = builtins.__import__
+
+        def unavailable(name, *args, **kwargs):
+            if name.startswith("quant_platform_kit.strategy_lifecycle.watch"):
+                raise ModuleNotFoundError("synthetic missing real watch package")
+            return original(name, *args, **kwargs)
+
+        with mock.patch.object(builtins, "__import__", side_effect=unavailable):
+            with self.assertRaisesRegex(ModuleNotFoundError, "synthetic missing real watch package"):
+                exec(probe, {})
+
+    def test_either_actual_symbol_missing_is_rejected(self):
+        _, probe = self.probe()
+        for module, name in ((self.runner, "dispatch_strategy_watch_findings"),
+                             (self.watch, "build_strategy_monitoring_finding")):
+            original = getattr(module, name)
+            with self.subTest(symbol=name):
+                try:
+                    delattr(module, name)
+                    with self.assertRaises(ImportError) as caught:
+                        exec(probe, {})
+                    self.assertIn(name, str(caught.exception))
+                finally:
+                    setattr(module, name, original)
+
+    def test_sdk_task_client_import_remains_required(self):
+        _, probe = self.probe()
+        original = self.client.TaskClient
+        try:
+            delattr(self.client, "TaskClient")
+            with self.assertRaises(ImportError) as caught:
+                exec(probe, {})
+            self.assertIn("TaskClient", str(caught.exception))
+        finally:
+            self.client.TaskClient = original
+
+    def test_linux_ci_import_probe_checks_source_without_invoking_watcher(self):
+        workflow = (self.qas / ".github/workflows/ci.yml").read_text()
+        marker = '\"$pin\" <<\'PY\'\n'
+        self.assertIn(marker, workflow, "Linux package check must import the installed watcher source")
+        body = workflow.split(marker, 1)[1].split("\n          PY\n", 1)[0]
+        tree = ast.parse(textwrap.dedent(body))
+        symbols = next(node.value for node in tree.body if isinstance(node, ast.Assign)
+                       and any(isinstance(target, ast.Name) and target.id == "symbols" for target in node.targets))
+        expected = {
+            "quant_platform_kit.strategy_lifecycle.watch.runner": "dispatch_strategy_watch_findings",
+            "quant_platform_kit.strategy_lifecycle.watch.strategy_watch": "build_strategy_monitoring_finding",
+        }
+        self.assertEqual(ast.literal_eval(symbols), expected)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                name = node.func.id if isinstance(node.func, ast.Name) else getattr(node.func, "attr", "")
+                self.assertNotIn(name, expected.values())
+                self.assertNotIsInstance(node.func, ast.Call, "getattr(...)(...) would invoke a watcher")
+        self.assertIn('distribution("quant-platform-kit")', body)
+        self.assertIn("installed.is_relative_to(prefix)", body)
+        self.assertIn("package.locate_file(relative)", body)
+        self.assertIn("hashlib.sha256(installed.read_bytes())", body)
+        self.assertIn("hashlib.sha256((source / 'src' / relative).read_bytes())", body)
+        self.assertIn('"watcher_invoked": False', body)
 
 
 if __name__ == "__main__":
