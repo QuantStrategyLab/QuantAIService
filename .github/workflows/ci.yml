@@ -112,6 +112,7 @@ jobs:
           bash -n ops/quant-monitor/scripts/adopt_daily_briefing_release.sh
           python -m pytest -q ops/quant-monitor/tests/test_adopt_daily_briefing_release.py ops/quant-monitor/tests/test_install_immutable_release.py ops/quant-monitor/tests/test_runtime_daily_pipeline.py
           python -m pytest -q ops/quant-monitor/tests/test_q04_synthetic_caller.py ops/quant-monitor/tests/test_monitor_fail_closed.py::MonitorFailClosedTests::test_historical_rehearsal_requires_explicit_synthetic_context
+          python -m ruff check ops/quant-monitor/scripts/sync_lifecycle_artifacts.py ops/quant-monitor/tests/test_lifecycle_artifact_sync.py
           # Reuse the verified SDK venv for exactly two synthetic issue-only cases.
           env -i TZ=UTC TMPDIR="$RUNNER_TEMP" "$RUNNER_TEMP/monitor-sdk-packages-venv/bin/python" -I -B - <<'PY'
           import importlib.util
@@ -139,7 +140,21 @@ jobs:
           ], module)
           result = unittest.TextTestRunner(verbosity=2).run(suite)
           print({"tests_run": result.testsRun, "skips": len(result.skipped), "blocked": len(blocked)})
-          raise SystemExit(0 if result.wasSuccessful() and result.testsRun == 2
+          if not (result.wasSuccessful() and result.testsRun == 2 and not result.skipped and not blocked):
+              raise SystemExit(1)
+          path = "ops/quant-monitor/tests/test_lifecycle_artifact_sync.py"
+          spec = importlib.util.spec_from_file_location("artifact_failure_ci_tests", path)
+          assert spec is not None and spec.loader is not None
+          module = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(module)
+          suite = unittest.defaultTestLoader.loadTestsFromNames([
+              "LifecycleArtifactSyncTests.test_main_retains_failed_selected_source_and_still_blocks_health_coverage",
+              "LifecycleArtifactSyncTests.test_failed_source_identity_is_atomic_and_drops_unrelated_material",
+              "LifecycleArtifactSyncTests.test_shared_or_non_artifact_error_never_copies_selected_source",
+          ], module)
+          result = unittest.TextTestRunner(verbosity=2).run(suite)
+          print({"artifact_failure_tests_run": result.testsRun, "skips": len(result.skipped), "blocked": len(blocked)})
+          raise SystemExit(0 if result.wasSuccessful() and result.testsRun == 3
                            and not result.skipped and not blocked else 1)
           PY
       - name: Test Quant deployment controls without VPS access
