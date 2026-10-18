@@ -177,7 +177,7 @@ jobs:
           suite = unittest.defaultTestLoader.loadTestsFromModule(module)
           result = unittest.TextTestRunner(verbosity=2).run(suite)
           print({"atomic_json_tests_run": result.testsRun, "skips": len(result.skipped), "blocked": len(blocked)})
-          raise SystemExit(0 if result.wasSuccessful() and result.testsRun == 6
+          raise SystemExit(0 if result.wasSuccessful() and result.testsRun == 7
                            and not result.skipped and not blocked else 1)
           PY
       - name: Test Quant deployment controls without VPS access
