@@ -157,6 +157,7 @@ jobs:
           if not (result.wasSuccessful() and result.testsRun == 3 and not result.skipped and not blocked):
               raise SystemExit(1)
           import hashlib
+          import os
           from importlib.metadata import distribution
           from pathlib import Path
           import quant_platform_kit.strategy_lifecycle.performance_store as store
