@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from jsonschema import Draft202012Validator, ValidationError
+from referencing.exceptions import Unresolvable
 
 
 class Conflict(ValueError):
@@ -236,7 +237,7 @@ class TaskRuntime:
             if status == 'completed':
                 try:
                     Draft202012Validator(json.loads(row['request'])['output_schema']).validate(output)
-                except (ValidationError, ValueError, TypeError, RecursionError):
+                except (ValidationError, ValueError, TypeError, RecursionError, Unresolvable):
                     status, output, error = 'invalid_output', None, 'output_schema_mismatch'
             self._state(db, task_id, status, output=_json(output), artifacts=_json(artifacts),
                         report_digest=digest, error=error)
@@ -386,7 +387,7 @@ class TaskRuntime:
             try:
                 Draft202012Validator(current['request']['output_schema']).validate(reply.output)
                 output = _json(reply.output)
-            except (ValidationError, ValueError, TypeError, RecursionError):
+            except (ValidationError, ValueError, TypeError, RecursionError, Unresolvable):
                 status, error = 'invalid_output', 'output_schema_mismatch'
         if status == 'failed':
             error = 'provider_run_failed'

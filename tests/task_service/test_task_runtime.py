@@ -2,6 +2,7 @@ import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from unittest.mock import patch
 
 from ai_service.runtime import TaskRuntime, Conflict, NotFound, Policy, ProviderReply
 
@@ -206,6 +207,140 @@ class AgentTaskTests(unittest.TestCase):
         self.runtime.tick()
         with self.assertRaises(PermissionError):
             self.runtime.claim('owner/repo', task['id'], 'reviewer-provider', 'reviewer', 'attempt')
+
+
+class RecordingAPIProvider(CallbackProvider):
+    mode = 'api'
+    callback_driven = False
+
+    def __init__(self):
+        super().__init__()
+        self.polled = []
+
+    def poll(self, handle):
+        self.polled.append(handle['task_id'])
+        return ProviderReply('completed', output={'summary': 'ok'})
+
+
+class SchemaReferenceTests(unittest.TestCase):
+    def setUp(self):
+        RuntimeTests.setUp(self)
+
+    def tearDown(self):
+        RuntimeTests.tearDown(self)
+
+    def _runtime(self, name, *, native):
+        provider = CallbackProvider() if native else RecordingAPIProvider()
+        mode = 'agent' if native else 'api'
+        policy = Policy({mode: 'test'}, {'test': {'test-model'}})
+        runtime = TaskRuntime(self.path.with_name(name + '.sqlite'), {'test': provider},
+                              {'owner/repo': policy})
+        return runtime, provider, {**self.request, 'mode': mode}
+
+    def _unresolved_schemas(self):
+        return ({'$ref': '#/$defs/missing'}, {'$ref': '#missing-anchor'},
+                {'$dynamicRef': '#missing-anchor'})
+
+    def test_native_unresolved_reference_is_terminal_and_report_retry_is_idempotent(self):
+        for i, schema in enumerate(self._unresolved_schemas()):
+            with self.subTest(schema=schema):
+                runtime, provider, request = self._runtime(f'native-{i}', native=True)
+                task = runtime.submit('owner/repo', 'bad', {**request, 'output_schema': schema})
+                runtime.tick()
+                runtime.claim('owner/repo', task['id'], 'test', 'bot', 'attempt')
+                before = len(runtime.events('owner/repo', task['id']))
+                result = runtime.report('owner/repo', task['id'], 'test', 'bot', 'attempt',
+                                        1, 'completed', {'summary': 'ok'})
+                self.assertEqual(result['status'], 'invalid_output')
+                self.assertEqual(result['error'], 'output_schema_mismatch')
+                self.assertIsNone(result['output'])
+                self.assertEqual(len(runtime.events('owner/repo', task['id'])), before + 1)
+                self.assertEqual(runtime.report('owner/repo', task['id'], 'test', 'bot',
+                                                'attempt', 1, 'completed', {'summary': 'ok'}), result)
+                self.assertEqual(len(runtime.events('owner/repo', task['id'])), before + 1)
+                with self.assertRaises(Conflict):
+                    runtime.report('owner/repo', task['id'], 'test', 'bot', 'attempt',
+                                   1, 'completed', {'summary': 'changed'})
+                runtime.tick()
+                self.assertEqual(provider.calls, 1)
+                self.assertEqual(runtime.get('owner/repo', task['id']), result)
+
+    def test_api_unresolved_reference_does_not_block_later_valid_task(self):
+        for i, schema in enumerate(self._unresolved_schemas()):
+            with self.subTest(schema=schema):
+                runtime, provider, request = self._runtime(f'api-{i}', native=False)
+                with patch('ai_service.runtime.time.time', return_value=100.0):
+                    bad = runtime.submit('owner/repo', 'bad', {**request, 'output_schema': schema})
+                with patch('ai_service.runtime.time.time', return_value=101.0):
+                    good = runtime.submit('owner/repo', 'good', request)
+                with patch('ai_service.runtime.time.time', return_value=102.0):
+                    runtime.tick()
+                    runtime.tick()
+                    bad_result = runtime.get('owner/repo', bad['id'])
+                    self.assertEqual(bad_result['status'], 'invalid_output')
+                    self.assertEqual(bad_result['error'], 'output_schema_mismatch')
+                    self.assertIsNone(bad_result['output'])
+                    self.assertEqual(runtime.get('owner/repo', good['id'])['status'], 'completed')
+                    self.assertEqual(provider.polled, [bad['id'], good['id']])
+                    events = runtime.events('owner/repo', bad['id'])
+                    runtime.tick()
+                    self.assertEqual(runtime.get('owner/repo', bad['id']), bad_result)
+                    self.assertEqual(runtime.events('owner/repo', bad['id']), events)
+                    self.assertEqual(provider.polled, [bad['id'], good['id']])
+                    self.assertEqual(provider.calls, 2)
+
+    def test_valid_local_references_still_complete_on_both_paths(self):
+        for native in (True, False):
+            for i, (keyword, reference) in enumerate((('$ref', '#/$defs/result'),
+                                                     ('$ref', '#result'),
+                                                     ('$dynamicRef', '#dynamic-result'))):
+                with self.subTest(native=native, reference=reference):
+                    runtime, _, request = self._runtime(f'valid-{native}-{i}', native=native)
+                    schema = {'$defs': {'result': {**self.request['output_schema'],
+                                                  '$anchor': 'result',
+                                                  '$dynamicAnchor': 'dynamic-result'}},
+                              keyword: reference}
+                    task = runtime.submit('owner/repo', 'valid', {**request, 'output_schema': schema})
+                    runtime.tick()
+                    if native:
+                        runtime.claim('owner/repo', task['id'], 'test', 'bot', 'attempt')
+                        runtime.report('owner/repo', task['id'], 'test', 'bot', 'attempt',
+                                       1, 'completed', {'summary': 'ok'})
+                    else:
+                        runtime.tick()
+                    result = runtime.get('owner/repo', task['id'])
+                    self.assertEqual(result['status'], 'completed')
+                    self.assertEqual(result['output'], {'summary': 'ok'})
+
+    def test_unrelated_validation_errors_are_not_swallowed(self):
+        for native in (True, False):
+            with self.subTest(native=native):
+                runtime, _, request = self._runtime(f'fault-{native}', native=native)
+                task = runtime.submit('owner/repo', 'valid', request)
+                runtime.tick()
+                if native:
+                    runtime.claim('owner/repo', task['id'], 'test', 'bot', 'attempt')
+                before = runtime.get('owner/repo', task['id'])
+                events = runtime.events('owner/repo', task['id'])
+                with patch('ai_service.runtime.Draft202012Validator.validate',
+                           side_effect=RuntimeError('synthetic validator fault')):
+                    with self.assertRaisesRegex(RuntimeError, 'synthetic validator fault'):
+                        if native:
+                            runtime.report('owner/repo', task['id'], 'test', 'bot', 'attempt',
+                                           1, 'completed', {'summary': 'ok'})
+                        else:
+                            runtime.tick()
+                self.assertEqual(runtime.get('owner/repo', task['id']), before)
+                self.assertEqual(runtime.events('owner/repo', task['id']), events)
+
+    def test_external_references_remain_rejected_before_submission(self):
+        for keyword in ('$ref', '$dynamicRef'):
+            with self.subTest(keyword=keyword):
+                with self.assertRaisesRegex(ValueError, 'external schema references are forbidden'):
+                    self.runtime.submit('owner/repo', keyword,
+                                        {**self.request, 'output_schema':
+                                         {keyword: 'https://example.invalid/private-schema'}})
+        self.assertEqual(self.provider.calls, 0)
 
 
 class TaskProfileTests(unittest.TestCase):
