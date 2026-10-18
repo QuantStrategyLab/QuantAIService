@@ -113,7 +113,7 @@ jobs:
           python -m pytest -q ops/quant-monitor/tests/test_adopt_daily_briefing_release.py ops/quant-monitor/tests/test_install_immutable_release.py ops/quant-monitor/tests/test_runtime_daily_pipeline.py
           python -m pytest -q ops/quant-monitor/tests/test_q04_synthetic_caller.py ops/quant-monitor/tests/test_monitor_fail_closed.py::MonitorFailClosedTests::test_historical_rehearsal_requires_explicit_synthetic_context
           python -m ruff check ops/quant-monitor/scripts/sync_lifecycle_artifacts.py ops/quant-monitor/tests/test_lifecycle_artifact_sync.py
-          # Reuse the verified SDK venv for exactly two synthetic issue-only cases.
+          # Reuse the verified SDK venv for guarded monitor and persistence regressions.
           env -i TZ=UTC TMPDIR="$RUNNER_TEMP" "$RUNNER_TEMP/monitor-sdk-packages-venv/bin/python" -I -B - <<'PY'
           import importlib.util
           import sys
@@ -154,7 +154,30 @@ jobs:
           ], module)
           result = unittest.TextTestRunner(verbosity=2).run(suite)
           print({"artifact_failure_tests_run": result.testsRun, "skips": len(result.skipped), "blocked": len(blocked)})
-          raise SystemExit(0 if result.wasSuccessful() and result.testsRun == 3
+          if not (result.wasSuccessful() and result.testsRun == 3 and not result.skipped and not blocked):
+              raise SystemExit(1)
+          import hashlib
+          from importlib.metadata import distribution
+          from pathlib import Path
+          import quant_platform_kit.strategy_lifecycle.performance_store as store
+          qpk = Path(os.environ["TMPDIR"]) / "monitor-sdk-qpk"
+          installed = Path(store.__file__).resolve()
+          package = distribution("quant-platform-kit")
+          relative = "quant_platform_kit/strategy_lifecycle/performance_store.py"
+          if (not installed.is_relative_to(Path(sys.prefix).resolve())
+                  or installed != Path(package.locate_file(relative)).resolve()
+                  or hashlib.sha256(installed.read_bytes()).digest()
+                  != hashlib.sha256((qpk / "src" / relative).read_bytes()).digest()):
+              raise ValueError("installed atomic writer provenance mismatch")
+          print({"atomic_writer_module_checked": 1})
+          spec = importlib.util.spec_from_file_location("atomic_writer_ci_tests", qpk / "tests/test_lifecycle_atomic_json.py")
+          assert spec is not None and spec.loader is not None
+          module = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(module)
+          suite = unittest.defaultTestLoader.loadTestsFromModule(module)
+          result = unittest.TextTestRunner(verbosity=2).run(suite)
+          print({"atomic_json_tests_run": result.testsRun, "skips": len(result.skipped), "blocked": len(blocked)})
+          raise SystemExit(0 if result.wasSuccessful() and result.testsRun == 6
                            and not result.skipped and not blocked else 1)
           PY
       - name: Test Quant deployment controls without VPS access
