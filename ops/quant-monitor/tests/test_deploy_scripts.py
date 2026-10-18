@@ -2287,12 +2287,14 @@ class SDKDependencySetupTests(unittest.TestCase):
     def test_sdk_package_ci_cannot_invoke_full_monitor_readiness(self):
         workflow = (ROOT.parents[1] / ".github/workflows/ci.yml").read_text()
         blocks = re.findall(r"(?m)^        run: \|\n((?:^          .*\n|^\n)*)", workflow)
-        package_steps = [block for block in blocks if 'monitor-sdk-qpk' in block]
+        sdk_blocks = [block for block in blocks if 'monitor-sdk-qpk' in block]
+        self.assertEqual(len(sdk_blocks), 2)
+        package_steps = [block for block in sdk_blocks if 'git -C "$qpk" fetch' in block]
         self.assertEqual(len(package_steps), 1)
-        step = package_steps[0]
-        self.assertNotIn("QUANT_MONITOR_V2_RUNTIME_READY", step)
-        self.assertNotIn("setup_vps_runtime.sh", step)
-        self.assertNotRegex(step, r"systemctl|deploy_to_vps|health_cycle\.py|gh auth|gcloud")
+        for step in sdk_blocks:
+            self.assertNotIn("QUANT_MONITOR_V2_RUNTIME_READY", step)
+            self.assertNotIn("setup_vps_runtime.sh", step)
+            self.assertNotRegex(step, r"systemctl|deploy_to_vps|health_cycle\.py|gh auth|gcloud")
 
 
 class WatcherSourceProbeTests(unittest.TestCase):
