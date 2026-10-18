@@ -101,12 +101,26 @@ class LifecycleArtifactError(RuntimeError):
         http_status: int | None = None,
         rate_limit_reset_at: str | None = None,
         reason_code: str | None = None,
+        artifact_identity: Mapping[str, Any] | None = None,
     ) -> None:
         super().__init__(message)
         self.code = code
         self.http_status = http_status
         self.rate_limit_reset_at = rate_limit_reset_at
         self.reason_code = reason_code or code
+        self.artifact_identity: dict[str, Any] = {}
+        if code == "artifact_invalid" and isinstance(artifact_identity, Mapping):
+            artifact_id = artifact_identity.get("artifact_id")
+            run_id = artifact_identity.get("run_id")
+            head_sha = artifact_identity.get("head_sha")
+            if (
+                type(artifact_id) is int and artifact_id > 0
+                and type(run_id) is int and run_id > 0
+                and isinstance(head_sha, str) and _SHA_PATTERN.fullmatch(head_sha)
+            ):
+                self.artifact_identity = {
+                    "artifact_id": artifact_id, "run_id": run_id, "head_sha": head_sha,
+                }
 
 
 def _parse_timestamp(value: Any) -> datetime:
@@ -680,6 +694,9 @@ def _domain_error_status(
             and _SAFE_RESET_AT_RE.fullmatch(exc.rate_limit_reset_at)
         ):
             payload["rate_limit_reset_at"] = exc.rate_limit_reset_at
+        if not shared_root_cause and exc.artifact_identity:
+            payload.update({key: exc.artifact_identity[key]
+                            for key in ("artifact_id", "run_id", "head_sha")})
     else:
         payload = {
             "status": "error",
@@ -967,6 +984,11 @@ def _sync_domain(
                 "lifecycle artifact version validation failed",
                 code=exc.code,
                 reason_code=stage_reason,
+                artifact_identity={
+                    "artifact_id": selected["id"],
+                    "run_id": selected["_trusted_run"]["id"],
+                    "head_sha": selected["_trusted_run"]["head_sha"],
+                },
             ) from exc
         raise
     try:
@@ -982,6 +1004,11 @@ def _sync_domain(
                 "lifecycle artifact activation failed",
                 code=exc.code,
                 reason_code="artifact_activation_failed",
+                artifact_identity={
+                    "artifact_id": selected["id"],
+                    "run_id": selected["_trusted_run"]["id"],
+                    "head_sha": selected["_trusted_run"]["head_sha"],
+                },
             ) from exc
         raise
     created_at = _parse_timestamp(selected["created_at"])

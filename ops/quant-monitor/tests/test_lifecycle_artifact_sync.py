@@ -712,6 +712,90 @@ class LifecycleArtifactSyncTests(unittest.TestCase):
                 "artifact_activation_failed",
             )
 
+    def test_main_retains_failed_selected_source_and_still_blocks_health_coverage(self) -> None:
+        artifact = self._artifact(12, 34, self.now - timedelta(hours=1))
+
+        def gh_json(argv):
+            route = argv[0]
+            if route.endswith("/actions/artifacts?per_page=100"):
+                return {"artifacts": [artifact]}
+            if route.endswith("/actions/runs/34/jobs?per_page=100"):
+                return self._jobs()
+            if route.endswith("/actions/runs/34"):
+                return self._run(34)
+            raise AssertionError("unexpected synthetic route")
+
+        for stage, reason in (
+            ("download", "artifact_version_validation_failed"),
+            ("cache", "stored_artifact_validation_failed"),
+            ("activation", "artifact_activation_failed"),
+        ):
+            with self.subTest(stage=stage), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                if stage == "cache":
+                    (root / "data/lifecycle-artifacts/versions/us_equity/12").mkdir(parents=True)
+                error = SYNC.LifecycleArtifactError("private/path must not appear")
+                load = patch.object(SYNC, "_load_or_download_version", **(
+                    {"return_value": (root / "version", {"profiles": []})}
+                    if stage == "activation" else {"side_effect": error}
+                ))
+                with (
+                    patch.dict(os.environ, {"QUANT_MONITOR_ROOT": str(root)}, clear=True),
+                    patch.object(SYNC, "_run_gh", side_effect=gh_json),
+                    patch.object(SYNC, "datetime", wraps=datetime) as clock,
+                    load,
+                    patch.object(SYNC, "activate_version", side_effect=error) as activate,
+                    patch("builtins.print"),
+                ):
+                    clock.now.return_value = self.now
+                    self.assertEqual(SYNC.main(["--domain", "us_equity"]), 0)
+                payload = json.loads((root / "data/lifecycle-artifacts/status.json").read_text())
+                status = payload["domains"]["us_equity"]
+                self.assertFalse(payload["ok"])
+                self.assertEqual(status["status"], "error")
+                self.assertEqual(status["reason_code"], reason)
+                self.assertEqual(
+                    {key: status[key] for key in ("artifact_id", "run_id", "head_sha")},
+                    {"artifact_id": 12, "run_id": 34, "head_sha": "a" * 40},
+                )
+                self.assertNotIn("private/path", json.dumps(payload))
+                if stage != "activation":
+                    activate.assert_not_called()
+                health = _load_script("health_cycle")
+                profiles, revisions, _as_of, errors, _unconfigured = health._load_expected_coverage(
+                    root, domains=("us_equity",), now=self.now,
+                )
+                self.assertEqual((profiles, revisions), ({}, {}))
+                self.assertIn("us_equity", errors)
+
+    def test_failed_source_identity_is_atomic_and_drops_unrelated_material(self) -> None:
+        good = {"artifact_id": 12, "run_id": 34, "head_sha": "a" * 40}
+        for identity in (
+            {"artifact_id": 12}, {**good, "artifact_id": True},
+            {**good, "run_id": 0}, {**good, "head_sha": "private/path"},
+        ):
+            with self.subTest(identity=identity):
+                status = SYNC._domain_error_status(SYNC.LifecycleArtifactError(
+                    "private/path", artifact_identity=identity,
+                ))
+                self.assertTrue(set(good).isdisjoint(status))
+                self.assertNotIn("private/path", json.dumps(status))
+        status = SYNC._domain_error_status(SYNC.LifecycleArtifactError(
+            "private/path", artifact_identity={**good, "token": "private/path"},
+        ))
+        self.assertEqual({key: status[key] for key in good}, good)
+        self.assertNotIn("token", status)
+        self.assertNotIn("private/path", json.dumps(status))
+
+    def test_shared_or_non_artifact_error_never_copies_selected_source(self) -> None:
+        identity = {"artifact_id": 12, "run_id": 34, "head_sha": "a" * 40}
+        for code, shared in (("github_api_rate_limit", None), ("artifact_invalid", "github_api_rate_limit")):
+            with self.subTest(code=code, shared=shared):
+                status = SYNC._domain_error_status(SYNC.LifecycleArtifactError(
+                    "private/path", code=code, artifact_identity=identity,
+                ), shared_root_cause=shared)
+                self.assertTrue(set(identity).isdisjoint(status))
+
     def test_unexpected_domain_error_remains_safe_and_generic(self) -> None:
         status = SYNC._domain_error_status(ValueError("secret path and content"))
         self.assertEqual(status["code"], "artifact_sync_unexpected")
