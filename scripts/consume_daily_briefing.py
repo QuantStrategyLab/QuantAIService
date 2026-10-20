@@ -662,11 +662,11 @@ def main(argv: list[str] | None = None, *, summary_context=None) -> int:
     if args.ai_summary:
         payload["ai_summary"] = summarize_briefing(result, dry_run=args.dry_run, summary_context=summary_context)
     if args.dual_review:
-        from quant_platform_kit.strategy_lifecycle.task_review import review_material
         import hashlib
         material = {"summary_reports": result.summary_reports, "day": args.day, "advisory_only": True}
         identity = hashlib.sha256(json.dumps(material, sort_keys=True).encode()).hexdigest()
         try:
+            from quant_platform_kit.strategy_lifecycle.task_review import review_material
             review = review_material(material, operation_id="briefing-review:" + identity,
                                      required_roles=("primary", "secondary", "verification"))
         except Exception:

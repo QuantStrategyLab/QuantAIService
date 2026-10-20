@@ -1,11 +1,105 @@
 from __future__ import annotations
 
+import builtins
+import hashlib
 import json
 from pathlib import Path
 import tempfile
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
+
+import pytest
 
 from scripts.consume_daily_briefing import main
+
+
+@pytest.mark.parametrize("error_type", [ModuleNotFoundError, ImportError])
+def test_dual_review_missing_optional_backend_fails_closed(tmp_path, capsys, error_type):
+    (tmp_path / "us_equity.json").write_text(
+        json.dumps({"domain": "us_equity", "ok": True, "strategies": []}),
+        encoding="utf-8",
+    )
+    original_import = builtins.__import__
+
+    def import_without_review(name, *args, **kwargs):
+        if name == "quant_platform_kit.strategy_lifecycle.task_review":
+            raise error_type("synthetic private import detail")
+        return original_import(name, *args, **kwargs)
+
+    with (
+        patch("builtins.__import__", side_effect=import_without_review),
+        patch("scripts.consume_daily_briefing.dispatch_briefing_result") as dispatch,
+    ):
+        code = main(["--report-dir", str(tmp_path), "--dual-review"])
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert code == 2
+    assert payload["dual_review"] == {
+        "schema": "quant_monitor.briefing_review.v2",
+        "review": {"status": "unavailable", "advisory_only": True},
+        "disagreements": True,
+        "advisory_only": True,
+        "execution_authority_granted": False,
+    }
+    assert "dual_review_disagreement" in captured.err
+    assert "synthetic private import detail" not in captured.out + captured.err
+    dispatch.assert_not_called()
+
+
+def test_dual_review_available_backend_preserves_request(tmp_path, capsys):
+    (tmp_path / "us_equity.json").write_text(
+        json.dumps({"domain": "us_equity", "ok": True, "strategies": []}),
+        encoding="utf-8",
+    )
+    review_material = Mock(return_value={"status": "completed", "outcome": "agree_approve"})
+    backend = SimpleNamespace(review_material=review_material)
+    original_import = builtins.__import__
+
+    def import_with_review(name, *args, **kwargs):
+        if name == "quant_platform_kit.strategy_lifecycle.task_review":
+            return backend
+        return original_import(name, *args, **kwargs)
+
+    with (
+        patch("builtins.__import__", side_effect=import_with_review),
+        patch("scripts.consume_daily_briefing.dispatch_briefing_result") as dispatch,
+    ):
+        code = main(["--report-dir", str(tmp_path), "--day", "2026-10-20", "--dual-review"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 0
+    review_material.assert_called_once()
+    material = review_material.call_args.args[0]
+    assert material == {"summary_reports": [{}], "day": "2026-10-20", "advisory_only": True}
+    assert review_material.call_args.kwargs == {
+        "operation_id": "briefing-review:" + hashlib.sha256(
+            json.dumps(material, sort_keys=True).encode()
+        ).hexdigest(),
+        "required_roles": ("primary", "secondary", "verification"),
+    }
+    assert payload["dual_review"]["disagreements"] is False
+    assert payload["dual_review"]["execution_authority_granted"] is False
+    dispatch.assert_not_called()
+
+
+def test_dual_review_not_requested_never_imports_backend(tmp_path, capsys):
+    (tmp_path / "us_equity.json").write_text(
+        json.dumps({"domain": "us_equity", "ok": True, "strategies": []}),
+        encoding="utf-8",
+    )
+    original_import = builtins.__import__
+
+    def reject_review_import(name, *args, **kwargs):
+        if name == "quant_platform_kit.strategy_lifecycle.task_review":
+            raise AssertionError("unrequested review backend import")
+        return original_import(name, *args, **kwargs)
+
+    with patch("builtins.__import__", side_effect=reject_review_import):
+        code = main(["--report-dir", str(tmp_path)])
+
+    assert code == 0
+    assert "dual_review" not in json.loads(capsys.readouterr().out)
 
 
 def _write_critical_report(report_dir: Path) -> None:
