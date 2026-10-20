@@ -13,6 +13,238 @@ import pytest
 from scripts.consume_daily_briefing import main
 
 
+# Native Q02 tests use a real local TaskRuntime and SDK, never a provider call.
+class _BriefingTrigger:
+    mode = "agent"
+    callback_driven = True
+
+    def submit(self, request, *, task_id, owner):
+        return {"task_id": task_id, "acceptance": "synthetic-only"}
+
+    def cancel(self, handle):
+        return None
+
+
+class _BriefingTransport:
+    def __init__(self, root):
+        import time
+        from ai_service.runtime import Policy, TaskRuntime
+        self.project = "QuantStrategyLab/QuantAIService"
+        self.runtime = TaskRuntime(root / "q02.sqlite", {
+            "dot": _BriefingTrigger(), "grok": _BriefingTrigger(),
+        }, {self.project: Policy(
+            {"agent:primary": "dot", "agent:secondary": "grok", "agent:verification": "dot"},
+            {"dot": {"synthetic-q02"}, "grok": {"synthetic-q02"}},
+        )})
+        self.clock = [time.time()]
+        self.calls = []
+        self.readback = lambda value: value
+        self.complete = True
+        self.lose_submit = False
+        self.claims = []
+
+    def request(self, url, *, method, headers, body):
+        from urllib.parse import urlsplit
+        from ai_service.transport import HttpReply
+        assert headers["Authorization"] == "Bearer synthetic-q02"
+        path = urlsplit(url).path
+        data = json.loads(body) if body else None
+        self.calls.append((method, path, headers.get("Idempotency-Key")))
+        if path == "/v1/tasks" and method == "POST":
+            record = self.runtime.submit(self.project, headers["Idempotency-Key"], data)
+            self.runtime.tick()
+            if self.complete:
+                role = data["profile"]
+                claimed = self.runtime.claim(
+                    self.project, record["id"], record["provider"], "q02-" + role,
+                    "q02-attempt-" + role,
+                )
+                self.claims.append(claimed)
+                self.runtime.report(
+                    self.project, record["id"], record["provider"], claimed["worker"],
+                    claimed["attempt"], claimed["revision"], "completed",
+                    {"status": "completed", "outcome": "agree_approve"},
+                )
+            record = self.runtime.get(self.project, record["id"])
+            if self.lose_submit:
+                raise TimeoutError("synthetic private submit result")
+        elif path.endswith("/cancel"):
+            record = self.runtime.cancel(self.project, path.split("/")[-2])
+        else:
+            record = self.runtime.get(self.project, path.rsplit("/", 1)[-1])
+        return HttpReply(200, json.dumps(self.readback(record)).encode())
+
+
+def _native_briefing_context(tmp_path):
+    from ai_service.client import TaskClient
+    transport = _BriefingTransport(tmp_path)
+    state = tmp_path / "native-state"
+    state.mkdir(mode=0o700)
+    return {
+        "synthetic_only": True,
+        "client": TaskClient("https://q02.invalid", "synthetic-q02", transport=transport),
+        "project": transport.project,
+        "roles": {role: {"provider": provider, "model": "synthetic-q02", "profile": role,
+                         "worker": "q02-" + role}
+                  for role, provider in (("primary", "dot"), ("secondary", "grok"), ("verification", "dot"))},
+        "state_path": state / "briefing.jsonl",
+        "deadline": transport.clock[0] + 60,
+        "now": lambda: transport.clock[0],
+    }, transport
+
+
+def _call_native_briefing(tmp_path, context):
+    report = tmp_path / "reports"
+    report.mkdir(exist_ok=True)
+    (report / "us_equity.json").write_text(
+        json.dumps({"domain": "us_equity", "ok": True, "strategies": []}),
+        encoding="utf-8",
+    )
+    return main(["--report-dir", str(report), "--day", "2026-10-20", "--dual-review"],
+                review_context=context)
+
+
+def test_native_briefing_three_independent_roles_and_original_schema(tmp_path, capsys):
+    context, transport = _native_briefing_context(tmp_path)
+    with patch("builtins.__import__", wraps=builtins.__import__) as imports:
+        assert _call_native_briefing(tmp_path, context) == 0
+    assert not any(call.args[0] == "quant_platform_kit.strategy_lifecycle.task_review"
+                   for call in imports.call_args_list)
+    payload = json.loads(capsys.readouterr().out)["dual_review"]
+    assert payload == {
+        "schema": "quant_monitor.briefing_review.v2",
+        "review": {"status": "completed", "outcome": "agree_approve"},
+        "disagreements": False, "advisory_only": True, "execution_authority_granted": False,
+    }
+    assert len({r["id"] for r in transport.claims}) == 3
+    assert len({(r["worker"], r["attempt"]) for r in transport.claims}) == 3
+    assert {r["provider"] for r in transport.claims} == {"dot", "grok"}
+    assert len({json.dumps(r["request"], sort_keys=True) for r in transport.claims}) == 3
+    assert _call_native_briefing(tmp_path, context) == 0
+    capsys.readouterr()
+    assert len([c for c in transport.calls if c[:2] == ("POST", "/v1/tasks")]) == 3
+    assert context["state_path"].stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.parametrize("field,value", [
+    ("owner", "Pigbibi/PhotoStory"), ("provider", "other-provider"),
+    ("worker", "q02-other-worker"), ("revision", 2), ("revision", True),
+    ("attempt", ""), ("request", {}), ("output", {"status": "completed"}),
+    ("status", "cancel_requested"),
+])
+def test_native_briefing_wrong_identity_or_output_never_approves(tmp_path, capsys, field, value):
+    context, transport = _native_briefing_context(tmp_path)
+    transport.readback = lambda record: {**record, field: value}
+    assert _call_native_briefing(tmp_path, context) == 2
+    payload = json.loads(capsys.readouterr().out)["dual_review"]
+    assert payload["disagreements"] and payload["execution_authority_granted"] is False
+    before = len(transport.calls)
+    assert _call_native_briefing(tmp_path, context) == 2
+    capsys.readouterr()
+    assert len(transport.calls) == before
+
+
+def test_native_briefing_unknown_survives_new_context_and_never_resubmits(tmp_path, capsys):
+    context, transport = _native_briefing_context(tmp_path)
+    transport.lose_submit = True
+    assert _call_native_briefing(tmp_path, context) == 2
+    capsys.readouterr()
+    calls = list(transport.calls)
+    assert _call_native_briefing(tmp_path, dict(context)) == 2
+    capsys.readouterr()
+    assert transport.calls == calls
+    assert len(transport.claims) == 1
+
+
+def test_native_briefing_pending_then_expired_cancels_once_without_new_tasks(tmp_path, capsys):
+    context, transport = _native_briefing_context(tmp_path)
+    transport.complete = False
+    assert _call_native_briefing(tmp_path, context) == 2
+    capsys.readouterr()
+    assert len([c for c in transport.calls if c[:2] == ("POST", "/v1/tasks")]) == 3
+    transport.clock[0] = context["deadline"] + 1
+    assert _call_native_briefing(tmp_path, context) == 2
+    capsys.readouterr()
+    cancels = [c for c in transport.calls if c[1].endswith("/cancel")]
+    assert len(cancels) == 3
+    assert _call_native_briefing(tmp_path, context) == 2
+    capsys.readouterr()
+    assert len([c for c in transport.calls if c[1].endswith("/cancel")]) == 3
+    assert len([c for c in transport.calls if c[:2] == ("POST", "/v1/tasks")]) == 3
+
+
+def test_native_briefing_material_or_binding_drift_and_attempt_change_block(tmp_path, capsys):
+    context, transport = _native_briefing_context(tmp_path)
+    assert _call_native_briefing(tmp_path, context) == 0
+    capsys.readouterr()
+    calls = len(transport.calls)
+    changed = {**context, "roles": {**context["roles"], "secondary": {
+        **context["roles"]["secondary"], "worker": "replacement-worker"}}}
+    assert _call_native_briefing(tmp_path, changed) == 2
+    capsys.readouterr()
+    assert len(transport.calls) == calls
+    transport.readback = lambda record: {**record, "attempt": "another-attempt"}
+    assert _call_native_briefing(tmp_path, context) == 2
+    capsys.readouterr()
+
+
+def test_native_briefing_no_flag_and_non_synthetic_context_make_no_native_call(tmp_path, capsys):
+    context, transport = _native_briefing_context(tmp_path)
+    context["synthetic_only"] = False
+    assert _call_native_briefing(tmp_path, context) == 2
+    capsys.readouterr()
+    assert transport.calls == []
+    assert main(["--report-dir", str(tmp_path / "reports")], review_context=context) == 0
+    capsys.readouterr()
+    assert transport.calls == []
+
+
+def test_native_briefing_input_drift_and_mid_submit_timeout_never_create_replacement(tmp_path, capsys):
+    context, transport = _native_briefing_context(tmp_path)
+    transport.readback = lambda record: (transport.clock.__setitem__(0, context['deadline'] + 1) or record)
+    assert _call_native_briefing(tmp_path, context) == 2
+    capsys.readouterr()
+    calls = list(transport.calls)
+    assert len([c for c in calls if c[:2] == ('POST', '/v1/tasks')]) == 1
+    assert _call_native_briefing(tmp_path, context) == 2
+    capsys.readouterr()
+    assert transport.calls == calls
+    assert main(['--report-dir', str(tmp_path / 'reports'), '--day', '2026-10-21', '--dual-review'],
+                review_context=context) == 2
+    capsys.readouterr()
+    assert transport.calls == calls
+
+
+def test_native_briefing_pending_claim_is_bound_before_completion(tmp_path, capsys):
+    context, transport = _native_briefing_context(tmp_path)
+    transport.complete = False
+    assert _call_native_briefing(tmp_path, context) == 2
+    capsys.readouterr()
+    for role, route in context['roles'].items():
+        with transport.runtime.connection(read_only=True) as db:
+            task_id = next(row['id'] for row in db.execute('SELECT id,request FROM tasks')
+                           if json.loads(row['request'])['profile'] == role)
+        transport.runtime.claim(context['project'], task_id, route['provider'], route['worker'], 'pending-' + role)
+    assert _call_native_briefing(tmp_path, context) == 2
+    capsys.readouterr()
+    before = len([c for c in transport.calls if c[:2] == ('POST', '/v1/tasks')])
+    transport.readback = lambda record: {**record, 'attempt': 'different-claimed-attempt'}
+    assert _call_native_briefing(tmp_path, context) == 2
+    capsys.readouterr()
+    assert len([c for c in transport.calls if c[:2] == ('POST', '/v1/tasks')]) == before == 3
+
+
+def test_native_briefing_completed_material_drift_is_not_a_new_operation(tmp_path, capsys):
+    context, transport = _native_briefing_context(tmp_path)
+    assert _call_native_briefing(tmp_path, context) == 0
+    capsys.readouterr()
+    calls = list(transport.calls)
+    assert main(['--report-dir', str(tmp_path / 'reports'), '--day', '2026-10-21', '--dual-review'],
+                review_context=context) == 2
+    capsys.readouterr()
+    assert transport.calls == calls
+
+
 @pytest.mark.parametrize("error_type", [ModuleNotFoundError, ImportError])
 def test_dual_review_missing_optional_backend_fails_closed(tmp_path, capsys, error_type):
     (tmp_path / "us_equity.json").write_text(

@@ -545,7 +545,211 @@ _SUMMARY_FAILURE_DETAILS = {
 }
 
 
-def main(argv: list[str] | None = None, *, summary_context=None) -> int:
+
+def _native_briefing_review(material, operation_id, context):
+    """Q02's explicit synthetic native path; no live transport or retry fallback."""
+    unavailable = {"status": "unavailable", "advisory_only": True}
+    try:
+        import fcntl
+        import hashlib
+        import math
+        import stat
+        from urllib.parse import urlsplit
+        from ai_service.client import TaskClient
+        from ai_service.transport import PublicHTTPS
+
+        def encoded(value):
+            return json.dumps(value, ensure_ascii=False, sort_keys=True,
+                              allow_nan=False, separators=(",", ":")).encode()
+
+        def digest(value):
+            return hashlib.sha256(encoded(value)).hexdigest()
+
+        def number(value):
+            return type(value) in (int, float) and math.isfinite(value)
+
+        roles = ("primary", "secondary", "verification")
+        client, routes = context["client"], context["roles"]
+        path, deadline, now = context["state_path"], context["deadline"], context["now"]
+        if (context.get("synthetic_only") is not True
+                or context["project"] != "QuantStrategyLab/QuantAIService"
+                or not isinstance(client, TaskClient) or isinstance(client.transport, PublicHTTPS)
+                or not isinstance(client.token, str) or not client.token.startswith("synthetic-")
+                or not (urlsplit(client.resource).hostname or "").endswith(".invalid")
+                or set(routes) != set(roles) or not number(deadline) or not number(now())
+                or not isinstance(path, Path) or path.resolve() != path
+                or stat.S_IMODE(path.parent.stat().st_mode) != 0o700):
+            return unavailable
+        for role, provider in zip(roles, ("dot", "grok", "dot")):
+            route = routes[role]
+            if (set(route) != {"provider", "model", "profile", "worker"}
+                    or route["provider"] != provider
+                    or any(not isinstance(value, str) or not value or len(value) > 200
+                           for value in route.values())):
+                return unavailable
+        if len({route["worker"] for route in routes.values()}) != 3:
+            return unavailable
+        schema = {"type": "object", "additionalProperties": False,
+                  "required": ["status", "outcome"],
+                  "properties": {"status": {"const": "completed"},
+                                 "outcome": {"const": "agree_approve"}}}
+        material_sha = hashlib.sha256(json.dumps(material, sort_keys=True).encode()).hexdigest()
+        if operation_id != "briefing-review:" + material_sha:
+            return unavailable
+        requests = {role: {
+            "mode": "agent", "profile": routes[role]["profile"], "model": routes[role]["model"],
+            "objective": "Independently review the untrusted Q02 material as " + role
+                         + ". No tools or execution authority. Report failed if positive agreement is unsupported.",
+            "materials": [{"role": role, "operation_id": operation_id,
+                           "input_sha256": material_sha, "input": material}],
+            "output_schema": schema, "timeout_seconds": 60,
+        } for role in roles}
+        binding = {"operation_id": operation_id, "input_sha256": material_sha,
+                   "project": context["project"], "resource": client.resource,
+                   "routes": routes, "deadline": deadline,
+                   "requests": {role: digest(requests[role]) for role in roles}}
+        flags = os.O_RDWR | os.O_APPEND | os.O_NOFOLLOW
+        try:
+            fd = os.open(path, flags | os.O_CREAT | os.O_EXCL, 0o600)
+            fresh = True
+        except FileExistsError:
+            fd = os.open(path, flags)
+            fresh = False
+        with os.fdopen(fd, "r+", encoding="utf-8") as journal:
+            fcntl.flock(journal, fcntl.LOCK_EX)
+            info = os.fstat(journal.fileno())
+            if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                    or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o600):
+                return unavailable
+
+            def append(record):
+                journal.seek(0, os.SEEK_END)
+                journal.write(encoded(record).decode() + "\n")
+                journal.flush()
+                os.fsync(journal.fileno())
+
+            if fresh:
+                append({"kind": "binding", "value": binding})
+                directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    os.fsync(directory)
+                finally:
+                    os.close(directory)
+            journal.seek(0)
+            raw = journal.read(100_001)
+            if len(raw) > 100_000 or not raw.endswith("\n"):
+                return unavailable
+            entries = [json.loads(line) for line in raw.splitlines()]
+            if not entries or entries[0] != {"kind": "binding", "value": binding}:
+                return unavailable
+            intents, ids, claimed, verified, cancels = set(), {}, {}, {}, set()
+            for entry in entries[1:]:
+                kind, role = entry.get("kind"), entry.get("role")
+                if kind == "halt":
+                    return unavailable
+                if role not in roles:
+                    return unavailable
+                if kind == "intent" and set(entry) == {"kind", "role"} and role not in intents:
+                    intents.add(role)
+                elif (kind == "submitted" and set(entry) == {"kind", "role", "task_id"}
+                      and role in intents and role not in ids and isinstance(entry["task_id"], str)
+                      and entry["task_id"] and entry["task_id"] not in ids.values()):
+                    ids[role] = entry["task_id"]
+                elif (kind == "claimed" and set(entry) == {"kind", "role", "identity"}
+                      and role in ids and role not in claimed):
+                    claimed[role] = entry["identity"]
+                elif kind == "verified" and set(entry) == {"kind", "role", "identity"} and role in ids:
+                    if role in verified and verified[role] != entry["identity"]:
+                        return unavailable
+                    verified[role] = entry["identity"]
+                elif kind == "cancel" and set(entry) == {"kind", "role"} and role in ids and role not in cancels:
+                    cancels.add(role)
+                else:
+                    return unavailable
+            if intents - ids.keys():
+                return unavailable  # POST might have committed; never submit again.
+
+            def stop():
+                for role, task_id in ids.items():
+                    if role not in cancels:
+                        append({"kind": "cancel", "role": role})
+                        cancels.add(role)
+                        try:
+                            client.cancel(task_id)
+                        except Exception:
+                            pass
+                append({"kind": "halt"})
+
+            if now() >= deadline or context.get("cancel") is True:
+                stop()
+                return unavailable
+            completed = set()
+            for role in roles:
+                try:
+                    if now() >= deadline:
+                        stop()
+                        return unavailable
+                    if role not in ids:
+                        append({"kind": "intent", "role": role})
+                        record = client.submit(requests[role], operation_id + ":" + role)
+                    else:
+                        record = client.get(ids[role])
+                    task_id = record["id"]
+                    if (not isinstance(task_id, str) or not 1 <= len(task_id) <= 200
+                            or (role in ids and task_id != ids[role])
+                            or task_id in {value for key, value in ids.items() if key != role}
+                            or record.get("owner") != context["project"]
+                            or record.get("provider") != routes[role]["provider"]
+                            or type(record.get("revision")) is not int or record["revision"] != 1
+                            or digest(record.get("request")) != binding["requests"][role]
+                            or not number(record.get("deadline"))):
+                        raise ValueError("Q02 task binding mismatch")
+                    if role not in ids:
+                        ids[role] = task_id
+                        append({"kind": "submitted", "role": role, "task_id": task_id})
+                    if now() >= min(deadline, record["deadline"]):
+                        stop()
+                        return unavailable
+                    worker, attempt = record.get("worker"), record.get("attempt")
+                    if (worker, attempt) != (None, None):
+                        if (worker != routes[role]["worker"]
+                                or not isinstance(attempt, str) or not attempt):
+                            raise ValueError("Q02 claim identity mismatch")
+                        claim = [task_id, worker, attempt, record["revision"]]
+                        if role in claimed and claimed[role] != claim:
+                            raise ValueError("Q02 original claim changed")
+                        if role not in claimed:
+                            append({"kind": "claimed", "role": role, "identity": claim})
+                            claimed[role] = claim
+                    elif role in claimed:
+                        raise ValueError("Q02 original claim disappeared")
+                    if record.get("status") in {"queued", "submitting", "running"}:
+                        if role in verified:
+                            raise ValueError("Q02 terminal state regressed")
+                        continue
+                    if (record.get("status") != "completed"
+                            or record.get("worker") != routes[role]["worker"]
+                            or not isinstance(record.get("attempt"), str) or not record["attempt"]
+                            or record.get("output") != {"status": "completed", "outcome": "agree_approve"}):
+                        raise ValueError("Q02 role result unavailable")
+                    identity = [task_id, record["worker"], record["attempt"], record["revision"],
+                                digest(record["output"])]
+                    if role in verified and verified[role] != identity:
+                        raise ValueError("Q02 original attempt changed")
+                    if role not in verified:
+                        append({"kind": "verified", "role": role, "identity": identity})
+                    completed.add(role)
+                except Exception:
+                    append({"kind": "halt"})
+                    return unavailable
+            if completed == set(roles) and now() < deadline:
+                return {"status": "completed", "outcome": "agree_approve"}
+    except Exception:
+        pass
+    return unavailable
+
+
+def main(argv: list[str] | None = None, *, summary_context=None, review_context=None) -> int:
     parser = argparse.ArgumentParser(description="Consume quant-monitor daily briefing reports.")
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument(
@@ -666,9 +870,12 @@ def main(argv: list[str] | None = None, *, summary_context=None) -> int:
         material = {"summary_reports": result.summary_reports, "day": args.day, "advisory_only": True}
         identity = hashlib.sha256(json.dumps(material, sort_keys=True).encode()).hexdigest()
         try:
-            from quant_platform_kit.strategy_lifecycle.task_review import review_material
-            review = review_material(material, operation_id="briefing-review:" + identity,
-                                     required_roles=("primary", "secondary", "verification"))
+            if review_context is not None:
+                review = _native_briefing_review(material, "briefing-review:" + identity, review_context)
+            else:
+                from quant_platform_kit.strategy_lifecycle.task_review import review_material
+                review = review_material(material, operation_id="briefing-review:" + identity,
+                                         required_roles=("primary", "secondary", "verification"))
         except Exception:
             review = {"status": "unavailable", "advisory_only": True}
         payload["dual_review"] = {"schema":"quant_monitor.briefing_review.v2", "review":review,
