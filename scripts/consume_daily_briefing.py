@@ -572,6 +572,7 @@ def _native_briefing_review(material, operation_id, context):
         client, routes = context["client"], context["roles"]
         path, deadline, now = context["state_path"], context["deadline"], context["now"]
         if (context.get("synthetic_only") is not True
+                or type(context.get("cancel", False)) is not bool
                 or context["project"] != "QuantStrategyLab/QuantAIService"
                 or not isinstance(client, TaskClient) or isinstance(client.transport, PublicHTTPS)
                 or not isinstance(client.token, str) or not client.token.startswith("synthetic-")
@@ -686,7 +687,7 @@ def _native_briefing_review(material, operation_id, context):
             completed = set()
             for role in roles:
                 try:
-                    if now() >= deadline:
+                    if now() >= deadline or context.get("cancel") is True:
                         stop()
                         return unavailable
                     if role not in ids:
@@ -707,7 +708,7 @@ def _native_briefing_review(material, operation_id, context):
                     if role not in ids:
                         ids[role] = task_id
                         append({"kind": "submitted", "role": role, "task_id": task_id})
-                    if now() >= min(deadline, record["deadline"]):
+                    if now() >= min(deadline, record["deadline"]) or context.get("cancel") is True:
                         stop()
                         return unavailable
                     worker, attempt = record.get("worker"), record.get("attempt")
@@ -742,8 +743,11 @@ def _native_briefing_review(material, operation_id, context):
                 except Exception:
                     append({"kind": "halt"})
                     return unavailable
-            if completed == set(roles) and now() < deadline:
-                return {"status": "completed", "outcome": "agree_approve"}
+            if completed == set(roles):
+                if now() >= deadline or context.get("cancel") is True:
+                    stop()
+                else:
+                    return {"status": "completed", "outcome": "agree_approve"}
     except Exception:
         pass
     return unavailable

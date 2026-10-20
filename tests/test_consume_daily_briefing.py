@@ -245,6 +245,29 @@ def test_native_briefing_completed_material_drift_is_not_a_new_operation(tmp_pat
     assert transport.calls == calls
 
 
+
+@pytest.mark.parametrize("stage", ["submit", "readback"])
+def test_native_briefing_cancel_arriving_during_action_holds_without_new_submit(tmp_path, capsys, stage):
+    context, transport = _native_briefing_context(tmp_path)
+    if stage == "readback":
+        assert _call_native_briefing(tmp_path, context) == 0
+        capsys.readouterr()
+    def cancel_during_response(record):
+        context["cancel"] = True
+        return record
+    transport.readback = cancel_during_response
+    assert _call_native_briefing(tmp_path, context) == 2
+    capsys.readouterr()
+    expected = 1 if stage == "submit" else 3
+    assert len([c for c in transport.calls if c[:2] == ("POST", "/v1/tasks")]) == expected
+    assert len([c for c in transport.calls if c[1].endswith("/cancel")]) == expected
+    before = list(transport.calls)
+    context["cancel"] = False
+    assert _call_native_briefing(tmp_path, dict(context)) == 2
+    capsys.readouterr()
+    assert transport.calls == before
+
+
 @pytest.mark.parametrize("error_type", [ModuleNotFoundError, ImportError])
 def test_dual_review_missing_optional_backend_fails_closed(tmp_path, capsys, error_type):
     (tmp_path / "us_equity.json").write_text(
