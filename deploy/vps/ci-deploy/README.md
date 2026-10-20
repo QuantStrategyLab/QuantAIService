@@ -1,5 +1,7 @@
 # Quant VPS deployment
 
+**Scope: optional native task-service hosting.** This directory documents an optional manual operations path that controls `quant-ai.service` only. Its helper starts the `quant-ai-service` native task runtime, not a Codex/Cursor business CLI. `QUANT_PUBLIC_HOST`, `QUANT_VPS_HOST` and `QUANT_VPS_PORT` matter when choosing this manual workflow; they are not universal prerequisites for dot/grokbot/api execution. Existing strict host trust, explicit non-dry-run gating, reviewed source/artifact pins, offline install, config/grant isolation, rollback and no-secret-sync safeguards remain unchanged. Nothing here changes workflows, runtime, configuration or permissions, and nothing here verifies current serving, deployment, actual OAuth, native creation or automatic wake-up, TTL cleanup, worker cessation, or production/caller adoption. Health and source/CI success are separate from those qualifications.
+
 This path controls `quant-ai.service` only. It does not call another service's
 deploy helper, copy configuration, synchronize Secrets, change grants, run
 strategy jobs, or install packages from the network on the server. All examples
