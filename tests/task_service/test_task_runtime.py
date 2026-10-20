@@ -1,6 +1,11 @@
+import hashlib
+import json
+import sqlite3
 import tempfile
+import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
@@ -43,6 +48,134 @@ class RuntimeTests(unittest.TestCase):
 
     def tearDown(self):
         self.tmp.cleanup()
+
+    def request_digest(self, request=None):
+        return hashlib.sha256(json.dumps(self.request if request is None else request,
+            sort_keys=True, ensure_ascii=False, allow_nan=False, separators=(',', ':')).encode()).hexdigest()
+
+    def test_lookup_returns_original_id_with_only_sql_reads(self):
+        self.request['materials'] = [{'text': '合成证据'}]
+        task = self.runtime.submit('owner/repo', 'lost-response', self.request)
+        before = self.path.read_bytes()
+        original_connection = self.runtime.connection
+        actions = []
+
+        @contextmanager
+        def read_only(**kwargs):
+            with original_connection(**kwargs) as db:
+                def authorize(action, *_):
+                    actions.append(action)
+                    return sqlite3.SQLITE_OK if action in {sqlite3.SQLITE_SELECT, sqlite3.SQLITE_READ} else sqlite3.SQLITE_DENY
+                db.set_authorizer(authorize)
+                yield db
+
+        with patch.object(self.runtime, 'connection', read_only), \
+                patch.object(self.runtime, 'submit', side_effect=AssertionError('creation forbidden')), \
+                patch.object(self.runtime, 'tick', side_effect=AssertionError('execution forbidden')):
+            for _ in range(2):
+                self.assertEqual(self.runtime.lookup('owner/repo', 'lost-response', self.request_digest()), task)
+        self.assertTrue(actions)
+        self.assertEqual(self.path.read_bytes(), before)
+        self.assertEqual(self.provider.calls, 0)
+
+    def test_lookup_missing_project_key_and_digest_do_not_reveal_id(self):
+        self.runtime.submit('owner/repo', 'same', self.request)
+        self.runtime.policies['other/repo'] = self.policy
+        for owner, key, digest in [('other/repo', 'same', self.request_digest()),
+                ('owner/repo', 'missing', self.request_digest()),
+                ('owner/repo', "same' OR 1=1 --", self.request_digest()),
+                ('owner/repo', 'same', '0' * 64)]:
+            with self.subTest(owner=owner, key=key), self.assertRaises(NotFound):
+                self.runtime.lookup(owner, key, digest)
+        self.assertEqual(self.provider.calls, 0)
+
+    def test_lookup_before_post_commit_is_unknown_then_finds_the_same_task(self):
+        ready, release = threading.Event(), threading.Event()
+        original_connection = self.runtime.connection
+        writer = []
+
+        @contextmanager
+        def delay_commit(**kwargs):
+            with original_connection(**kwargs) as db:
+                yield db
+                if threading.get_ident() in writer:
+                    ready.set()
+                    if not release.wait(5):
+                        raise AssertionError('synthetic writer release timed out')
+
+        def post():
+            writer.append(threading.get_ident())
+            return self.runtime.submit('owner/repo', 'in-flight', self.request)
+
+        with patch.object(self.runtime, 'connection', delay_commit), ThreadPoolExecutor(max_workers=1) as pool:
+            pending = pool.submit(post)
+            try:
+                self.assertTrue(ready.wait(5))
+                with self.assertRaises(NotFound):
+                    self.runtime.lookup('owner/repo', 'in-flight', self.request_digest())
+            finally:
+                release.set()
+            task = pending.result(timeout=5)
+        self.assertEqual(self.runtime.lookup('owner/repo', 'in-flight', self.request_digest())['id'], task['id'])
+        with self.runtime.connection() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM tasks').fetchone()[0], 1)
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM events').fetchone()[0], 1)
+        self.assertEqual(self.provider.calls, 0)
+
+    def test_lookup_does_not_resolve_ambiguous_legacy_rows(self):
+        self.runtime.submit('owner/repo', 'same', self.request)
+        # An isolated malformed legacy DB, never a schema migration or shared fixture.
+        with self.runtime.connection() as db:
+            db.execute('CREATE TABLE legacy_tasks AS SELECT * FROM tasks')
+            db.execute('DROP TABLE tasks')
+            db.execute('ALTER TABLE legacy_tasks RENAME TO tasks')
+            db.execute("INSERT INTO tasks SELECT 'duplicate', owner, idem, digest, provider, request, status, handle, output, artifacts, error, created, updated, deadline, cancel_sent, worker, attempt, revision, report_digest FROM tasks")
+        before = self.path.read_bytes()
+        with self.assertRaises(NotFound):
+            self.runtime.lookup('owner/repo', 'same', self.request_digest())
+        self.assertEqual(self.path.read_bytes(), before)
+
+    def test_lookup_request_or_digest_drift_and_revocation_stay_unknown(self):
+        task = self.runtime.submit('owner/repo', 'same', self.request)
+        for body, digest in [(json.dumps({**self.request, 'objective': 'drift'}), self.request_digest()),
+                             ('not-json', self.request_digest()), (json.dumps(self.request), '0' * 64)]:
+            with self.subTest(body=body):
+                with self.runtime.connection() as db:
+                    db.execute('UPDATE tasks SET request=?, digest=? WHERE id=?', (body, digest, task['id']))
+                with self.assertRaises(NotFound):
+                    self.runtime.lookup('owner/repo', 'same', self.request_digest())
+        del self.runtime.policies['owner/repo']
+        with self.assertRaises(PermissionError):
+            self.runtime.lookup('owner/repo', 'same', self.request_digest())
+        self.assertEqual(self.provider.calls, 0)
+
+    def test_lookup_repeated_key_conflict_preserves_original_binding(self):
+        task = self.runtime.submit('owner/repo', 'same', self.request)
+        changed = {**self.request, 'objective': 'different'}
+        with self.assertRaises(Conflict):
+            self.runtime.submit('owner/repo', 'same', changed)
+        before = self.path.read_bytes()
+        with self.assertRaises(NotFound):
+            self.runtime.lookup('owner/repo', 'same', self.request_digest(changed))
+        self.assertEqual(self.runtime.lookup('owner/repo', 'same', self.request_digest())['id'], task['id'])
+        self.assertEqual(self.path.read_bytes(), before)
+
+    def test_lookup_validates_frozen_key_and_full_digest_before_sql(self):
+        cases = [(None, 'a' * 64), ('', 'a' * 64), ('x' * 201, 'a' * 64),
+                 ('bad\r\nkey', 'a' * 64), ('key', None), ('key', 'a' * 63),
+                 ('key', 'A' * 64), ('key', 'g' * 64)]
+        with patch.object(self.runtime, 'connection', side_effect=AssertionError('no SQL for invalid identity')):
+            for key, digest in cases:
+                with self.subTest(key=key, digest=digest), self.assertRaises(ValueError):
+                    self.runtime.lookup('owner/repo', key, digest)
+
+    def test_lookup_missing_database_is_not_recreated(self):
+        self.runtime.submit('owner/repo', 'same', self.request)
+        self.path.unlink()
+        with self.assertRaises(sqlite3.OperationalError):
+            self.runtime.lookup('owner/repo', 'same', self.request_digest())
+        self.assertFalse(self.path.exists())
+        self.assertEqual(self.provider.calls, 0)
 
     def test_concurrent_idempotency_submits_once(self):
         with ThreadPoolExecutor(max_workers=4) as pool:
