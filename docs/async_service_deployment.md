@@ -1,5 +1,7 @@
 # Async Codex Audit Service Deployment
 
+**V1 / history only.** This page preserves the retired async Codex audit VPS design and its old deployment commands for historical reference. It is not current deployment guidance and must not be used to restore the retired Codex/Cursor business CLI path. The independently packaged project-scoped native task service is described in the [current task-service README](../README.md), and the retirement is recorded in [V1 retirement](upgrade-v2/RETIRED-V1.zh-CN.md). This notice does not assert that every historical cloud process has already been stopped.
+
 AIAuditBridge uses an async service contract to avoid keeping a GitHub Actions request open while Codex runs on the VPS.
 
 ## Architecture
