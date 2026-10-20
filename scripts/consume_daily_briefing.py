@@ -692,8 +692,14 @@ def _native_briefing_review(material, operation_id, context):
                         return unavailable
                     if role not in ids:
                         append({"kind": "intent", "role": role})
+                        if now() >= deadline or context.get("cancel") is True:
+                            stop()
+                            return unavailable
                         record = client.submit(requests[role], operation_id + ":" + role)
                     else:
+                        if now() >= deadline or context.get("cancel") is True:
+                            stop()
+                            return unavailable
                         record = client.get(ids[role])
                     task_id = record["id"]
                     if (not isinstance(task_id, str) or not 1 <= len(task_id) <= 200

@@ -268,6 +268,35 @@ def test_native_briefing_cancel_arriving_during_action_holds_without_new_submit(
     assert transport.calls == before
 
 
+@pytest.mark.parametrize("stop_kind", ["expiry", "cancel"])
+def test_native_briefing_intent_fsync_rechecks_before_first_submit(tmp_path, capsys, stop_kind):
+    import os
+    context, transport = _native_briefing_context(tmp_path)
+    original_fsync = os.fsync
+    fired = False
+    def stop_after_intent(fd):
+        nonlocal fired
+        original_fsync(fd)
+        if not fired and context["state_path"].is_file():
+            entries = [json.loads(line) for line in context["state_path"].read_text().splitlines()]
+            if {"kind": "intent", "role": "primary"} in entries:
+                fired = True
+                if stop_kind == "expiry":
+                    transport.clock[0] = context["deadline"]
+                else:
+                    context["cancel"] = True
+    with patch("os.fsync", side_effect=stop_after_intent):
+        assert _call_native_briefing(tmp_path, context) == 2
+    capsys.readouterr()
+    assert fired
+    assert transport.calls == []
+    context["cancel"] = False
+    transport.clock[0] = context["deadline"] - 30
+    assert _call_native_briefing(tmp_path, context) == 2
+    capsys.readouterr()
+    assert transport.calls == []
+
+
 @pytest.mark.parametrize("error_type", [ModuleNotFoundError, ImportError])
 def test_dual_review_missing_optional_backend_fails_closed(tmp_path, capsys, error_type):
     (tmp_path / "us_equity.json").write_text(
