@@ -54,6 +54,12 @@ class Application:
             raise PermissionError('worker is not assigned to this task')
         return record
 
+    def read_task(self, principal, task_id):
+        self.require(principal, 'tasks:read')
+        # owner is a project, not a subject. Preserve GET's provider boundary.
+        return (self.worker(principal, task_id) if principal.provider
+                else self.runtime.get(principal.project, task_id))
+
     def event_worker(self, principal):
         self.require(principal, 'events:subscribe')
         if not self.events or principal.provider != self.events.provider_name:
@@ -87,6 +93,21 @@ class Application:
         selectors = parse_qs(urlsplit(target).query, keep_blank_values=True).get('project', [None])
         if len(selectors) != 1:
             raise ValueError('select exactly one project')
+        if path == '/v1/tasks/lookup' and method == 'GET':
+            if body is not None:
+                raise ValueError('lookup takes no body')
+            try:
+                principal = self.project_context(principal, selectors[0])
+                self.require(principal, 'tasks:read')
+                record = self.runtime.lookup(principal.project, headers.get('Idempotency-Key'),
+                                             headers.get('X-Request-SHA256'))
+                # Check the very same object visibility as GET before exposing its ID.
+                # A changed snapshot is unknown; it does not authorize new work.
+                if self.read_task(principal, record['id']) != record:
+                    raise NotFound('task not found')
+            except (PermissionError, NotFound):
+                raise NotFound('task not found') from None
+            return 200, {'id': record['id']}
         principal = self.project_context(principal, selectors[0])
         if path == '/v1/tasks' and method == 'POST':
             self.require(principal, 'tasks:submit')
@@ -96,12 +117,8 @@ class Application:
             task_id = parts[2]
             operation = parts[3] if len(parts) == 4 else ''
             if method == 'GET':
-                self.require(principal, 'tasks:read')
-                # Worker identity cannot read another configured provider's task.
-                if principal.provider:
-                    self.worker(principal, task_id)
+                record = self.read_task(principal, task_id)
                 if operation == '':
-                    record = self.runtime.get(principal.project, task_id)
                     return 200, {**self.public_record(record), 'messages': self.runtime.messages(principal.project, task_id)}
                 if operation == 'events':
                     after = int(parse_qs(urlsplit(target).query).get('after', ['0'])[0])
@@ -381,13 +398,17 @@ def make_server(application, port, *, max_request_bytes=2_000_000, mcp_log_level
                 length = int(self.headers.get('Content-Length', '0'))
                 if not 0 <= length <= max_request_bytes:
                     raise ValueError('request size exceeds service limit')
-                headers = {name: self.headers.get(name) for name in ['Authorization', 'Idempotency-Key']}
+                headers = {name: self.headers.get(name) for name in ['Authorization', 'Idempotency-Key', 'X-Request-SHA256']}
                 discovery = self.command == 'GET' and urlsplit(self.path).path == '/.well-known/oauth-protected-resource'
                 if not discovery:
                     decision = 'denied'
                     principal = application.authenticate(headers)
                     diagnostics = principal.diagnostics or AuthDiagnostics(effective_scopes=tuple(principal.scopes))
                     decision, reason = 'allowed', 'granted'
+                if (self.command == 'GET' and urlsplit(self.path).path == '/v1/tasks/lookup'
+                        and (length or any(len(self.headers.get_all(name, [])) != 1
+                                           for name in ['Idempotency-Key', 'X-Request-SHA256']))):
+                    raise ValueError('lookup requires single binding headers and no body')
                 if discovery and length:
                     raise ValueError('discovery takes no body')
                 body = None

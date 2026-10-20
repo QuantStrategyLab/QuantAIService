@@ -5,6 +5,7 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 import sqlite3
 import time
 import uuid
@@ -102,8 +103,9 @@ class TaskRuntime:
         os.chmod(self.path, 0o600)
 
     @contextmanager
-    def connection(self):
-        db = sqlite3.connect(self.path, timeout=30)
+    def connection(self, *, read_only=False):
+        target = self.path.resolve().as_uri() + '?mode=ro' if read_only else self.path
+        db = sqlite3.connect(target, timeout=30, uri=read_only)
         db.row_factory = sqlite3.Row
         try:
             with db:
@@ -177,8 +179,35 @@ class TaskRuntime:
             db.execute('INSERT INTO events(task_id,status,created) VALUES(?,?,?)', (task_id, 'queued', now))
         return self.get(owner, task_id)
 
+    def lookup(self, owner, idempotency_key, request_sha256):
+        """Read an existing binding; HTTP callers must also enforce GET visibility.
+
+        A miss can race an uncommitted POST and never permits another submission.
+        """
+        if owner not in self.policies:
+            raise PermissionError('project is not admitted')
+        if (not isinstance(idempotency_key, str) or not 1 <= len(idempotency_key) <= 200
+                or '\r' in idempotency_key or '\n' in idempotency_key):
+            raise ValueError('a frozen Idempotency-Key is required (1..200 characters)')
+        if not isinstance(request_sha256, str) or re.fullmatch(r'[0-9a-f]{64}', request_sha256) is None:
+            raise ValueError('a full lowercase request SHA256 is required')
+        with self.connection(read_only=True) as db:
+            rows = db.execute('SELECT * FROM tasks WHERE owner=? AND idem=?',
+                              (owner, idempotency_key)).fetchmany(2)
+            if len(rows) != 1 or rows[0]['digest'] != request_sha256:
+                raise NotFound('task not found')
+            row = rows[0]
+            try:
+                request = json.loads(row['request'])
+                if (not isinstance(request, dict)
+                        or hashlib.sha256(_json(request).encode()).hexdigest() != request_sha256):
+                    raise NotFound('task not found')
+                return self._record(row)
+            except (ValueError, TypeError, RecursionError):
+                raise NotFound('task not found') from None
+
     def get(self, owner, task_id):
-        with self.connection() as db:
+        with self.connection(read_only=True) as db:
             row = db.execute('SELECT * FROM tasks WHERE id=? AND owner=?', (task_id, owner)).fetchone()
             if row is None:
                 raise NotFound('task not found')

@@ -1,3 +1,5 @@
+import hashlib
+import io
 import json
 import socket
 import tempfile
@@ -6,10 +8,13 @@ import unittest
 import urllib.error
 import urllib.request
 from pathlib import Path
+from unittest.mock import patch
 
 from ai_service.auth import AuthenticationError, Principal
+from ai_service.client import TaskClient
 from ai_service.runtime import Policy, TaskRuntime
 from ai_service.server import Application, make_server
+from ai_service.transport import HttpReply
 from test_task_runtime import CallbackProvider
 
 
@@ -42,6 +47,158 @@ class TaskServerTests(unittest.TestCase):
     def rpc(self, identity, name, arguments):
         return self.app.dispatch('POST', '/mcp', {'Authorization': identity},
             {'jsonrpc': '2.0', 'id': 1, 'method': 'tools/call', 'params': {'name': name, 'arguments': arguments}})[1]
+
+    def request_digest(self):
+        return hashlib.sha256(json.dumps(self.request, sort_keys=True, ensure_ascii=False,
+            allow_nan=False, separators=(',', ':')).encode()).hexdigest()
+
+    def lookup_http(self, identity='caller', key='one', digest=None, *, target='/v1/tasks/lookup', body=b'', extra_headers=()):
+        # Exercise the actual HTTP parser/handler without binding or connecting a socket.
+        def initialize(server, address, handler):
+            server.RequestHandlerClass = handler
+        with patch('ai_service.server.ThreadingHTTPServer.__init__', initialize):
+            server = make_server(self.app, 0)
+        headers = {'Authorization': identity, 'Idempotency-Key': key,
+                   'X-Request-SHA256': self.request_digest() if digest is None else digest,
+                   'Content-Length': str(len(body)), 'Connection': 'close'}
+        request = ('GET ' + target + ' HTTP/1.1\r\nHost: service.example\r\n'
+            + ''.join(name + ': ' + value + '\r\n' for name, value in headers.items() if value is not None)
+            + ''.join(name + ': ' + value + '\r\n' for name, value in extra_headers)
+            + '\r\n').encode() + body
+        class Connection:
+            response = bytearray()
+            def settimeout(self, value):
+                pass
+            def makefile(self, *_):
+                return io.BytesIO(request)
+            def sendall(self, data):
+                self.response.extend(data)
+        connection = Connection()
+        server.RequestHandlerClass(connection, ('127.0.0.1', 0), server)
+        header, payload = bytes(connection.response).split(b'\r\n\r\n', 1)
+        self.assertIn(b'Cache-Control: no-store', header)
+        return int(header.split(b' ', 2)[1]), json.loads(payload)
+
+    def test_lookup_visibility_equals_existing_get_for_distinct_principals(self):
+        task = self.runtime.submit('owner/repo', 'one', self.request)
+        principals = dict(self.app.auth.principals)
+        principals.update({
+            'second-reader': Principal('different-subject', 'owner/repo', frozenset({'tasks:read'})),
+            'submit-only': Principal('submit-only', 'owner/repo', frozenset({'tasks:submit'})),
+            'provider-read-only': Principal('read-only-worker', 'owner/repo', frozenset({'tasks:read'}), 'grok'),
+            'same-name-other-project': Principal('caller', 'other/repo', frozenset({'tasks:read'})),
+            'owner-worker': Principal('owner-worker', None, frozenset({'tasks:read', 'tasks:work'}), 'grok', owner='owner'),
+        })
+        before = self.runtime.path.read_bytes()
+        with patch.object(self.app.auth, 'principals', principals):
+            for identity in ['caller', 'second-reader', 'bot', 'reviewer', 'other', 'submit-only',
+                             'provider-read-only', 'same-name-other-project', 'owner-worker']:
+                with self.subTest(identity=identity):
+                    query = '?project=owner/repo' if identity == 'owner-worker' else ''
+                    try:
+                        self.app.dispatch('GET', '/v1/tasks/' + task['id'] + query, {'Authorization': identity})
+                        readable = True
+                    except (PermissionError, LookupError):
+                        readable = False
+                    status, reply = self.lookup_http(identity, target='/v1/tasks/lookup' + query)
+                    self.assertEqual(status, 200 if readable else 404)
+                    self.assertEqual(reply, {'id': task['id']} if readable else {'error': 'not_found'})
+        self.assertEqual(self.runtime.path.read_bytes(), before)
+        self.assertTrue(all(provider.calls == 0 for provider in self.runtime.providers.values()))
+
+    def test_lookup_missing_invisible_wrong_digest_and_project_are_indistinguishable(self):
+        self.runtime.submit('owner/repo', 'one', self.request)
+        before = self.runtime.path.read_bytes()
+        for identity, key, digest, target in [
+            ('caller', 'missing', self.request_digest(), '/v1/tasks/lookup'),
+            ('caller', 'one', '0' * 64, '/v1/tasks/lookup'),
+            ('reviewer', 'one', self.request_digest(), '/v1/tasks/lookup'),
+            ('reviewer', 'missing', self.request_digest(), '/v1/tasks/lookup'),
+            ('other', 'one', self.request_digest(), '/v1/tasks/lookup'),
+            ('caller', 'one', self.request_digest(), '/v1/tasks/lookup?project=other/repo'),
+        ]:
+            with self.subTest(identity=identity, key=key, target=target):
+                self.assertEqual(self.lookup_http(identity, key, digest, target=target), (404, {'error': 'not_found'}))
+        self.assertEqual(self.runtime.path.read_bytes(), before)
+
+    def test_lookup_http_binding_validation_and_no_body(self):
+        self.runtime.submit('owner/repo', 'one', self.request)
+        for key, digest, body in [(None, 'a' * 64, b''), ('one', '', b''),
+                                 ('one', 'A' * 64, b''), ('one', 'a' * 64, b'{}')]:
+            with self.subTest(key=key, digest=digest, body=body):
+                self.assertEqual(self.lookup_http(key=key, digest=digest, body=body), (400, {'error': 'invalid_request'}))
+        self.assertEqual(self.lookup_http(identity='not-admitted'), (401, {'error': 'authentication_required'}))
+
+    def test_lookup_duplicate_binding_headers_and_json_null_body_are_rejected(self):
+        self.runtime.submit('owner/repo', 'one', self.request)
+        before = self.runtime.path.read_bytes()
+        for name, value in [('Idempotency-Key', 'one'), ('Idempotency-Key', 'other'),
+                            ('X-Request-SHA256', self.request_digest()), ('X-Request-SHA256', '0' * 64)]:
+            with self.subTest(header=name, value=value):
+                self.assertEqual(self.lookup_http(extra_headers=[(name, value)]), (400, {'error': 'invalid_request'}))
+        self.assertEqual(self.lookup_http(body=b'null'), (400, {'error': 'invalid_request'}))
+        self.assertEqual(self.runtime.path.read_bytes(), before)
+
+    def test_lookup_revoked_grant_scope_or_project_returns_no_id_for_exists_or_missing(self):
+        self.runtime.submit('owner/repo', 'one', self.request)
+        for change in ['grant', 'scope', 'project']:
+            with self.subTest(change=change):
+                principals = dict(self.app.auth.principals)
+                policies = dict(self.runtime.policies)
+                expected = 404
+                if change == 'grant':
+                    del principals['caller']
+                    expected = 401
+                elif change == 'scope':
+                    principals['caller'] = Principal('caller', 'owner/repo', frozenset())
+                else:
+                    del policies['owner/repo']
+                    expected = 403  # The existing authentication admission gate runs first.
+                with patch.object(self.app.auth, 'principals', principals), patch.object(self.runtime, 'policies', policies):
+                    exists = self.lookup_http()
+                    missing = self.lookup_http(key='missing')
+                    self.assertEqual(exists, missing)
+                    self.assertEqual(exists[0], expected)
+                    self.assertNotIn('id', exists[1])
+
+    def test_lookup_snapshot_drift_does_not_return_an_id(self):
+        task = self.runtime.submit('owner/repo', 'one', self.request)
+        for changed in [{**task, 'revision': task['revision'] + 1},
+                        {**task, 'request': {**self.request, 'objective': 'drift'}}]:
+            with self.subTest(changed=changed), patch.object(self.runtime, 'get', return_value=changed):
+                self.assertEqual(self.lookup_http(), (404, {'error': 'not_found'}))
+
+    def test_lost_submit_response_sdk_recovery_preserves_intent_and_never_reposts(self):
+        intent = self.runtime.path.parent / 'synthetic.intent.json'
+        intent.write_bytes(b'{"status":"intent","operation_key":"one"}\n')
+        intent.chmod(0o600)
+        original = intent.read_bytes()
+        calls = []
+        app = self.app
+        class Transport:
+            def request(self, url, **kwargs):
+                calls.append(kwargs['method'])
+                headers = {**kwargs['headers'], 'Authorization': 'caller'}
+                path = url.removeprefix('https://service.example')
+                status, record = app.dispatch(kwargs['method'], path, headers,
+                    json.loads(kwargs['body']) if kwargs['body'] else None)
+                if kwargs['method'] == 'POST':
+                    raise TimeoutError('synthetic accepted response lost')
+                return HttpReply(status, json.dumps(record).encode())
+        client = TaskClient('https://service.example', 'synthetic', transport=Transport())
+        with self.assertRaises(TimeoutError):
+            client.submit(self.request, 'one')
+        before = self.runtime.path.read_bytes()
+        with patch.object(self.runtime, 'submit', side_effect=AssertionError('never recreate')), \
+                patch.object(self.runtime, 'tick', side_effect=AssertionError('never execute')):
+            recovered = client.lookup('one', self.request_digest())
+            readback = client.get(recovered['id'])
+        self.assertEqual(readback['request'], self.request)
+        self.assertEqual(readback['status'], 'queued')
+        self.assertEqual(calls, ['POST', 'GET', 'GET'])
+        self.assertEqual(intent.read_bytes(), original)
+        self.assertEqual(self.runtime.path.read_bytes(), before)
+        self.assertTrue(all(provider.calls == 0 for provider in self.runtime.providers.values()))
 
     def test_end_to_end_submit_claim_report_and_read(self):
         status, task = self.app.dispatch('POST', '/v1/tasks', {'Authorization': 'caller', 'Idempotency-Key': 'one'}, self.request)

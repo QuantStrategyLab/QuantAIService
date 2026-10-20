@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import time
 from pathlib import Path
 from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
@@ -22,7 +23,7 @@ class TaskClient:
         self.token = token
         self.transport = transport or PublicHTTPS(max_response_bytes=max_response_bytes)
 
-    def request(self, method, path, body=None, idempotency_key=None):
+    def request(self, method, path, body=None, idempotency_key=None, *, request_sha256=None):
         token = self.token() if callable(self.token) else self.token
         if not isinstance(token, str) or not token or '\n' in token or '\r' in token:
             raise ValueError('an authenticated token is required')
@@ -31,6 +32,10 @@ class TaskClient:
             if not isinstance(idempotency_key, str) or not idempotency_key or '\r' in idempotency_key or '\n' in idempotency_key:
                 raise ValueError('invalid idempotency key')
             headers['Idempotency-Key'] = idempotency_key
+        if request_sha256 is not None:
+            if not isinstance(request_sha256, str) or re.fullmatch(r'[0-9a-f]{64}', request_sha256) is None:
+                raise ValueError('invalid request SHA256')
+            headers['X-Request-SHA256'] = request_sha256
         reply = self.transport.request(self.resource + path, method=method, headers=headers,
                                        body=b'' if body is None else json_body(body))
         if not 200 <= reply.status < 300:
@@ -39,6 +44,25 @@ class TaskClient:
 
     def submit(self, request, idempotency_key):
         return self.request('POST', '/v1/tasks', request, idempotency_key)
+
+    def lookup(self, idempotency_key, request_sha256):
+        """Find an existing ID using the frozen intent; any miss remains unknown.
+
+        This never submits, retries or changes the intent. Read/verify the ID with
+        get() before using it; a miss is not proof the original POST cannot commit.
+        """
+        if (not isinstance(idempotency_key, str) or not 1 <= len(idempotency_key) <= 200
+                or '\r' in idempotency_key or '\n' in idempotency_key):
+            raise ValueError('invalid frozen idempotency key')
+        if not isinstance(request_sha256, str) or re.fullmatch(r'[0-9a-f]{64}', request_sha256) is None:
+            raise ValueError('invalid request SHA256')
+        record = self.request('GET', '/v1/tasks/lookup', idempotency_key=idempotency_key,
+                              request_sha256=request_sha256)
+        if (not isinstance(record, dict) or set(record) != {'id'}
+                or not isinstance(record['id'], str) or not 1 <= len(record['id']) <= 200
+                or '\r' in record['id'] or '\n' in record['id']):
+            raise ValueError('invalid task lookup response')
+        return record
 
     def get(self, task_id):
         return self.request('GET', '/v1/tasks/' + quote(task_id, safe=''))
