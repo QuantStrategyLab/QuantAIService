@@ -608,7 +608,7 @@ def _native_briefing_review(material, operation_id, context):
             return type(value) in (int, float) and math.isfinite(value)
 
         roles = ("primary", "secondary", "verification")
-        client, routes = context["client"], context["roles"]
+        client, routes = context["client"], json.loads(encoded(context["roles"]))
         path, deadline, now = context["state_path"], context["deadline"], context["now"]
         synthetic = (context.get("synthetic_only") is True
                      and not isinstance(client.transport, PublicHTTPS)
@@ -686,7 +686,7 @@ def _native_briefing_review(material, operation_id, context):
             entries = [json.loads(line) for line in raw.splitlines()]
             if not entries or entries[0] != {"kind": "binding", "value": binding}:
                 return unavailable
-            intents, ids, claimed, verified, cancels = set(), {}, {}, {}, set()
+            intents, ids, task_deadlines, claimed, verified, cancels = set(), {}, {}, {}, {}, set()
             for entry in entries[1:]:
                 kind, role = entry.get("kind"), entry.get("role")
                 if kind == "halt":
@@ -695,10 +695,12 @@ def _native_briefing_review(material, operation_id, context):
                     return unavailable
                 if kind == "intent" and set(entry) == {"kind", "role"} and role not in intents:
                     intents.add(role)
-                elif (kind == "submitted" and set(entry) == {"kind", "role", "task_id"}
+                elif (kind == "submitted" and set(entry) == {"kind", "role", "task_id", "deadline"}
                       and role in intents and role not in ids and isinstance(entry["task_id"], str)
-                      and entry["task_id"] and entry["task_id"] not in ids.values()):
+                      and entry["task_id"] and entry["task_id"] not in ids.values()
+                      and number(entry["deadline"])):
                     ids[role] = entry["task_id"]
+                    task_deadlines[role] = entry["deadline"]
                 elif (kind == "claimed" and set(entry) == {"kind", "role", "identity"}
                       and role in ids and role not in claimed):
                     claimed[role] = entry["identity"]
@@ -724,23 +726,36 @@ def _native_briefing_review(material, operation_id, context):
                             pass
                 append({"kind": "halt"})
 
-            if now() >= deadline or context.get("cancel") is True:
-                stop()
+            def active():
+                if (context["client"] is not client or context["roles"] != routes
+                        or context["project"] != binding["project"]
+                        or client.resource != binding["resource"]
+                        or context.get("audience") != binding["audience"]
+                        or context["state_path"] != path or context["deadline"] != deadline):
+                    append({"kind": "halt"})
+                    return False
+                current = now()
+                if not number(current) or current >= deadline or context.get("cancel") is True:
+                    stop()
+                    return False
+                return True
+
+            if not active():
                 return unavailable
             completed = set()
             for role in roles:
                 try:
-                    if now() >= deadline or context.get("cancel") is True:
-                        stop()
+                    if not active():
                         return unavailable
                     if role not in ids:
                         append({"kind": "intent", "role": role})
-                        if now() >= deadline or context.get("cancel") is True:
-                            stop()
+                        if not active():
                             return unavailable
                         record = client.submit(requests[role], operation_id + ":" + role)
                     else:
-                        if now() >= deadline or context.get("cancel") is True:
+                        if not active():
+                            return unavailable
+                        if now() >= task_deadlines[role]:
                             stop()
                             return unavailable
                         record = client.get(ids[role])
@@ -748,15 +763,20 @@ def _native_briefing_review(material, operation_id, context):
                     if (not isinstance(task_id, str) or not 1 <= len(task_id) <= 200
                             or (role in ids and task_id != ids[role])
                             or task_id in {value for key, value in ids.items() if key != role}
-                            or record.get("owner") != context["project"]
+                            or record.get("owner") != binding["project"]
                             or record.get("provider") != routes[role]["provider"]
                             or type(record.get("revision")) is not int or record["revision"] != 1
                             or digest(record.get("request")) != binding["requests"][role]
-                            or not number(record.get("deadline"))):
+                            or not number(record.get("deadline"))
+                            or (role in task_deadlines and record["deadline"] != task_deadlines[role])):
                         raise ValueError("Q02 task binding mismatch")
                     if role not in ids:
                         ids[role] = task_id
-                        append({"kind": "submitted", "role": role, "task_id": task_id})
+                        task_deadlines[role] = record["deadline"]
+                        append({"kind": "submitted", "role": role, "task_id": task_id,
+                                "deadline": record["deadline"]})
+                    if not active():
+                        return unavailable
                     if now() >= min(deadline, record["deadline"]) or context.get("cancel") is True:
                         stop()
                         return unavailable
@@ -793,9 +813,7 @@ def _native_briefing_review(material, operation_id, context):
                     append({"kind": "halt"})
                     return unavailable
             if completed == set(roles):
-                if now() >= deadline or context.get("cancel") is True:
-                    stop()
-                else:
+                if active():
                     return {"status": "completed", "outcome": "agree_approve"}
     except Exception:
         pass

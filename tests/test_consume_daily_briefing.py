@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import builtins
-import hashlib
 import json
 from pathlib import Path
 import tempfile
@@ -224,6 +223,56 @@ def _call_native_briefing(tmp_path, context):
     )
     return main(["--report-dir", str(report), "--day", "2026-10-20", "--dual-review"],
                 review_context=context)
+
+
+@pytest.mark.parametrize('field', ['worker', 'deadline', 'project', 'audience'])
+def test_native_binding_mutation_during_response_never_adopts_or_submits_next_role(tmp_path, capsys, field):
+    context, wire = _native_briefing_context(tmp_path)
+    def changed(record):
+        if field == 'worker':
+            context['roles']['primary']['worker'] = 'replacement'
+            record['worker'] = 'replacement'
+        elif field == 'deadline':
+            context['deadline'] += 100
+        elif field == 'project':
+            context['project'] = 'Pigbibi/PhotoStory'
+            record['owner'] = context['project']
+        else:
+            context['audience'] = 'replacement'
+        return record
+    wire.readback = changed
+    assert _call_native_briefing(tmp_path, context) == 2
+    result = json.loads(capsys.readouterr().out)
+    assert result['dual_review']['review'] == {'status':'unavailable', 'advisory_only':True}
+    assert sum(m == 'POST' and p == '/v1/tasks' for m, p, _ in wire.calls) == 1
+    count = len(wire.calls)
+    assert _call_native_briefing(tmp_path, context) == 2
+    capsys.readouterr()
+    assert len(wire.calls) == count
+
+
+@pytest.mark.parametrize('change', ['expired_original', 'extended', 'shortened'])
+def test_native_remote_deadline_is_frozen_before_resume_and_adoption(tmp_path, capsys, change):
+    context, wire = _native_briefing_context(tmp_path)
+    context['deadline'] += 600
+    wire.complete = False
+    original = wire.clock[0] + 5
+    wire.readback = lambda record: {**record, 'deadline':original}
+    assert _call_native_briefing(tmp_path, context) == 2
+    capsys.readouterr()
+    before = len(wire.calls)
+    if change == 'expired_original':
+        wire.clock[0] = original + 1
+    else:
+        wire.readback = lambda record: {**record, 'deadline': original + (100 if change == 'extended' else -1)}
+    assert _call_native_briefing(tmp_path, context) == 2
+    capsys.readouterr()
+    assert sum(m == 'POST' and p == '/v1/tasks' for m, p, _ in wire.calls) == 3
+    if change == 'expired_original':
+        assert all(p.endswith('/cancel') for _, p, _ in wire.calls[before:])
+        assert len(wire.calls[before:]) == 3
+    else:
+        assert len(wire.calls[before:]) == 1
 
 
 def test_native_briefing_three_independent_roles_and_original_schema(tmp_path, capsys):
