@@ -1314,6 +1314,79 @@ def run_historical_diagnosis_rehearsal(
     return result
 
 
+def _diagnosis_binding():
+    """Explicit non-secret scene binding; never infer a route from old CLI settings."""
+    import stat
+
+    path = os.environ.get("QUANT_MONITOR_DIAGNOSIS_BINDING")
+    if not path:
+        raise ValueError("native binding required")
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(fd, "rb") as stream:
+        info = os.fstat(stream.fileno())
+        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o600):
+            raise ValueError("private binding required")
+        raw = stream.read(16001)
+    if len(raw) > 16000:
+        raise ValueError("binding too large")
+    return json.loads(raw)
+
+
+def _diagnosis_native_client(binding, factory):
+    from ai_service.client import TaskClient, github_token
+
+    if (not isinstance(binding, dict) or set(binding) != {
+            "schema_version", "project", "resource", "audience", "mode", "provider", "profile", "model", "worker"}
+            or binding["schema_version"] != "quant.monitor-diagnosis-native.v1"
+            or binding["project"] != _OPERATIONAL_DIAGNOSIS_SOURCE_REPOSITORY
+            or binding["mode"] not in {"agent", "api"}
+            or any(not isinstance(binding[key], str) or not 1 <= len(binding[key]) <= 200
+                   or any(char.isspace() for char in binding[key])
+                   for key in ("resource", "audience", "provider", "profile", "model"))
+            or len(binding["profile"]) > 100 or ":" in binding["profile"]
+            or (binding["mode"] == "agent" and (
+                not isinstance(binding["worker"], str) or not 1 <= len(binding["worker"]) <= 200))
+            or (binding["mode"] == "api" and binding["worker"] is not None)):
+        raise ValueError("native binding required")
+    if factory is None and not (
+        os.environ.get("ACTIONS_ID_TOKEN_REQUEST_URL") and os.environ.get("ACTIONS_ID_TOKEN_REQUEST_TOKEN")
+    ):
+        raise ValueError("workload identity required")
+    client = (factory(binding) if factory else TaskClient(
+        binding["resource"], lambda: github_token(binding["audience"])))
+    if not isinstance(client, TaskClient) or client.resource != binding["resource"]:
+        raise ValueError("native client mismatch")
+    return client
+
+
+def _diagnosis_digest(value):
+    return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True,
+                                    separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+
+
+def _diagnosis_request(errors, observation, binding):
+    text = {"type": "string", "minLength": 1, "maxLength": 2000}
+    checks = {"type": "array", "minItems": 1, "maxItems": 10, "items": text}
+    properties = {"schema_version": {"const": "quant.monitor-diagnosis.v1"},
+                  "likely_cause": text, "evidence_to_inspect": checks, "safe_next_checks": checks,
+                  "advisory_only": {"const": True}, "execution_authority_granted": {"const": False}}
+    prompt = _operational_diagnosis_prompt(errors, observation=observation)
+    return {"mode": binding["mode"], "profile": binding["profile"], "model": binding["model"],
+            "objective": prompt, "materials": [], "timeout_seconds": 600,
+            "output_schema": {"type": "object", "additionalProperties": False,
+                              "required": list(properties), "properties": properties}}
+
+
+def _save_native_diagnosis(root, state):
+    _write_alert_state(root, state)
+    directory = os.open(_alert_state_path(root).parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+
+
 def _run_operational_diagnosis(
     root: Path,
     data_errors: list[dict[str, str]],
@@ -1323,106 +1396,177 @@ def _run_operational_diagnosis(
     attempt_date: str | None = None,
     config_loader=None,
     client_factory=None,
+    clock=None,
+    cancel=False,
 ) -> dict[str, Any]:
+    """One selected cloud handler; each invocation performs at most one read/submit.
+
+    Intent and the daily attempt are durable before POST. A lost ID remains HOLD;
+    resumption reads only a known, fully bound ID. Cancellation is a request, never
+    proof that the worker stopped. Legacy client injection is no longer accepted.
+    """
+    import math
+    import time
+
+    def number(value):
+        return type(value) in (int, float) and math.isfinite(value)
+
+    unavailable = {"status": "unavailable", "reason": "ai_result_unavailable",
+                   "failure_stage": "diagnosis_result_processing", "failure_category": "result_unavailable"}
     if not data_errors:
         return {"status": "skipped", "reason": "no_data_errors"}
-    if not re.fullmatch(r"[0-9a-f]{64}", fingerprint):
+    if not isinstance(fingerprint, str) or not re.fullmatch(r"[0-9a-f]{64}", fingerprint):
         return {"status": "rejected", "reason": "invalid_fingerprint"}
+    failure_stage = "diagnosis_state_processing"
     try:
+        # Missing configuration must neither create state nor spend an attempt.
         state = _load_operational_diagnosis_state(root)
-        pending = state.get("operational_diagnosis_pending", {})
-        if not isinstance(pending, dict):
-            raise OSError("invalid diagnosis state")
-        resume_task_id = pending.get(fingerprint)
-        if resume_task_id is not None and (not isinstance(resume_task_id, str) or not resume_task_id):
-            raise OSError("invalid diagnosis task identity")
-        last_date = state.get("operational_diagnosis_last_attempt_date")
-        if resume_task_id is None:
-            if attempt_date is not None and last_date is not None and last_date >= attempt_date:
-                return {"status": "skipped", "reason": "daily_attempt_limit"}
-            if _operational_diagnosis_attempted(root, fingerprint):
-                return {"status": "skipped", "reason": "already_attempted"}
-    except OSError as exc:
-        return {
-            "status": "deferred", "reason": "dedupe_state_unavailable",
-            "failure_stage": "diagnosis_state_processing", "failure_category": _diagnosis_failure_category(exc),
-        }
-
-    if config_loader is None and not (
-        os.environ.get("ACTIONS_ID_TOKEN_REQUEST_URL") and os.environ.get("ACTIONS_ID_TOKEN_REQUEST_TOKEN")
-    ):
-        return {"status": "deferred", "reason": "ai_task_service_not_configured"}
-    try:
-        if config_loader is None:
-            from quant_platform_kit.strategy_lifecycle.ai_provider import AiProviderConfig, AiServiceConfig
-
-            config_loader = lambda: AiServiceConfig.reliability(primary=AiProviderConfig.from_env(label="monitor-diagnosis"))
-        if client_factory is None:
-            from quant_platform_kit.strategy_lifecycle.ai_provider import AiServiceClient
-
-            client_factory = AiServiceClient
-        config = config_loader()
-        client = client_factory(config)
-    except (ImportError, OSError, RuntimeError, ValueError):
-        return {"status": "deferred", "reason": "ai_task_service_not_configured"}
-    try:
-        _record_operational_diagnosis_attempt(root, fingerprint, attempt_date=attempt_date)
-    except OSError as exc:
-        return {
-            "status": "deferred", "reason": "dedupe_state_unavailable",
-            "failure_stage": "diagnosis_attempt_persistence", "failure_category": _diagnosis_failure_category(exc),
-        }
-    try:
-        prompt = _operational_diagnosis_prompt(data_errors, observation=observation)
-        result = client.execute(prompt, timeout=600, idempotency_key="monitor-diagnosis:" + fingerprint,
-                                resume_task_id=resume_task_id)
-    except Exception as exc:
-        return {
-            "status": "unavailable", "reason": "ai_outcome_unknown",
-            "failure_stage": "diagnosis_execution", "failure_category": _diagnosis_failure_category(exc),
-        }
-
-    raw = result.raw if isinstance(getattr(result, "raw", None), dict) else {}
-    task_id = raw.get("id")
-    if raw.get("status") in {"queued", "running", "submitting", "outcome_unknown"}:
-        if not isinstance(task_id, str) or not task_id or (resume_task_id is not None and task_id != resume_task_id):
-            return {"status": "unavailable", "reason": "ai_task_identity_unavailable"}
         try:
-            _store_diagnosis_pending(root, fingerprint, task_id)
-        except OSError:
-            return {"status": "unavailable", "reason": "diagnosis_state_unavailable"}
-        return {"status": "deferred", "reason": "ai_task_pending", "job_id": task_id}
-    if _valid_diagnosis_result(result, raw) and (resume_task_id is None or task_id == resume_task_id):
-        try:
-            _store_diagnosis_pending(root, fingerprint, None)
-        except OSError:
-            return {"status": "unavailable", "reason": "diagnosis_state_unavailable"}
-        return {"status": "succeeded", "job_id": task_id}
-    return {
-        "status": "unavailable", "reason": "ai_result_unavailable",
-        "failure_stage": "diagnosis_result_processing", "failure_category": "result_unavailable",
-    }
+            binding = json.loads(json.dumps((config_loader or _diagnosis_binding)(), allow_nan=False))
+            client = _diagnosis_native_client(binding, client_factory)
+            now = clock or time.time
+            if not number(now()) or type(cancel) is not bool:
+                raise ValueError("invalid execution limits")
+        except (ImportError, OSError, RuntimeError, ValueError, TypeError, KeyError, AttributeError):
+            return {"status": "deferred", "reason": "ai_task_service_not_configured"}
+        _prepare_operational_diagnosis_root(root)
+        with _alert_state_exclusive(root):
+            state = _load_operational_diagnosis_state(root)
+            native = state.get("operational_diagnosis_native", {})
+            legacy_pending = state.get("operational_diagnosis_pending", {})
+            if not isinstance(native, dict) or not isinstance(legacy_pending, dict):
+                raise OSError("invalid diagnosis state")
+            saved = native.get(fingerprint)
+            if saved is None:
+                last_date = state.get("operational_diagnosis_last_attempt_date")
+                if attempt_date is not None and last_date is not None and last_date >= attempt_date:
+                    return {"status": "skipped", "reason": "daily_attempt_limit"}
+                if fingerprint in state.get("operational_diagnosis_attempts", []):
+                    return {"status": "skipped", "reason": "already_attempted"}
+                # An old pending ID has no frozen native contract; never adopt or replace it.
+                if legacy_pending.get(fingerprint) is not None:
+                    return unavailable
+                if cancel:
+                    return unavailable
+                request = _diagnosis_request(data_errors, observation, binding)
+                saved = {"binding": binding, "request": request, "request_sha256": _diagnosis_digest(request),
+                         "deadline": now() + 600, "task_id": None, "task_deadline": None,
+                         "claim": None, "output_sha256": None, "cancel_sent": False, "phase": "intent",
+                         "errors": [{key: error[key] for key in ("domain", "code", "error_type")} for error in data_errors],
+                         "observation": observation}
+                native[fingerprint] = saved
+                attempts = state.setdefault("operational_diagnosis_attempts", [])
+                attempts.append(fingerprint)
+                state["operational_diagnosis_native"] = native
+                if attempt_date is not None:
+                    state["operational_diagnosis_last_attempt_date"] = attempt_date
+                state["schema_version"] = "quant_monitor_alert_state.v1"
+                failure_stage = "diagnosis_attempt_persistence"
+                _save_native_diagnosis(root, state)
+                fresh = True
+            else:
+                fresh = False
+                if (not isinstance(saved, dict) or set(saved) != {
+                        "binding", "request", "request_sha256", "deadline", "task_id", "task_deadline",
+                        "claim", "output_sha256", "cancel_sent", "phase", "errors", "observation"}
+                        or saved["binding"] != binding
+                        or saved["request_sha256"] != _diagnosis_digest(saved["request"])
+                        or _diagnosis_digest(saved["request"]) != _diagnosis_digest(
+                            _diagnosis_request(data_errors, saved["observation"], binding))
+                        or not number(saved["deadline"]) or type(saved["cancel_sent"]) is not bool
+                        or saved["phase"] not in {"intent", "pending", "completed", "halt"}
+                        or (saved["task_id"] is not None and (
+                            not isinstance(saved["task_id"], str) or not 1 <= len(saved["task_id"]) <= 200))
+                        or (saved["task_deadline"] is not None and not number(saved["task_deadline"]))):
+                    return unavailable
+                if saved.get("phase") == "completed":
+                    return {"status": "skipped", "reason": "daily_attempt_limit" if attempt_date and
+                            state.get("operational_diagnosis_last_attempt_date", "") >= attempt_date else "already_attempted"}
+                if saved.get("phase") == "halt":
+                    return unavailable
+                if saved.get("task_id") is None:
+                    return {"status": "unavailable", "reason": "ai_outcome_unknown"}
+            failure_stage = "diagnosis_execution"
 
+            def stop():
+                saved["phase"] = "halt"
+                if saved["task_id"] and not saved["cancel_sent"]:
+                    saved["cancel_sent"] = True
+                    _save_native_diagnosis(root, state)
+                    try:
+                        client.cancel(saved["task_id"])
+                    except Exception:
+                        pass  # cancel may have committed; never repeat it automatically.
+                else:
+                    _save_native_diagnosis(root, state)
+                return {"status": "unavailable", "reason": "ai_task_stop_requested"}
 
-def _valid_diagnosis_result(result, raw):
-    return (getattr(result, "success", False) is True and raw.get("status") == "completed"
-            and isinstance(raw.get("id"), str) and bool(raw["id"])
-            and raw.get("result_kind") == "advisory"
-            and raw.get("model_verification") in {"provider_reported", "unavailable"})
-
-
-def _store_diagnosis_pending(root, fingerprint, task_id):
-    with _alert_state_exclusive(root):
-        state = _load_operational_diagnosis_state(root)
-        pending = state.get("operational_diagnosis_pending", {})
-        if not isinstance(pending, dict):
-            raise OSError("invalid diagnosis state")
-        if task_id is None:
-            pending.pop(fingerprint, None)
-        else:
-            pending[fingerprint] = task_id
-        state["operational_diagnosis_pending"] = pending
-        _write_alert_state(root, state)
+            current = now()
+            if not number(current):
+                saved["phase"] = "halt"
+                _save_native_diagnosis(root, state)
+                return unavailable
+            if cancel or current >= saved["deadline"] or (
+                    saved["task_deadline"] is not None and current >= saved["task_deadline"]):
+                return stop()
+            try:
+                record = (client.submit(saved["request"], "monitor-diagnosis:" + fingerprint) if fresh
+                          else client.get(saved["task_id"]))
+            except Exception as exc:
+                return {"status": "unavailable", "reason": "ai_outcome_unknown",
+                        "failure_stage": failure_stage, "failure_category": _diagnosis_failure_category(exc)}
+            failure_stage = "diagnosis_result_processing"
+            if (not isinstance(record, dict) or record.get("owner") != binding["project"]
+                    or record.get("provider") != binding["provider"]
+                    or type(record.get("revision")) is not int or record["revision"] != 1
+                    or record.get("result_kind") != "advisory"
+                    or _diagnosis_digest(record.get("request")) != saved["request_sha256"]
+                    or not isinstance(record.get("id"), str) or not 1 <= len(record["id"]) <= 200
+                    or (saved["task_id"] is not None and saved["task_id"] != record["id"])
+                    or not number(record.get("deadline"))
+                    or (saved["task_deadline"] is not None and saved["task_deadline"] != record["deadline"])):
+                saved["phase"] = "halt"
+                _save_native_diagnosis(root, state)
+                return unavailable
+            saved["task_id"], saved["task_deadline"] = record["id"], record["deadline"]
+            # Save the known task before checking expiry or interpreting its result.
+            _save_native_diagnosis(root, state)
+            current = now()
+            if not number(current) or current >= min(saved["deadline"], record["deadline"]):
+                return stop()
+            worker, attempt = record.get("worker"), record.get("attempt")
+            claim = [worker, attempt, record["revision"]]
+            if (binding["mode"] == "api" and (worker is not None or attempt is not None)
+                    or binding["mode"] == "agent" and (worker is not None or attempt is not None) and (
+                        worker != binding["worker"] or not isinstance(attempt, str) or not 1 <= len(attempt) <= 200)
+                    or saved["claim"] is not None and saved["claim"] != claim):
+                saved["phase"] = "halt"
+                _save_native_diagnosis(root, state)
+                return unavailable
+            if worker is not None:
+                saved["claim"] = claim
+            status = record.get("status")
+            if status in {"queued", "submitting", "running"}:
+                saved["phase"] = "pending"
+                _save_native_diagnosis(root, state)
+                return {"status": "deferred", "reason": "ai_task_pending", "job_id": record["id"]}
+            if status == "completed" and (binding["mode"] == "api" or saved["claim"] is not None):
+                from jsonschema import Draft202012Validator
+                if Draft202012Validator(saved["request"]["output_schema"]).is_valid(record.get("output")):
+                    saved["phase"] = "completed"
+                    saved["output_sha256"] = _diagnosis_digest(record["output"])
+                    _save_native_diagnosis(root, state)
+                    current = now()
+                    if not number(current) or current >= min(saved["deadline"], record["deadline"]):
+                        return stop()
+                    return {"status": "succeeded", "job_id": record["id"]}
+            saved["phase"] = "halt"
+            _save_native_diagnosis(root, state)
+            return unavailable
+    except (OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
+        return {"status": "deferred" if failure_stage in {"diagnosis_state_processing", "diagnosis_attempt_persistence"} else "unavailable",
+                "reason": "dedupe_state_unavailable", "failure_stage": failure_stage,
+                "failure_category": _diagnosis_failure_category(exc)}
 
 
 def _diagnosis_failure_category(error: Exception) -> str:
@@ -1482,6 +1626,17 @@ def diagnose_recent_cycles(root: Path, *, now: datetime | None = None) -> dict[s
     failure_stage = "diagnosis_state_processing"
     try:
         state = _load_operational_diagnosis_state(state_root)
+        native = state.get("operational_diagnosis_native", {})
+        if not isinstance(native, dict):
+            raise OSError("invalid diagnosis state")
+        for fingerprint, pending in native.items():
+            if not isinstance(pending, dict):
+                raise OSError("invalid diagnosis state")
+            if pending.get("phase") in {"intent", "pending"}:
+                return _run_operational_diagnosis(
+                    state_root, pending["errors"], fingerprint, observation=pending["observation"],
+                    attempt_date=now.date().isoformat(),
+                )
         last_date = state.get("operational_diagnosis_last_attempt_date")
         if last_date is not None and last_date >= now.date().isoformat():
             return {"status": "skipped", "reason": "daily_attempt_limit"}
