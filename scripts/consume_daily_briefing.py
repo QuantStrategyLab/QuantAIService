@@ -546,8 +546,47 @@ _SUMMARY_FAILURE_DETAILS = {
 
 
 
+def _build_native_review_context(path, *, client=None, clock=None):
+    """Read one explicit non-secret Q02 binding; authentication stays in the SDK."""
+    import math
+    import stat
+    import time
+    from ai_service.client import TaskClient, github_token
+
+    try:
+        path = Path(path)
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(fd, "rb") as stream:
+            info = os.fstat(stream.fileno())
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                    or info.st_nlink != 1 or stat.S_IMODE(info.st_mode) != 0o600):
+                raise ValueError("invalid native binding")
+            raw = stream.read(32_001)
+        binding = json.loads(raw)
+        if (len(raw) > 32_000 or not isinstance(binding, dict)
+                or set(binding) != {"schema_version", "project", "resource", "audience", "roles", "state_path", "deadline"}
+                or binding["schema_version"] != "quant.briefing-native.v1"
+                or binding["project"] != "QuantStrategyLab/QuantAIService"
+                or not isinstance(binding["audience"], str) or not 1 <= len(binding["audience"]) <= 200
+                or type(binding["deadline"]) not in (int, float) or not math.isfinite(binding["deadline"])):
+            raise ValueError("invalid native binding")
+        state = Path(binding["state_path"])
+        if not state.is_absolute() or state.resolve() != state or not state.parent.is_dir():
+            raise ValueError("invalid native state")
+        if client is None:
+            audience = binding["audience"]
+            client = TaskClient(binding["resource"], lambda: github_token(audience))
+        if not isinstance(client, TaskClient) or client.resource != binding["resource"]:
+            raise ValueError("invalid native client")
+        return {"binding_kind": "native_cli_v1", "project": binding["project"],
+                "audience": binding["audience"], "client": client, "roles": binding["roles"],
+                "state_path": state, "deadline": binding["deadline"], "now": clock or time.time}
+    except (OSError, ValueError, TypeError, KeyError):
+        raise ValueError("native_review_binding_unavailable") from None
+
+
 def _native_briefing_review(material, operation_id, context):
-    """Q02's explicit synthetic native path; no live transport or retry fallback."""
+    """Q02's native three-role contract, only when explicitly requested by this scene."""
     unavailable = {"status": "unavailable", "advisory_only": True}
     try:
         import fcntl
@@ -571,20 +610,23 @@ def _native_briefing_review(material, operation_id, context):
         roles = ("primary", "secondary", "verification")
         client, routes = context["client"], context["roles"]
         path, deadline, now = context["state_path"], context["deadline"], context["now"]
-        if (context.get("synthetic_only") is not True
+        synthetic = (context.get("synthetic_only") is True
+                     and not isinstance(client.transport, PublicHTTPS)
+                     and isinstance(client.token, str) and client.token.startswith("synthetic-")
+                     and (urlsplit(client.resource).hostname or "").endswith(".invalid"))
+        native = context.get("binding_kind") == "native_cli_v1"
+        if (not (synthetic or native)
                 or type(context.get("cancel", False)) is not bool
                 or context["project"] != "QuantStrategyLab/QuantAIService"
-                or not isinstance(client, TaskClient) or isinstance(client.transport, PublicHTTPS)
-                or not isinstance(client.token, str) or not client.token.startswith("synthetic-")
-                or not (urlsplit(client.resource).hostname or "").endswith(".invalid")
+                or not isinstance(client, TaskClient)
                 or set(routes) != set(roles) or not number(deadline) or not number(now())
                 or not isinstance(path, Path) or path.resolve() != path
                 or stat.S_IMODE(path.parent.stat().st_mode) != 0o700):
             return unavailable
-        for role, provider in zip(roles, ("dot", "grok", "dot")):
+        for role in roles:
             route = routes[role]
             if (set(route) != {"provider", "model", "profile", "worker"}
-                    or route["provider"] != provider
+                    or route["provider"] not in {"dot", "grok"}
                     or any(not isinstance(value, str) or not value or len(value) > 200
                            for value in route.values())):
                 return unavailable
@@ -607,6 +649,7 @@ def _native_briefing_review(material, operation_id, context):
         } for role in roles}
         binding = {"operation_id": operation_id, "input_sha256": material_sha,
                    "project": context["project"], "resource": client.resource,
+                   "audience": context.get("audience"),
                    "routes": routes, "deadline": deadline,
                    "requests": {role: digest(requests[role]) for role in roles}}
         flags = os.O_RDWR | os.O_APPEND | os.O_NOFOLLOW
@@ -759,7 +802,8 @@ def _native_briefing_review(material, operation_id, context):
     return unavailable
 
 
-def main(argv: list[str] | None = None, *, summary_context=None, review_context=None) -> int:
+def main(argv: list[str] | None = None, *, summary_context=None, review_context=None,
+         native_client=None, native_clock=None) -> int:
     parser = argparse.ArgumentParser(description="Consume quant-monitor daily briefing reports.")
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument(
@@ -813,7 +857,13 @@ def main(argv: list[str] | None = None, *, summary_context=None, review_context=
         action="store_true",
         help="Request a three-role advisory review of validated briefing evidence",
     )
+    parser.add_argument("--native-review-binding", help="Explicit private, non-secret Q02 native binding JSON")
+    parser.add_argument("--native-review-cancel", action="store_true", help="Cancel only original task IDs in the bound Q02 operation")
     args = parser.parse_args(argv)
+    if (args.native_review_binding or args.native_review_cancel) and not args.dual_review:
+        parser.error("native review options require --dual-review")
+    if args.native_review_binding and review_context is not None:
+        parser.error("select one native review binding")
     if args.summary_only and (args.dispatch or args.send_dry_run or args.dual_review):
         parser.error("--summary-only cannot dispatch alerts or run dual review")
     if args.send_dry_run and (args.ai_summary or args.dual_review):
@@ -880,14 +930,16 @@ def main(argv: list[str] | None = None, *, summary_context=None, review_context=
         material = {"summary_reports": result.summary_reports, "day": args.day, "advisory_only": True}
         identity = hashlib.sha256(json.dumps(material, sort_keys=True).encode()).hexdigest()
         try:
-            if review_context is not None:
-                review = _native_briefing_review(material, "briefing-review:" + identity, review_context)
-            else:
-                from quant_platform_kit.strategy_lifecycle.task_review import review_material
-                review = review_material(material, operation_id="briefing-review:" + identity,
-                                         required_roles=("primary", "secondary", "verification"))
+            if args.native_review_binding:
+                review_context = _build_native_review_context(args.native_review_binding,
+                                                             client=native_client, clock=native_clock)
+            if args.native_review_cancel and review_context is not None:
+                review_context = {**review_context, "cancel": True}
+            review = (_native_briefing_review(material, "briefing-review:" + identity, review_context)
+                      if review_context is not None else {"status": "unavailable", "advisory_only": True,
+                                                         "reason": "native_binding_required"})
         except Exception:
-            review = {"status": "unavailable", "advisory_only": True}
+            review = {"status": "unavailable", "advisory_only": True, "reason": "native_binding_unavailable"}
         payload["dual_review"] = {"schema":"quant_monitor.briefing_review.v2", "review":review,
                                   "disagreements": review.get("status") != "completed" or review.get("outcome") != "agree_approve",
                                   "advisory_only":True, "execution_authority_granted":False}
