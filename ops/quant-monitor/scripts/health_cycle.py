@@ -1556,6 +1556,9 @@ def _run_operational_diagnosis(
                     saved["phase"] = "completed"
                     saved["output_sha256"] = _diagnosis_digest(record["output"])
                     _save_native_diagnosis(root, state)
+                    current = now()
+                    if not number(current) or current >= min(saved["deadline"], record["deadline"]):
+                        return stop()
                     return {"status": "succeeded", "job_id": record["id"]}
             saved["phase"] = "halt"
             _save_native_diagnosis(root, state)

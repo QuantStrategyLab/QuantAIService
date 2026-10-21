@@ -644,3 +644,34 @@ def test_native_explicit_file_binding_is_private_and_no_oidc_is_no_attempt(
     )
     assert result["reason"] == "ai_task_service_not_configured"
     assert health._load_operational_diagnosis_state(fresh) == {}
+
+
+def test_native_expiry_during_final_checkpoint_cannot_be_consumed(tmp_path, monkeypatch):
+    f = NativeFixture(tmp_path, monkeypatch)
+    first = f.run()
+    f.finish(first['job_id'])
+    original = health._save_native_diagnosis
+    def expiry_during_checkpoint(root, state):
+        original(root, state)
+        if any(record['phase'] == 'completed' for record in state['operational_diagnosis_native'].values()):
+            f.time += 601
+    monkeypatch.setattr(health, '_save_native_diagnosis', expiry_during_checkpoint)
+    result = f.run()
+    assert result == {'status': 'unavailable', 'reason': 'ai_task_stop_requested'}
+    assert f.posts == 1
+    assert sum(path.endswith('/cancel') for method, path in f.calls) == 1
+    assert f.run()['status'] == 'unavailable'
+
+
+def test_native_unknown_survives_alert_clear_and_late_completed_after_cancel_is_hold(tmp_path, monkeypatch):
+    f = NativeFixture(tmp_path, monkeypatch)
+    first = f.run()
+    f.runtime.tick()
+    f.runtime.claim(f.binding['project'], first['job_id'], 'dot', 'synthetic-worker', 'attempt-1')
+    assert f.run(cancel=True)['reason'] == 'ai_task_stop_requested'
+    f.runtime.report(f.binding['project'], first['job_id'], 'dot', 'synthetic-worker', 'attempt-1',
+                     1, 'completed', f.output())
+    health._clear_alert(f.root)
+    assert f.run()['status'] == 'unavailable'
+    assert f.posts == 1
+    assert sum(path.endswith('/cancel') for method, path in f.calls) == 1
