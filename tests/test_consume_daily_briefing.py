@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import builtins
-import hashlib
 import json
 from pathlib import Path
 import tempfile
@@ -11,6 +10,128 @@ from unittest.mock import Mock, patch
 import pytest
 
 from scripts.consume_daily_briefing import main
+
+
+def _native_binding_file(tmp_path, context):
+    binding = {
+        "schema_version": "quant.briefing-native.v1",
+        "project": context["project"], "resource": context["client"].resource,
+        "audience": "synthetic-q02-audience", "roles": context["roles"],
+        "state_path": str(context["state_path"]), "deadline": context["deadline"],
+    }
+    path = tmp_path / "native-binding.json"
+    path.write_text(json.dumps(binding))
+    path.chmod(0o600)
+    return path
+
+
+def test_native_cli_constructs_context_and_consumes_three_real_local_runtime_tasks(tmp_path, capsys):
+    context, transport = _native_briefing_context(tmp_path)
+    binding = _native_binding_file(tmp_path, context)
+    reports = tmp_path / "reports"
+    reports.mkdir()
+    (reports / "us_equity.json").write_text(json.dumps({"domain": "us_equity", "ok": True, "strategies": []}))
+    args = ["--report-dir", str(reports), "--day", "2026-10-21", "--dual-review", "--native-review-binding", str(binding)]
+    assert main(args, native_client=context["client"], native_clock=context["now"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["dual_review"]["review"]["outcome"] == "agree_approve"
+    assert payload["dual_review"]["execution_authority_granted"] is False
+    assert len(transport.claims) == 3
+    posts = sum(m == "POST" and p == "/v1/tasks" for m, p, _ in transport.calls)
+    assert posts == 3
+    # Simulate a new caller/context: read the same local journal and exact task IDs.
+    assert main(args, native_client=context["client"], native_clock=context["now"]) == 0
+    capsys.readouterr()
+    assert sum(m == "POST" and p == "/v1/tasks" for m, p, _ in transport.calls) == posts
+
+
+def test_native_cli_unknown_and_timeout_resume_never_resubmit(tmp_path, capsys):
+    context, transport = _native_briefing_context(tmp_path)
+    binding = _native_binding_file(tmp_path, context)
+    reports = tmp_path / "reports"
+    reports.mkdir()
+    (reports / "us_equity.json").write_text(json.dumps({"domain": "us_equity", "ok": True, "strategies": []}))
+    args = ["--report-dir", str(reports), "--day", "2026-10-21", "--dual-review", "--native-review-binding", str(binding)]
+    transport.lose_submit = True
+    assert main(args, native_client=context["client"], native_clock=context["now"]) == 2
+    capsys.readouterr()
+    calls = len(transport.calls)
+    assert main(args, native_client=context["client"], native_clock=context["now"]) == 2
+    capsys.readouterr()
+    assert len(transport.calls) == calls
+
+
+def test_native_cli_binding_rejects_secrets_symlink_and_wrong_project_before_task_io(tmp_path, capsys):
+    import scripts.consume_daily_briefing as consumer
+    context, transport = _native_briefing_context(tmp_path)
+    binding = _native_binding_file(tmp_path, context)
+    original = json.loads(binding.read_text())
+    for mutation in ({"token": "synthetic-never-read"}, {"project": "Pigbibi/PhotoStory"}, {"resource": "https://wrong.invalid"}):
+        binding.write_text(json.dumps({**original, **mutation}))
+        with pytest.raises(ValueError):
+            consumer._build_native_review_context(binding, client=context["client"], clock=context["now"])
+    binding.write_text(json.dumps(original))
+    alias = tmp_path / "alias.json"
+    alias.symlink_to(binding)
+    with pytest.raises(ValueError):
+        consumer._build_native_review_context(alias, client=context["client"], clock=context["now"])
+    assert transport.calls == []
+
+
+@pytest.mark.parametrize("stop_kind", ["cancel", "caller_deadline"])
+def test_native_cli_stops_original_tasks_once_and_retains_cancel_requested(tmp_path, capsys, stop_kind):
+    context, transport = _native_briefing_context(tmp_path)
+    binding = _native_binding_file(tmp_path, context)
+    reports = tmp_path / "reports"
+    reports.mkdir()
+    (reports / "us_equity.json").write_text(json.dumps({"domain": "us_equity", "ok": True, "strategies": []}))
+    args = ["--report-dir", str(reports), "--day", "2026-10-21", "--dual-review", "--native-review-binding", str(binding)]
+    transport.complete = False
+    assert main(args, native_client=context["client"], native_clock=context["now"]) == 2
+    capsys.readouterr()
+    with transport.runtime.connection() as db:
+        records = [transport.runtime.get(transport.project, row[0]) for row in db.execute('SELECT id FROM tasks')]
+    for record in records:
+        role = record['request']['profile']
+        transport.runtime.claim(transport.project, record['id'], record['provider'], 'q02-'+role, 'q02-attempt-'+role)
+    if stop_kind == "cancel":
+        args += ["--native-review-cancel"]
+    else:
+        transport.clock[0] = context["deadline"] + 1
+    for _ in range(2):
+        assert main(args, native_client=context["client"], native_clock=context["now"]) == 2
+        capsys.readouterr()
+    assert sum(p.endswith('/cancel') for _, p, _ in transport.calls) == 3
+    assert sum(m == 'POST' and p == '/v1/tasks' for m, p, _ in transport.calls) == 3
+    for record in records:
+        current = transport.runtime.get(transport.project, record['id'])
+        assert current['status'] == 'cancel_requested'
+        transport.runtime.report(transport.project, current['id'], current['provider'], current['worker'], current['attempt'], current['revision'], 'cancelled')
+        assert transport.runtime.get(transport.project, current['id'])['status'] == 'cancelled'
+
+
+def test_native_cli_reads_service_expiry_without_creating_replacements(tmp_path, capsys):
+    context, transport = _native_briefing_context(tmp_path)
+    context['deadline'] += 600
+    binding = _native_binding_file(tmp_path, context)
+    reports = tmp_path/'reports'
+    reports.mkdir()
+    (reports/'us_equity.json').write_text(json.dumps({'domain':'us_equity','ok':True,'strategies':[]}))
+    args = ['--report-dir',str(reports),'--day','2026-10-21','--dual-review','--native-review-binding',str(binding)]
+    transport.complete = False
+    assert main(args,native_client=context['client'],native_clock=context['now']) == 2
+    capsys.readouterr()
+    transport.clock[0] += 61
+    with patch('ai_service.runtime.time.time',return_value=transport.clock[0]):
+        transport.runtime.tick()
+    for _ in range(2):
+        assert main(args,native_client=context['client'],native_clock=context['now']) == 2
+        capsys.readouterr()
+    assert sum(m=='POST' and p=='/v1/tasks' for m,p,_ in transport.calls) == 3
+    assert sum(p.endswith('/cancel') for _,p,_ in transport.calls) == 3
+    with transport.runtime.connection() as db:
+        ids = [r[0] for r in db.execute('SELECT id FROM tasks')]
+    assert all(transport.runtime.get(transport.project,task)['status']=='cancel_requested' for task in ids)
 
 
 # Native Q02 tests use a real local TaskRuntime and SDK, never a provider call.
@@ -102,6 +223,56 @@ def _call_native_briefing(tmp_path, context):
     )
     return main(["--report-dir", str(report), "--day", "2026-10-20", "--dual-review"],
                 review_context=context)
+
+
+@pytest.mark.parametrize('field', ['worker', 'deadline', 'project', 'audience'])
+def test_native_binding_mutation_during_response_never_adopts_or_submits_next_role(tmp_path, capsys, field):
+    context, wire = _native_briefing_context(tmp_path)
+    def changed(record):
+        if field == 'worker':
+            context['roles']['primary']['worker'] = 'replacement'
+            record['worker'] = 'replacement'
+        elif field == 'deadline':
+            context['deadline'] += 100
+        elif field == 'project':
+            context['project'] = 'Pigbibi/PhotoStory'
+            record['owner'] = context['project']
+        else:
+            context['audience'] = 'replacement'
+        return record
+    wire.readback = changed
+    assert _call_native_briefing(tmp_path, context) == 2
+    result = json.loads(capsys.readouterr().out)
+    assert result['dual_review']['review'] == {'status':'unavailable', 'advisory_only':True}
+    assert sum(m == 'POST' and p == '/v1/tasks' for m, p, _ in wire.calls) == 1
+    count = len(wire.calls)
+    assert _call_native_briefing(tmp_path, context) == 2
+    capsys.readouterr()
+    assert len(wire.calls) == count
+
+
+@pytest.mark.parametrize('change', ['expired_original', 'extended', 'shortened'])
+def test_native_remote_deadline_is_frozen_before_resume_and_adoption(tmp_path, capsys, change):
+    context, wire = _native_briefing_context(tmp_path)
+    context['deadline'] += 600
+    wire.complete = False
+    original = wire.clock[0] + 5
+    wire.readback = lambda record: {**record, 'deadline':original}
+    assert _call_native_briefing(tmp_path, context) == 2
+    capsys.readouterr()
+    before = len(wire.calls)
+    if change == 'expired_original':
+        wire.clock[0] = original + 1
+    else:
+        wire.readback = lambda record: {**record, 'deadline': original + (100 if change == 'extended' else -1)}
+    assert _call_native_briefing(tmp_path, context) == 2
+    capsys.readouterr()
+    assert sum(m == 'POST' and p == '/v1/tasks' for m, p, _ in wire.calls) == 3
+    if change == 'expired_original':
+        assert all(p.endswith('/cancel') for _, p, _ in wire.calls[before:])
+        assert len(wire.calls[before:]) == 3
+    else:
+        assert len(wire.calls[before:]) == 1
 
 
 def test_native_briefing_three_independent_roles_and_original_schema(tmp_path, capsys):
@@ -321,7 +492,7 @@ def test_dual_review_missing_optional_backend_fails_closed(tmp_path, capsys, err
     assert code == 2
     assert payload["dual_review"] == {
         "schema": "quant_monitor.briefing_review.v2",
-        "review": {"status": "unavailable", "advisory_only": True},
+        "review": {"status": "unavailable", "advisory_only": True, "reason": "native_binding_required"},
         "disagreements": True,
         "advisory_only": True,
         "execution_authority_granted": False,
@@ -331,7 +502,7 @@ def test_dual_review_missing_optional_backend_fails_closed(tmp_path, capsys, err
     dispatch.assert_not_called()
 
 
-def test_dual_review_available_backend_preserves_request(tmp_path, capsys):
+def test_dual_review_never_falls_back_to_legacy_backend_without_native_binding(tmp_path, capsys):
     (tmp_path / "us_equity.json").write_text(
         json.dumps({"domain": "us_equity", "ok": True, "strategies": []}),
         encoding="utf-8",
@@ -352,17 +523,10 @@ def test_dual_review_available_backend_preserves_request(tmp_path, capsys):
         code = main(["--report-dir", str(tmp_path), "--day", "2026-10-20", "--dual-review"])
 
     payload = json.loads(capsys.readouterr().out)
-    assert code == 0
-    review_material.assert_called_once()
-    material = review_material.call_args.args[0]
-    assert material == {"summary_reports": [{}], "day": "2026-10-20", "advisory_only": True}
-    assert review_material.call_args.kwargs == {
-        "operation_id": "briefing-review:" + hashlib.sha256(
-            json.dumps(material, sort_keys=True).encode()
-        ).hexdigest(),
-        "required_roles": ("primary", "secondary", "verification"),
-    }
-    assert payload["dual_review"]["disagreements"] is False
+    assert code == 2
+    review_material.assert_not_called()
+    assert payload["dual_review"]["review"]["status"] == "unavailable"
+    assert payload["dual_review"]["disagreements"] is True
     assert payload["dual_review"]["execution_authority_granted"] is False
     dispatch.assert_not_called()
 
