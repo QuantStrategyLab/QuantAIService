@@ -1,0 +1,13 @@
+{
+  "schema": "ai-hook-binding.v1",
+  "service_target": "quant-ai-service-v2",
+  "mode": "shadow",
+  "purpose": "research",
+  "environment": {
+    "url": "AI_SERVICE_URL",
+    "audience": "AI_SERVICE_AUDIENCE",
+    "profile": "AI_SERVICE_PROFILE",
+    "model": "AI_SERVICE_MODEL",
+    "read_token": "AI_HOOK_READ_TOKEN"
+  }
+}
