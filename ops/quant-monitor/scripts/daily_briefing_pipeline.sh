@@ -6,6 +6,7 @@ set -euo pipefail
 
 ROOT="${QUANT_MONITOR_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 AAB="${AIAUDIT_BRIDGE_ROOT:-$HOME/Projects/AIAuditBridge}"
+source "$ROOT/scripts/common_env.sh"
 DAY=$(date -u +%Y-%m-%d)
 OUT="$ROOT/data/daily-reports/$DAY"
 
@@ -115,7 +116,7 @@ except Exception:
   fi
 fi
 
+echo "[briefing-pipeline] domain_exit=${domain_status} runtime_exit=${runtime_status}" >&2
 if [[ "$domain_status" -ne 0 || "$runtime_status" -ne 0 ]]; then
-  echo "[briefing-pipeline] domain_exit=${domain_status} runtime_exit=${runtime_status}" >&2
   exit 1
 fi

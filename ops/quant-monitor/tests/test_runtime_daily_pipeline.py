@@ -7,6 +7,7 @@ import importlib.util
 import io
 import json
 import os
+import shlex
 import subprocess
 import sys
 from datetime import date, datetime, timedelta, timezone
@@ -24,6 +25,7 @@ def _layout(tmp_path: Path) -> tuple[Path, Path, Path]:
     (root / "scripts").mkdir(parents=True, exist_ok=True)
     (aab / "scripts").mkdir(parents=True, exist_ok=True)
     (root / "scripts" / "source_telegram_env.sh").write_text("# stub\n", encoding="utf-8")
+    (root / "scripts" / "common_env.sh").write_bytes((SCRIPT.parent / "common_env.sh").read_bytes())
     (root / "scripts" / "daily_briefing.sh").write_text(
         "#!/bin/bash\nexit \"${DOMAIN_BUILD_EXIT:-0}\"\n",
         encoding="utf-8",
@@ -88,6 +90,31 @@ def test_runtime_switch_off_does_not_call_gcs(tmp_path: Path) -> None:
     assert "--runtime-projection-gcs" not in calls[0]
     assert "--report-dir" in calls[0]
     assert "gs://" not in result.stdout + result.stderr
+
+
+def test_domain_and_runtime_use_the_release_selected_python(tmp_path: Path) -> None:
+    bin_dir = tmp_path / "daily-venv/bin"
+    bin_dir.mkdir(parents=True)
+    marker = tmp_path / "python-calls"
+    wrapper = bin_dir / "python3"
+    wrapper.write_text(
+        f"#!/bin/bash\nprintf 'selected\\n' >> {shlex.quote(str(marker))}\n"
+        f"exec {shlex.quote(sys.executable)} \"$@\"\n",
+        encoding="utf-8",
+    )
+    wrapper.chmod(0o755)
+    (bin_dir / "python").symlink_to(wrapper)
+    result = _run(
+        tmp_path,
+        QUANT_MONITOR_VENV=str(bin_dir.parent),
+        QUANT_MONITOR_RUNTIME_DIGEST_ENABLED="true",
+        QUANT_MONITOR_RUNTIME_PROJECTION_PREFIX="gs://synthetic/runtime_daily",
+        QUANT_MONITOR_RUNTIME_TIMEZONE="UTC",
+        QUANT_MONITOR_RUNTIME_EXPECTED_TARGET_KEY="synthetic-service|rot|paper",
+    )
+    assert result.returncode == 0, result.stderr
+    assert len(marker.read_text().splitlines()) == 3
+    assert "domain_exit=0 runtime_exit=0" in result.stderr
 
 
 def test_enabled_pipeline_uses_timezone_day_and_fixed_handoff_prefix(tmp_path: Path) -> None:
@@ -347,6 +374,26 @@ def test_real_main_pipeline_keeps_runtime_read_rejection_nonzero(tmp_path: Path)
     assert "domain_exit=2 runtime_exit=2" in result.stderr
     assert "runtime_projection_rejected" not in result.stdout
     assert "private" not in result.stderr and "gs://" not in result.stderr
+
+
+def test_missing_runtime_handoff_never_sends_or_replaces_delivery_history(tmp_path: Path) -> None:
+    state = tmp_path / "monitor/data/alert-state/health_cycle.json"
+    state.parent.mkdir(parents=True)
+    original = b'{"deliveries": {"preserved": {"target": {"status": "unknown"}}}}\n'
+    state.write_bytes(original)
+    result = _run(
+        tmp_path, real_main=True,
+        QUANT_MONITOR_RUNTIME_DIGEST_ENABLED="true",
+        QUANT_MONITOR_RUNTIME_PROJECTION_PREFIX="gs://synthetic/runtime_daily",
+        QUANT_MONITOR_RUNTIME_TIMEZONE="UTC",
+        QUANT_MONITOR_RUNTIME_EXPECTED_TARGET_KEY="synthetic-service|rot|paper",
+        RUNTIME_FIXTURE_REJECT="true", RUNTIME_REAL_LEDGER="true",
+    )
+    assert result.returncode == 1
+    assert "reason=runtime_projection_unreadable" in result.stderr
+    assert "runtime_exit=2" in result.stderr
+    assert state.read_bytes() == original
+    assert not (tmp_path / "consume.log.send").exists()
 
 
 def test_immutable_pipeline_uses_real_cli_and_ledger_after_process_restart(tmp_path: Path) -> None:

@@ -31,11 +31,11 @@ def _command(root: str, script: str) -> str:
 
 
 def _env_command(release_root: Path, sha: str) -> str:
-    root = release_root / sha
+    root = release_root.parent / "current"
     monitor = root / "ops/quant-monitor"
     return (
         "{ path=/usr/bin/env ; argv[]=/usr/bin/env "
-        f"QUANT_MONITOR_ROOT={monitor} AIAUDIT_BRIDGE_ROOT={root} "
+        f"QUANT_MONITOR_ROOT={monitor} AIAUDIT_BRIDGE_ROOT={root} QUANT_MONITOR_VENV={monitor}/.venv PATH={monitor}/.venv/bin:${{PATH}} "
         f"/bin/bash {monitor}/scripts/daily_briefing_pipeline.sh"
         " ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }"
     )
@@ -88,6 +88,7 @@ def adoption_case(tmp_path: Path) -> dict[str, Path | str]:
     release_root = tmp_path / "releases"
     old_monitor = release_root / old_sha / "ops/quant-monitor"
     old_monitor.mkdir(parents=True)
+    (release_root.parent / "current").symlink_to(release_root / old_sha)
     runtime_data = tmp_path / "runtime/data"
     runtime_venv = tmp_path / "runtime/.venv"
     runtime_data.mkdir(parents=True)
@@ -114,6 +115,15 @@ def adoption_case(tmp_path: Path) -> dict[str, Path | str]:
     (qpk / "strategy_health_score.py").write_text(
         "def compute_health_score(snapshot, *, drift=None): return None\n", encoding="utf-8"
     )
+    watch = qpk / "watch"
+    watch.mkdir()
+    (watch / "__init__.py").write_text("\n", encoding="utf-8")
+    (watch / "strategy_watch.py").write_text(
+        "def build_strategy_monitoring_finding(**kwargs): return kwargs\n", encoding="utf-8"
+    )
+    (watch / "runner.py").write_text(
+        "def dispatch_strategy_watch_findings(*args, **kwargs): return {}\n", encoding="utf-8"
+    )
     (old_monitor / "data").symlink_to(runtime_data)
     (old_monitor / ".venv").symlink_to(runtime_venv)
 
@@ -135,14 +145,15 @@ case "$unit" in
     root="$TEST_RELEASE_ROOT/$TEST_OLD_SHA"
     if [[ -e "$TEST_RELOADED" ]]; then
       if [[ "${TEST_FAIL_READBACK:-false}" == true ]]; then root="$TEST_RELEASE_ROOT/$TEST_OLD_SHA"; fi
-      wd="$TEST_RELEASE_ROOT/$TEST_NEW_SHA/ops/quant-monitor"
+      current="$(dirname "$TEST_RELEASE_ROOT")/current"
+      wd="$current/ops/quant-monitor"
       if [[ ! -e "$TEST_RELOADED" || "${TEST_FAIL_READBACK:-false}" == true ]]; then wd="$root/ops/quant-monitor"; fi
       if [[ "${TEST_FAIL_READBACK:-false}" == true ]]; then execstart="$TEST_OLD_EXECSTART"; else
-        execstart="{ path=/usr/bin/env ; argv[]=/usr/bin/env QUANT_MONITOR_ROOT=$wd AIAUDIT_BRIDGE_ROOT=$TEST_RELEASE_ROOT/$TEST_NEW_SHA /bin/bash $wd/scripts/daily_briefing_pipeline.sh ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }"
+        execstart="{ path=/usr/bin/env ; argv[]=/usr/bin/env QUANT_MONITOR_ROOT=$wd AIAUDIT_BRIDGE_ROOT=$current QUANT_MONITOR_VENV=$wd/.venv PATH=$wd/.venv/bin:\\${PATH} /bin/bash $wd/scripts/daily_briefing_pipeline.sh ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }"
       fi
       dropin=""
     else
-      wd="$root/ops/quant-monitor"
+      wd="${TEST_OLD_WD:-$root/ops/quant-monitor}"
       execstart="$TEST_OLD_EXECSTART"
       dropin=""
     fi
@@ -160,7 +171,7 @@ case "$unit" in
     printf 'FragmentPath=%s\\nDropInPaths=\\nUnit=codex-daily-briefing.service\\nActiveState=active\\nSubState=waiting\\nUnitFileState=enabled\\n' "$TEST_UNIT_ROOT/codex-daily-briefing.timer"
     ;;
   codex-quant.service)
-    health_wd=/health
+    health_wd="${TEST_HEALTH_CURRENT_ROOT:-/health}"
     health_state=failed
     health_substate=failed
     health_exec='{ path=/bin/bash ; argv[]=/bin/bash /health/health_check.sh ; ignore_errors=no ; start_time=[old] ; stop_time=[old] ; pid=101 ; code=(exited) ; status=0/0 }'
@@ -221,6 +232,7 @@ def _run(case: dict[str, Path | str], *, extra_env: dict[str, str] | None = None
             "TEST_OLD_SHA": str(case["old_sha"]),
             "TEST_NEW_SHA": str(case["sha"]),
             "TEST_OLD_EXECSTART": str(case["old_exec"]),
+            "TEST_OLD_WD": str(case.get("old_wd", "")),
             "TEST_EXECSTARTPRE": str(case["execstartpre"]),
             "TEST_EXECSTARTPRE_POST": str(case["execstartpre_post"]),
             "TEST_UNIT_ROOT": str(case["unit_root"]),
@@ -269,9 +281,12 @@ def test_adopts_only_daily_unit_and_preserves_data_venv_and_prestart(adoption_ca
     assert new_monitor.joinpath(".venv").resolve() == Path(str(case["runtime_venv"]))
     dropin = Path(str(case["unit_root"])) / "codex-daily-briefing.service.d/zzzzzzzzzz-aab-daily-release.conf"
     content = dropin.read_text(encoding="utf-8")
-    assert f"WorkingDirectory={new_monitor}" in content
-    assert f"QUANT_MONITOR_ROOT={new_monitor}" in content
-    assert f"AIAUDIT_BRIDGE_ROOT={Path(str(case['release_root'])) / str(case['sha'])}" in content
+    current = Path(str(case["release_root"])).parent / "current"
+    assert current.resolve() == new_monitor.parents[1]
+    assert f"WorkingDirectory={current}/ops/quant-monitor" in content
+    assert f"QUANT_MONITOR_ROOT={current}/ops/quant-monitor" in content
+    assert f"AIAUDIT_BRIDGE_ROOT={current}" in content
+    assert str(case["sha"]) not in content
     assert "ExecStartPre=" not in content
     assert preserved.read_text(encoding="utf-8") == "[Service]\nEnvironment=EXAMPLE=unchanged\n"
 
@@ -327,7 +342,7 @@ def test_exact_prior_helper_dropin_is_snapshotted_and_replaced(adoption_case: di
     assert result.returncode == 0, result.stderr
     snapshot = dropin_dir / f"zzzzzzzzzz-aab-daily-release.rollback.{case['old_sha']}.{case['sha']}"
     assert snapshot.read_text(encoding="utf-8") == prior_contents
-    assert f"# release-sha: {case['sha']}" in dropin.read_text(encoding="utf-8")
+    assert "daily-release-adoption.v2" in dropin.read_text(encoding="utf-8")
 
 
 def test_two_consecutive_adoptions_accept_exact_helper_execstart(adoption_case: dict[str, Path | str]) -> None:
@@ -335,6 +350,7 @@ def test_two_consecutive_adoptions_accept_exact_helper_execstart(adoption_case: 
     first = _run(case)
     assert first.returncode == 0, first.stderr
     first_sha = str(case["sha"])
+    first_contents = (Path(str(case["unit_root"])) / "codex-daily-briefing.service.d/zzzzzzzzzz-aab-daily-release.conf").read_text()
 
     repo = Path(str(case["repo"]))
     (repo / "ops/quant-monitor/README.md").write_text("second synthetic release\n", encoding="utf-8")
@@ -346,14 +362,16 @@ def test_two_consecutive_adoptions_accept_exact_helper_execstart(adoption_case: 
     case["old_sha"] = first_sha
     case["sha"] = second_sha
     case["old_exec"] = _env_command(Path(str(case["release_root"])), first_sha)
+    case["old_wd"] = str(Path(str(case["release_root"])).parent / "current/ops/quant-monitor")
 
     second = _run(case)
     assert second.returncode == 0, second.stderr
     dropin_dir = Path(str(case["unit_root"])) / "codex-daily-briefing.service.d"
     dropin = dropin_dir / "zzzzzzzzzz-aab-daily-release.conf"
     snapshot = dropin_dir / f"zzzzzzzzzz-aab-daily-release.rollback.{first_sha}.{second_sha}"
-    assert f"# release-sha: {first_sha}\n" in snapshot.read_text(encoding="utf-8")
-    assert f"# release-sha: {second_sha}" in dropin.read_text(encoding="utf-8")
+    assert snapshot.read_text(encoding="utf-8") == first_contents
+    assert dropin.read_text(encoding="utf-8") == first_contents
+    assert (Path(str(case["release_root"])).parent / "current").resolve().name == second_sha
 
 
 def test_failed_readback_keeps_recovery_snapshot_and_does_not_retry(adoption_case: dict[str, Path | str]) -> None:
@@ -364,11 +382,46 @@ def test_failed_readback_keeps_recovery_snapshot_and_does_not_retry(adoption_cas
     assert "reason=daily_configuration_changed" in result.stderr
     assert "manual_readback_no_retry" in result.stderr
     dropin_dir = Path(str(case["unit_root"])) / "codex-daily-briefing.service.d"
-    snapshots = list(dropin_dir.glob("*.rollback.*"))
+    snapshots = [path for path in dropin_dir.glob("*.rollback.*") if not path.name.endswith(".current-target")]
     assert len(snapshots) == 1
     assert snapshots[0].read_text(encoding="utf-8") == "previous_dropin=absent\n"
     invocations = Path(str(case["log"])).read_text(encoding="utf-8").splitlines()
     assert invocations.count("daemon-reload") == 1
+
+
+@pytest.mark.parametrize("module", ["strategy_watch.py", "runner.py"])
+def test_missing_lazy_watcher_import_does_not_switch_release(adoption_case, module):
+    case = adoption_case
+    missing = Path(str(case["site_packages"])) / "quant_platform_kit/strategy_lifecycle/watch" / module
+    missing.unlink()
+    result = _run(case)
+    assert result.returncode == 2
+    assert "daily_runtime_qualification_failed" in result.stderr
+    assert (Path(str(case["release_root"])).parent / "current").resolve().name == case["old_sha"]
+    assert not Path(str(case["reloaded"])).exists()
+
+
+def test_daily_can_use_separate_qualified_venv_without_changing_old_link(adoption_case):
+    case = adoption_case
+    original = Path(str(case["runtime_venv"]))
+    replacement = original.with_name("daily-venv")
+    shutil.copytree(original, replacement, symlinks=True)
+    case["runtime_venv"] = replacement
+    result = _run(case)
+    assert result.returncode == 0, result.stderr
+    old_monitor = Path(str(case["release_root"])) / str(case["old_sha"]) / "ops/quant-monitor"
+    assert (old_monitor / ".venv").resolve() == original
+    assert (Path(str(case["release_root"])) / str(case["sha"]) / "ops/quant-monitor/.venv").resolve() == replacement
+
+
+def test_current_link_shared_with_health_is_not_switched(adoption_case):
+    case = adoption_case
+    current = Path(str(case["release_root"])).parent / "current"
+    result = _run(case, extra_env={"TEST_HEALTH_CURRENT_ROOT": str(current / "ops/quant-monitor")})
+    assert result.returncode == 2
+    assert "current_link_shared_with_health_service" in result.stderr
+    assert current.resolve().name == case["old_sha"]
+    assert not Path(str(case["reloaded"])).exists()
 
 
 def test_health_runtime_state_and_exec_times_do_not_block_adoption(adoption_case: dict[str, Path | str]) -> None:

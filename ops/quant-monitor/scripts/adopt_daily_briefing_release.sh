@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Install an exact immutable release and switch only codex-daily-briefing.service.
+# Install an exact immutable release and switch the daily service through current.
 set -euo pipefail
 
 usage() {
@@ -8,8 +8,8 @@ usage: adopt_daily_briefing_release.sh --sha <40-hex-main-sha> \
   --expected-current-sha <40-hex-release-sha> --repo <git-root> \
   [--release-root <dir>] [--runtime-data <dir>] [--runtime-venv <dir>]
 
-Installs the immutable code release, performs offline imports with the existing
-runtime venv, and changes only the daily service drop-in. It never installs
+Installs the immutable code release, performs offline imports with the selected
+runtime venv, and changes current and the daily service drop-in. It never installs
 packages, starts a service or timer, reads the ledger, or sends a message.
 EOF
 }
@@ -68,6 +68,10 @@ for path in "$REPO_ROOT" "$RELEASE_ROOT" "$RUNTIME_DATA" "$RUNTIME_VENV" "$UNIT_
 done
 [[ -d "$UNIT_ROOT" && ! -L "$UNIT_ROOT" ]] || die "systemd_unit_root_unavailable"
 [[ -x "$SYSTEMCTL" ]] || die "systemctl_unavailable"
+CURRENT_ROOT="$(dirname "$RELEASE_ROOT")/current"
+CURRENT_MONITOR="$CURRENT_ROOT/ops/quant-monitor"
+[[ ! -e "$CURRENT_ROOT" || -L "$CURRENT_ROOT" ]] || die "current_link_unexpected"
+CURRENT_BEFORE="$(readlink "$CURRENT_ROOT" 2>/dev/null || true)"
 
 UNIT="codex-daily-briefing.service"
 TIMER="codex-daily-briefing.timer"
@@ -143,7 +147,24 @@ exec_is_release() {
 exec_is_prior_release() {
   local raw="$1" sha="$2"
   exec_is_release "$raw" "$sha" /bin/bash daily_briefing_pipeline.sh \
-    || exec_is_release "$raw" "$sha" /usr/bin/env daily_briefing_pipeline.sh
+    || exec_is_release "$raw" "$sha" /usr/bin/env daily_briefing_pipeline.sh \
+    || { [[ "$CURRENT_BEFORE" == "$RELEASE_ROOT/$sha" ]] && exec_is_current "$raw"; }
+}
+
+current_dropin_contents() {
+  printf '%s\n' \
+    '# managed-by: AIAuditBridge daily-release-adoption.v2' \
+    "# release-link: $CURRENT_ROOT" \
+    '[Service]' \
+    "WorkingDirectory=$CURRENT_MONITOR" \
+    'ExecStart=' \
+    "ExecStart=/usr/bin/env QUANT_MONITOR_ROOT=$CURRENT_MONITOR AIAUDIT_BRIDGE_ROOT=$CURRENT_ROOT QUANT_MONITOR_VENV=$CURRENT_MONITOR/.venv PATH=$CURRENT_MONITOR/.venv/bin:\${PATH} /bin/bash $CURRENT_MONITOR/scripts/daily_briefing_pipeline.sh"
+}
+
+exec_is_current() {
+  local expected_argv
+  expected_argv="/usr/bin/env QUANT_MONITOR_ROOT=$CURRENT_MONITOR AIAUDIT_BRIDGE_ROOT=$CURRENT_ROOT QUANT_MONITOR_VENV=$CURRENT_MONITOR/.venv PATH=$CURRENT_MONITOR/.venv/bin:\${PATH} /bin/bash $CURRENT_MONITOR/scripts/daily_briefing_pipeline.sh"
+  [[ "$1" == "{ path=/usr/bin/env ; argv[]=${expected_argv} ; "* ]]
 }
 
 owned_dropin_matches_expected_release() {
@@ -215,7 +236,8 @@ read_timer || die "daily_timer_readback_unavailable"
 read_health || die "health_service_readback_unavailable"
 service_is_idle || die "daily_service_active"
 [[ "${service_FragmentPath}" == "$BASE_UNIT" ]] || die "daily_unit_source_unexpected"
-[[ "${service_WorkingDirectory}" == "$RELEASE_ROOT/$EXPECTED_CURRENT_SHA/ops/quant-monitor" ]] \
+[[ "${service_WorkingDirectory}" == "$RELEASE_ROOT/$EXPECTED_CURRENT_SHA/ops/quant-monitor" \
+  || ( "${service_WorkingDirectory}" == "$CURRENT_MONITOR" && "$CURRENT_BEFORE" == "$RELEASE_ROOT/$EXPECTED_CURRENT_SHA" ) ]] \
   || die "daily_working_directory_unexpected"
 exec_is_prior_release "${service_ExecStart}" "$EXPECTED_CURRENT_SHA" \
   || die "daily_execstart_unexpected"
@@ -223,8 +245,10 @@ SERVICE_PRE_BEFORE="$(exec_property_identity "${service_ExecStartPre}")" \
   || die "daily_execstartpre_unavailable"
 [[ -n "$SERVICE_PRE_BEFORE" ]] || die "daily_execstartpre_unavailable"
 DAILY_UNIT_FILE_STATE_BEFORE="${service_UnitFileState}"
+DAILY_WORKING_DIRECTORY_BEFORE="${service_WorkingDirectory}"
 TIMER_BEFORE="${timer_FragmentPath}|${timer_DropInPaths}|${timer_Unit}|${timer_UnitFileState}|${timer_ActiveState}|${timer_SubState}"
 HEALTH_BEFORE="$(health_configuration_identity)" || die "health_service_identity_unavailable"
+[[ "$HEALTH_BEFORE" != *"$CURRENT_ROOT"* ]] || die "current_link_shared_with_health_service"
 DROPINS_BEFORE="$service_DropInPaths"
 
 BASELINE_DROPINS=""
@@ -239,10 +263,12 @@ for existing_dropin in $service_DropInPaths; do
 done
 if [[ "$OWN_DROPIN_PRESENT" == true ]]; then
   [[ "$(wc -c < "$DROPIN")" -le 4096 ]] || die "daily_dropin_unowned_or_unexpected"
-  PRIOR_DROPIN_SHA="$(sed -n 's/^# prior-release-sha: //p' "$DROPIN" 2>/dev/null)"
-  [[ "$PRIOR_DROPIN_SHA" =~ ^[0-9a-f]{40}$ ]] \
-    && owned_dropin_matches_expected_release "$EXPECTED_CURRENT_SHA" "$PRIOR_DROPIN_SHA" \
-    || die "daily_dropin_unowned_or_unexpected"
+  if [[ "$(cat -- "$DROPIN")" != "$(current_dropin_contents)" ]]; then
+    PRIOR_DROPIN_SHA="$(sed -n 's/^# prior-release-sha: //p' "$DROPIN" 2>/dev/null)"
+    [[ "$PRIOR_DROPIN_SHA" =~ ^[0-9a-f]{40}$ ]] \
+      && owned_dropin_matches_expected_release "$EXPECTED_CURRENT_SHA" "$PRIOR_DROPIN_SHA" \
+      || die "daily_dropin_unowned_or_unexpected"
+  fi
 else
   [[ ! -e "$DROPIN" && ! -L "$DROPIN" ]] || die "daily_dropin_state_unexpected"
 fi
@@ -254,9 +280,11 @@ PERSISTENT_DATA="$(readlink -f "$OLD_RELEASE/data" 2>/dev/null || true)"
 RUNTIME_PYTHON="$(readlink -f "$OLD_RELEASE/.venv" 2>/dev/null || true)"
 [[ -n "$PERSISTENT_DATA" && -n "$RUNTIME_PYTHON" \
   && -d "$PERSISTENT_DATA" && -d "$RUNTIME_PYTHON" ]] || die "current_release_links_unavailable"
-[[ "$(readlink -f "$RUNTIME_DATA" 2>/dev/null || true)" == "$PERSISTENT_DATA" \
-  && "$(readlink -f "$RUNTIME_VENV" 2>/dev/null || true)" == "$RUNTIME_PYTHON" ]] \
+[[ "$(readlink -f "$RUNTIME_DATA" 2>/dev/null || true)" == "$PERSISTENT_DATA" ]] \
   || die "runtime_data_or_venv_mismatch"
+[[ -d "$RUNTIME_VENV" && ! -L "$RUNTIME_VENV" && -x "$RUNTIME_VENV/bin/python" ]] \
+  || die "runtime_python_unavailable"
+RUNTIME_PYTHON="$RUNTIME_VENV"
 
 INSTALLER="$REPO_ROOT/ops/quant-monitor/scripts/install_immutable_release.sh"
 [[ -x "$INSTALLER" ]] || die "immutable_installer_unavailable"
@@ -318,6 +346,11 @@ from quant_platform_kit.strategy_lifecycle.drift_detector import run_drift_detec
 from quant_platform_kit.strategy_lifecycle.health_dashboard import build_dashboard
 from quant_platform_kit.strategy_lifecycle.performance_monitor import run_monitor
 from quant_platform_kit.strategy_lifecycle.strategy_health_score import compute_health_score
+from quant_platform_kit.strategy_lifecycle.watch.strategy_watch import build_strategy_monitoring_finding
+from quant_platform_kit.strategy_lifecycle.watch.runner import dispatch_strategy_watch_findings
+
+assert callable(build_strategy_monitoring_finding)
+assert callable(dispatch_strategy_watch_findings)
 
 def accepts(signature, name):
     return name in signature.parameters or any(
@@ -344,7 +377,7 @@ read_service || die "daily_service_readback_unavailable"
 read_timer || die "daily_timer_readback_unavailable"
 read_health || die "health_service_readback_unavailable"
 service_is_idle || die "daily_service_active"
-[[ "${service_WorkingDirectory}" == "$RELEASE_ROOT/$EXPECTED_CURRENT_SHA/ops/quant-monitor" \
+[[ "${service_WorkingDirectory}" == "$DAILY_WORKING_DIRECTORY_BEFORE" \
   && "${service_DropInPaths}" == "$DROPINS_BEFORE" \
   && "${service_UnitFileState}" == "$DAILY_UNIT_FILE_STATE_BEFORE" ]] \
   || die "daily_service_changed_during_adoption"
@@ -369,6 +402,8 @@ else
     || die "recovery_snapshot_failed"
 fi
 chmod 0600 "$SNAPSHOT" 2>/dev/null || die "recovery_snapshot_failed"
+(umask 077; printf '%s\n' "$CURRENT_BEFORE" > "$SNAPSHOT.current-target") \
+  || die "recovery_snapshot_failed"
 
 STAGED="$(mktemp "$DROPIN_DIR/.daily-release.XXXXXX" 2>/dev/null)" \
   || die "daily_dropin_stage_failed"
@@ -377,18 +412,25 @@ cleanup_stage() {
   return 0
 }
 trap cleanup_stage EXIT
-if ! (cat <<EOF
-# managed-by: AIAuditBridge daily-release-adoption.v1
-# release-sha: $SHA
-# prior-release-sha: $EXPECTED_CURRENT_SHA
-[Service]
-WorkingDirectory=$NEW_MONITOR
-ExecStart=
-ExecStart=/usr/bin/env QUANT_MONITOR_ROOT=$NEW_MONITOR AIAUDIT_BRIDGE_ROOT=$NEW_ROOT /bin/bash $NEW_MONITOR/scripts/daily_briefing_pipeline.sh
-EOF
-) 2>/dev/null > "$STAGED"; then die "daily_dropin_stage_failed"; fi
+if ! current_dropin_contents 2>/dev/null > "$STAGED"; then die "daily_dropin_stage_failed"; fi
 chmod 0644 "$STAGED" 2>/dev/null || die "daily_dropin_stage_failed"
-mv -f -- "$STAGED" "$DROPIN" 2>/dev/null || die "daily_dropin_write_failed"
+[[ "$(readlink "$CURRENT_ROOT" 2>/dev/null || true)" == "$CURRENT_BEFORE" ]] \
+  || die "current_link_changed_during_adoption"
+if ! "$RUNTIME_PYTHON/bin/python" -I -B - "$NEW_ROOT" "$CURRENT_ROOT" <<'PY'
+import os
+import sys
+from pathlib import Path
+
+target, current = sys.argv[1:]
+staged = Path(current + f".daily-adoption.{os.getpid()}")
+try:
+    staged.symlink_to(target)
+    os.replace(staged, current)
+finally:
+    staged.unlink(missing_ok=True)
+PY
+then postflight_unknown "current_link_switch_failed"; fi
+mv -f -- "$STAGED" "$DROPIN" 2>/dev/null || postflight_unknown "daily_dropin_write_failed"
 STAGED=""
 
 if ! "$SYSTEMCTL" daemon-reload >/dev/null 2>&1; then
@@ -400,7 +442,8 @@ read_timer || postflight_unknown "timer_readback_failed"
 read_health || postflight_unknown "health_readback_failed"
 service_is_idle || postflight_unknown "daily_service_not_idle"
 [[ "${service_FragmentPath:-}" == "$BASE_UNIT" \
-  && "${service_WorkingDirectory:-}" == "$NEW_MONITOR" \
+  && "${service_WorkingDirectory:-}" == "$CURRENT_MONITOR" \
+  && "$(readlink -f "$CURRENT_ROOT" 2>/dev/null || true)" == "$NEW_ROOT" \
   && "$(normalize_dropin_paths "$service_DropInPaths" 2>/dev/null || true)" == "$(normalize_dropin_paths "$BASELINE_DROPINS $DROPIN" 2>/dev/null || true)" \
   && "${service_UnitFileState:-}" == "$DAILY_UNIT_FILE_STATE_BEFORE" ]] \
   || postflight_unknown "daily_configuration_changed"
@@ -409,7 +452,7 @@ SERVICE_PRE_CURRENT="$(exec_property_identity "${service_ExecStartPre:-}")" \
 [[ "$SERVICE_PRE_CURRENT" == "$SERVICE_PRE_BEFORE" ]] \
   || postflight_unknown "daily_execstartpre_changed"
 
-exec_is_release "${service_ExecStart}" "$SHA" /usr/bin/env daily_briefing_pipeline.sh \
+exec_is_current "${service_ExecStart}" \
   || postflight_unknown "daily_execstart_mismatch"
 [[ "${timer_Unit}" == "$UNIT" \
   && "${timer_FragmentPath}" == "$TIMER_UNIT" \
