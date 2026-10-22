@@ -1,5 +1,5 @@
 You are reviewing one bounded, human-authorized platform issue for
-`QuantStrategyLab/LongBridgePlatform` through AIAuditBridge.
+`QuantStrategyLab/LongBridgePlatform` through QuantAIService.
 
 ${MODE_INSTRUCTIONS}
 
