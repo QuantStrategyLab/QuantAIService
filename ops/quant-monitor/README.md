@@ -268,16 +268,22 @@ failure the script removes only its own temporary directory.
 ### Daily-only source adoption
 
 `adopt_daily_briefing_release.sh` links an immutable source release to the
-existing approved venv and data, then performs offline import and signature
+selected daily venv and existing data, then performs offline import and signature
 checks for the candidate consumer/runtime modules and the domain builder's
-required QPK modules, and checks candidate source ownership and `gcloud`
-availability. It installs no packages, changes no QPK/health/AI configuration,
+required QPK modules, including the lazily used `watch.strategy_watch` and
+`watch.runner` interfaces, and checks candidate source ownership and `gcloud`
+availability. It installs no packages and changes no health/AI configuration,
 reads no real ledger or report, calls no cloud API, and sends no notification.
 After the checks, it writes only its own
 `zzzzzzzzzz-aab-daily-release.conf`, overriding the daily service's
-`WorkingDirectory`, `ExecStart`, and two code roots. The original unit's
-credentials, routing, timezone, QPK, data, venv, `ExecStartPre`, and other
-drop-ins are preserved. It never starts or restarts a service or timer.
+`WorkingDirectory`, `ExecStart`, code roots, and daily venv selection. These use
+`/opt/quant-monitor/current`; the helper atomically switches that existing link
+after qualification, so a subsequent release switch needs no hardcoded SHA edit.
+The original unit's credentials, routing, timezone, data, `ExecStartPre`, and other
+drop-ins are preserved. The selected venv may be a separately prepared daily-only
+environment; the helper never modifies the previous shared venv or QPK mirror.
+It refuses a health service that uses the same current link. Check other current
+link consumers before adoption. It never starts or restarts a service or timer.
 
 ```bash
 sudo bash \
@@ -290,13 +296,16 @@ sudo bash \
 ```
 
 A helper-owned drop-in with the same name is replaced only when its content
-matches the current release exactly; an unknown file with that name stops the
+matches the legacy release or current-link template exactly; an unknown file with that name stops the
 helper. Other existing drop-ins are neither rewritten nor deleted. `status=prepared`
 means only that the candidate passed the limited offline qualification and that
 the release matches the daily unit readback; it does not mean the full pipeline
 is healthy, the service runs, or the briefing was delivered. On inconsistent
 readback the helper prints `status=unknown`, keeps the previous drop-in snapshot,
-and requires manual inspection without automatic rollback or retry.
+and requires manual inspection without automatic rollback or retry. The recovery
+snapshot also records the prior current-link target. Missing runtime handoff data
+still fails without sending, selecting an older object, or filling missing metrics
+with zeros. Import qualification and release adoption do not prove data availability.
 
 ## QPK pin and dependency lock
 

@@ -6,11 +6,22 @@ set -euo pipefail
 
 ROOT="${QUANT_MONITOR_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 AAB="${AIAUDIT_BRIDGE_ROOT:-$HOME/Projects/AIAuditBridge}"
-DAY=$(date -u +%Y-%m-%d)
-OUT="$ROOT/data/daily-reports/$DAY"
-
+source "$ROOT/scripts/common_env.sh"
 # shellcheck source=scripts/source_telegram_env.sh
 source "$ROOT/scripts/source_telegram_env.sh"
+
+# Keep the qualified venv entry point, including its venv identity. Resolving
+# bin/python's symlink or looking up python3 can select a different environment.
+readonly DAILY_PYTHON="$VENV/bin/python"
+if [[ "$DAILY_PYTHON" != /* || ! -x "$DAILY_PYTHON" ]]; then
+  echo '[briefing-pipeline] selected_python_unavailable consumer_exit=not_run' >&2
+  exit 2
+fi
+export DAY
+DAY="$("$DAILY_PYTHON" -c 'from datetime import datetime, timezone; print(datetime.now(timezone.utc).date().isoformat())')" \
+  || { echo '[briefing-pipeline] selected_python_failed consumer_exit=not_run' >&2; exit 2; }
+[[ -n "$DAY" ]] || exit 2
+OUT="$ROOT/data/daily-reports/$DAY"
 
 run_domain_consume() {
   local -a consume_args
@@ -18,12 +29,12 @@ run_domain_consume() {
   if [[ "${QUANT_MONITOR_AI_SUMMARY:-false}" == "true" ]]; then
     consume_args+=(--ai-summary)
   fi
-  PYTHONPATH=. python3 scripts/consume_daily_briefing.py "${consume_args[@]}"
+  PYTHONPATH=. "$DAILY_PYTHON" scripts/consume_daily_briefing.py "${consume_args[@]}"
 }
 
 if [[ "${QUANT_MONITOR_RUNTIME_DIGEST_ENABLED:-false}" != "true" ]]; then
   builder_status=0
-  bash "$ROOT/scripts/daily_briefing.sh" || builder_status=$?
+  "$DAILY_PYTHON" "$ROOT/scripts/daily_briefing_builder.py" || builder_status=$?
   if [[ "$builder_status" -ne 0 ]]; then
     echo "[briefing-pipeline-result:v1] branch=domain builder_exit=${builder_status} consumer_exit=not_run domain_exit=${builder_status}" >&2
     exit "$builder_status"
@@ -44,7 +55,7 @@ fi
 
 builder_status=0
 consume_status=not_run
-bash "$ROOT/scripts/daily_briefing.sh" || builder_status=$?
+"$DAILY_PYTHON" "$ROOT/scripts/daily_briefing_builder.py" || builder_status=$?
 domain_status=$builder_status
 if [[ ! -d "$AAB" ]]; then
   echo "[briefing-pipeline] skip dispatch: AIAuditBridge not found at $AAB" >&2
@@ -81,7 +92,7 @@ if [[ -z "$prefix" || -z "$runtime_tz" || -z "$runtime_key" \
   runtime_status=2
 else
   set +e
-  runtime_day="$(python3 -c 'from datetime import datetime; from zoneinfo import ZoneInfo; import os, sys
+  runtime_day="$("$DAILY_PYTHON" -c 'from datetime import datetime; from zoneinfo import ZoneInfo; import os, sys
 try:
     sys.stdout.write(datetime.now(ZoneInfo(os.environ["QUANT_MONITOR_RUNTIME_TIMEZONE"])).date().isoformat())
 except Exception:
@@ -104,7 +115,7 @@ except Exception:
     set +e
     (
       cd "$AAB"
-      PYTHONPATH=. python3 scripts/consume_daily_briefing.py \
+      PYTHONPATH=. "$DAILY_PYTHON" scripts/consume_daily_briefing.py \
         "${runtime_source[@]}" \
         --day "$runtime_day" \
         --expected-target-key "$runtime_key" \
@@ -115,7 +126,7 @@ except Exception:
   fi
 fi
 
+echo "[briefing-pipeline] domain_exit=${domain_status} runtime_exit=${runtime_status}" >&2
 if [[ "$domain_status" -ne 0 || "$runtime_status" -ne 0 ]]; then
-  echo "[briefing-pipeline] domain_exit=${domain_status} runtime_exit=${runtime_status}" >&2
   exit 1
 fi
