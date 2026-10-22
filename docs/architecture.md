@@ -1,5 +1,7 @@
 # AI Gateway Architecture
 
+> **Historical V1 reference.** The former gateway components and Analyze/Execute/Review routes below are preserved for interpreting V1 integrations. They are not the current V2 task API or connection guide. Start with the [documentation index](README.md) and [independent runtime overview](runtime-baseline.en.md). No current deployment or authority is established by this page.
+
 ## Overview
 
 The AI Gateway (`AiGateway`) is a lightweight HTTP service that sits between

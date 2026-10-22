@@ -1,0 +1,29 @@
+name: AI unit alert tests
+on:
+  pull_request:
+    paths:
+      - 'ops/quant-monitor/scripts/ai_unit_alerts.py'
+      - 'ops/quant-monitor/tests/test_ai_unit_alerts.py'
+      - '.github/workflows/ai-unit-alert-tests.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'ops/quant-monitor/scripts/ai_unit_alerts.py'
+      - 'ops/quant-monitor/tests/test_ai_unit_alerts.py'
+      - '.github/workflows/ai-unit-alert-tests.yml'
+permissions:
+  contents: read
+jobs:
+  offline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - run: python -m pip install ruff==0.15.22
+      - run: python -m ruff check ops/quant-monitor/scripts/ai_unit_alerts.py ops/quant-monitor/tests/test_ai_unit_alerts.py
+      - run: python -m unittest discover -s ops/quant-monitor/tests -p test_ai_unit_alerts.py -v

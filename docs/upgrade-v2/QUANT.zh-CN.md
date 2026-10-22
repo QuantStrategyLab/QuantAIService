@@ -1,5 +1,7 @@
 # QuantAIService 2.0
 
+[Current V2 configuration index / 当前入口](README.md)。下文保留各版本迁移过程；其中旧共享核心架构不作为现行接入指南，历史连接与测试结果不代表当前线上状态。
+
 2026-10-16 更新：下方共享核心/薄包装及跨 owner 包依赖是历史记录，已由[独立运行时基线](../runtime-baseline.zh-CN.md)和[owner 范围说明](../worker-project-scoping.md)取代。2.0.9 需显式配置服务 `owner`，不从另一个 owner 安装核心包。本次没有部署或线上验收。
 
 本次升级的通用任务服务由 `personal-ai-service==2.0.7` 提供，QuantAIService 只保存 Quant 项目身份准入和部署配置。新入口是 `quant-ai-service`；客户端使用 `ai_service.client.TaskClient` 的 submit、get、message、cancel、wait，不提供旧 `AiGatewayClient` API 兼容层。

@@ -1,5 +1,7 @@
 # QuantAIService
 
+[文档索引](docs/README.md)：当前任务运行时、V2 配置、监控与历史架构。
+
 独立打包、按项目隔离的 AI 任务运行时。
 
 [English](README.md) | 简体中文

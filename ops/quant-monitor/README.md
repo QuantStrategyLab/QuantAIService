@@ -1,5 +1,15 @@
 # VPS Quant Monitor
 
+## Reading by task
+
+[Service documentation index](../../docs/README.md)
+
+- **Run and inspect:** [quick start](#quick-start), [configuration](#configuration), [strategy health snapshot](#strategy-health-snapshot), [read-only inspection](#read-only-inspection-modes).
+- **Notifications:** [Telegram routing](#telegram), [immutable-object briefing](#one-shot-immutable-object-runtime-briefing), [result receipts](#result-receipts), [delivery state](#delivery-state).
+- **Deploy and maintain:** [VPS deployment](#vps-deployment), [immutable release install](#immutable-release-install), [daily-only adoption](#daily-only-source-adoption), [QPK dependency lock](#qpk-pin-and-dependency-lock).
+
+These sections retain the complete operating instructions and limits. The monitor remains evidence-only; unknown delivery is not retried blindly, and deployment/adoption requires its documented qualification and authorization.
+
 Scheduled strategy health monitoring and a daily close briefing for a Quant
 deployment. The monitor reads strategy artifacts, builds a health dashboard,
 detects drift, files issue-only optimization proposals, and sends Telegram

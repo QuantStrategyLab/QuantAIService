@@ -1,0 +1,47 @@
+name: Q04 seven-day read-only shadow
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 13 * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: q04-ai5-shadow
+  cancel-in-progress: false
+
+jobs:
+  observe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.12'
+      - name: Record one bounded observation without creating AI work
+        env:
+          PYTHONPATH: src
+          AI_SERVICE_URL: ${{ secrets[vars.AI_HOOK_URL_SECRET] }}
+          AI_SERVICE_AUDIENCE: ${{ secrets[vars.AI_HOOK_AUDIENCE_SECRET] }}
+          AI_SERVICE_PROFILE: ${{ secrets[vars.AI_HOOK_PROFILE_SECRET] }}
+          AI_SERVICE_MODEL: ${{ secrets[vars.AI_HOOK_MODEL_SECRET] }}
+          AI_HOOK_READ_TOKEN: ${{ secrets[vars.AI_HOOK_READ_TOKEN_SECRET] }}
+          AI_HOOK_EXISTING_TASK_ID: ${{ secrets[vars.AI_HOOK_EXISTING_TASK_ID_SECRET] }}
+        run: >-
+          python -m quant_ai_service.research_hook
+          --plan docs/q04-shadow-plan-20261022.json
+          --binding config/ai-hook-shadow.json
+          --output shadow-records/checkpoint.json
+      - name: Preserve checkpoint even when configuration is missing
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: q04-shadow-${{ github.run_id }}-${{ github.run_attempt }}
+          path: shadow-records/checkpoint.json
+          if-no-files-found: error
+          retention-days: 30
