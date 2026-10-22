@@ -54,9 +54,10 @@ def load(path):
 
 def observe(state, *, unit, invocation, failed, reason, run_url, observed_at, threshold=2):
     record = state["units"].setdefault(unit, {"failures": 0, "episode": None})
-    if record.get("last_invocation") == invocation:
+    if record.get("last_invocation") == invocation and record.get("last_failed") == failed:
         return
     record["last_invocation"] = invocation
+    record["last_failed"] = failed
     record["observed_at"] = observed_at
     record["last_run_url"] = run_url
     record["last_reason"] = reason

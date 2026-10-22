@@ -66,6 +66,14 @@ class AIUnitAlertsTests(unittest.TestCase):
         self.event("two", unit="other.service")
         self.assertFalse(self.state["outbox"])
 
+    def test_stable_daemon_later_failure_in_same_invocation_is_counted(self):
+        self.event("daemon-first", False)
+        self.event("daemon-first", True)
+        self.event("daemon-first", True)
+        self.event("daemon-second", True)
+        self.assertEqual(self.state["units"]["fixture.service"]["failures"], 2)
+        self.assertEqual(len(self.state["outbox"]), 1)
+
     def test_delivered_receipts_deduplicate_and_never_store_route_or_token(self):
         self.event("one")
         self.event("two")
