@@ -27,7 +27,7 @@ TOKEN_FILE = Path(os.environ.get("CODEX_ORG_HEALTH_TOKEN_FILE", "/run/codex-org-
 GITHUB_API = "https://api.github.com"
 ORG = "QuantStrategyLab"
 REPOSITORIES = (
-    "AIAuditBridge",
+    "QuantAIService",
     "UsEquitySnapshotPipelines",
     "HkEquitySnapshotPipelines",
     "CryptoLivePoolPipelines",
@@ -94,7 +94,7 @@ def _request_token(jwt: str, installation_id: int) -> dict[str, object]:
             "Authorization": f"Bearer {jwt}",
             "Accept": "application/vnd.github+json",
             "X-GitHub-Api-Version": "2022-11-28",
-            "User-Agent": "AIAuditBridge-org-health",
+            "User-Agent": "QuantAIService-org-health",
             "Content-Type": "application/json",
         },
     )
