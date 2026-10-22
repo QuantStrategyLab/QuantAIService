@@ -219,19 +219,33 @@ def deliver(path, state, sender=send):
     from quant_platform_kit.notifications.telegram import parse_telegram_chat_ids
 
     chats = parse_telegram_chat_ids(os.environ.get("GLOBAL_TELEGRAM_CHAT_ID"))
-    token = os.environ.get("TELEGRAM_TOKEN") or os.environ.get("TG_TOKEN")
-    if not chats or not token:
+    if not chats:
         raise ValueError("telegram_route_unavailable")
     route = sorted(hashlib.sha256(chat.encode()).hexdigest() for chat in chats)
     if state.get("route") not in (None, route):
         raise ValueError("telegram_route_changed")
     state["route"] = route
+    token = None
     for notification in state["outbox"]:
         for chat in chats:
             key = hashlib.sha256(chat.encode()).hexdigest()
             previous = notification["receipts"].get(key, {})
             if previous.get("status") in ("delivered", "claimed", "unknown"):
                 continue
+            if token is None:
+                token = os.environ.get("TELEGRAM_TOKEN") or os.environ.get("TG_TOKEN")
+                if not token:
+                    project = os.environ.get("QUANT_SENTINEL_GCP_PROJECT")
+                    secret = os.environ.get("QUANT_SENTINEL_TELEGRAM_SECRET_NAME", "quant-sentinel-telegram-bot-token")
+                    if not project:
+                        raise ValueError("telegram_project_unavailable")
+                    result = subprocess.run(
+                        ["gcloud", "secrets", "versions", "access", "latest", "--secret", secret, "--project", project],
+                        capture_output=True, text=True, timeout=20, check=True,
+                    )
+                    token = result.stdout.strip()
+                    if not token:
+                        raise ValueError("telegram_token_unavailable")
             notification["receipts"][key] = {"status": "claimed", "recorded_at": now()}
             save(path, state)
             receipt = sender(notification["text"], chat, token)

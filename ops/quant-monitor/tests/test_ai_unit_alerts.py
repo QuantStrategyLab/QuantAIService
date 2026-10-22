@@ -132,6 +132,17 @@ class AIUnitAlertsTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             ALERTS.load(self.path)
 
+    def test_secret_is_read_only_when_pending_and_never_in_command_arguments(self):
+        with patch.dict(os.environ, {"TELEGRAM_TOKEN": "", "TG_TOKEN": "", "QUANT_SENTINEL_GCP_PROJECT": "fixture-project"}):
+            self.event("one")
+            self.event("two")
+            with patch.object(ALERTS.subprocess, "run", return_value=types.SimpleNamespace(stdout="fixture-secret\n")) as command:
+                self.assertEqual(ALERTS.deliver(self.path, self.state, lambda *args: {"status": "delivered"}), 0)
+            self.assertNotIn("fixture-secret", str(command.call_args))
+            self.assertNotIn("fixture-secret", self.path.read_text())
+            with patch.object(ALERTS.subprocess, "run", side_effect=AssertionError("no repeat read")):
+                self.assertEqual(ALERTS.deliver(self.path, self.state), 0)
+
     def test_journal_failure_duplicates_and_oneshot_success(self):
         records = []
         for index, (invocation, failed) in enumerate([("a" * 32, True), ("a" * 32, True), ("b" * 32, True), ("c" * 32, False)]):

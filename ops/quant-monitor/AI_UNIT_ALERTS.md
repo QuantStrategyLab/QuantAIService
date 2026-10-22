@@ -23,13 +23,14 @@
 
 将脚本放到 root-owned `/opt/quant-ai-unit-alerts/ai_unit_alerts.py`，将两个
 `systemd/quant-ai-unit-alerts.*.example` 安装到 `/etc/systemd/system/`。
-新 observer 只使用自己的 `/run/quant-ai-unit-alerts` 和
-`/var/lib/quant-ai-unit-alerts/state.json`，不竞争原有 `/run/quant-monitor`。
+新 observer 只使用自己的 `/var/lib/quant-ai-unit-alerts/state.json`，
+不竞争原有 `/run/quant-monitor`。
 
 `/etc/quant-ai-unit-alerts/route.env` 只复制已批准的
 `QUANT_SENTINEL_GCP_PROJECT`、`QUANT_SENTINEL_TELEGRAM_SECRET_NAME`、
 `GLOBAL_TELEGRAM_CHAT_ID`，权限 root:ubuntu 0640；不在仓库或回执展示值。
-沿用现有 `load_telegram_env.sh` 加载 Secret，不新建 Secret、不修改 IAM。
+读取与现有 loader 相同的 Secret；token 只从 gcloud 受限客户端的 stdout
+进入进程内存，不写文件、不进入 curl 命令参数。不新建 Secret、不修改 IAM。
 配置 `PYTHONPATH` 指向当前已审核 QPK 的 `src`，提供既有通知 helper；不升级依赖。
 
 ```bash
