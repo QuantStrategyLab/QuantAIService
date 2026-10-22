@@ -1,5 +1,7 @@
 # QuantStrategyLab AI Autonomy Architecture Draft
 
+> **English status summary:** `HISTORICAL_DRAFT_NOT_CURRENT_QSL_AUTHORITY`. This is an early audit/repair automation draft, not the current task-runtime design or authorization policy. Its automation and merge proposals do not grant runtime, trading, deployment or P0–P6 authority. See the [current documentation index](README.md).
+
 > 状态：`HISTORICAL_DRAFT_NOT_CURRENT_QSL_AUTHORITY`
 >
 > 本文记录早期 AIAuditBridge 的审计/修复设想，不定义 Quant 的 P0–P6 运行资格，也不描述当前 TQQQ P1–P3 主线。P0–P6 架构与运行边界见 `QuantRuntimeSettings/docs/QSL_P0_P6_CURRENT_STATE_AND_DRIVER_POLICY.zh-CN.md`；任何与其冲突的“人工审核”“自动合并”或“完全无人值守”措辞都只能按本草稿的历史上下文理解。

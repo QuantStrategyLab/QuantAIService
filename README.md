@@ -1,5 +1,7 @@
 # QuantAIService
 
+[Documentation index](docs/README.md) — current task runtime, V2 configuration, monitoring and historical architecture.
+
 An independently packaged, project-scoped task runtime for AI work.
 
 English | [简体中文](README.zh-CN.md)
