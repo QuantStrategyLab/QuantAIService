@@ -79,6 +79,7 @@ class TaskRuntime:
         descriptor = os.open(self.path, os.O_CREAT | os.O_RDWR, 0o600)
         os.close(descriptor)
         os.chmod(self.path, 0o600)
+        self.github_comments = None
         self.providers = providers
         self.policies = policies
         # A private state directory is required; never use a public temp directory.
@@ -134,7 +135,7 @@ class TaskRuntime:
             raise PermissionError('project is not admitted')
         if not isinstance(idempotency_key, str) or not 1 <= len(idempotency_key) <= 200:
             raise ValueError('Idempotency-Key is required (1..200 characters)')
-        allowed = {'mode', 'profile', 'objective', 'model', 'materials', 'output_schema', 'timeout_seconds'}
+        allowed = {'mode', 'profile', 'objective', 'model', 'materials', 'output_schema', 'timeout_seconds', 'issue'}
         if not isinstance(request, dict) or set(request) - allowed:
             raise ValueError('unknown task fields')
         if not {'mode', 'objective', 'model', 'output_schema'} <= set(request):
@@ -159,6 +160,10 @@ class TaskRuntime:
             raise ValueError('timeout_seconds exceeds project policy')
         if not isinstance(request.get('materials', []), list):
             raise ValueError('materials must be an array')
+        if 'issue' in request:
+            if self.github_comments is None:
+                raise PermissionError('App comments are not configured')
+            self.github_comments.validate_issue(owner, request)
         _check_schema(request['output_schema'])
         body = _json(request)
         if len(body.encode()) > policy.max_request_bytes:
@@ -228,6 +233,8 @@ class TaskRuntime:
                 if time.time() >= row['deadline']:
                     raise Conflict('task deadline passed')
                 self._state(db, task_id, 'running', worker=worker, attempt=attempt_id, error=None)
+                if self.github_comments:
+                    self.github_comments.enqueue(db, db.execute('SELECT * FROM tasks WHERE id=?', (task_id,)).fetchone(), 'claim')
         record = self.get(owner, task_id)
         return {**record, 'attempt_id': attempt_id, 'messages': self.messages(owner, task_id)}
 
@@ -277,6 +284,8 @@ class TaskRuntime:
             # Persist the same completion time checked above, including its event.
             self._state(db, task_id, status, output=_json(output), artifacts=_json(artifacts),
                         report_digest=digest, error=error, recorded_at=accepted_at)
+            if self.github_comments:
+                self.github_comments.enqueue(db, db.execute('SELECT * FROM tasks WHERE id=?', (task_id,)).fetchone(), 'report')
         return self.get(owner, task_id)
 
     def message(self, owner, task_id, idempotency_key, message):
@@ -373,7 +382,7 @@ class TaskRuntime:
                     return
                 self._state(db, task_id, 'submitting')
             try:
-                handle = provider.submit(current['request'], task_id=task_id, owner=owner)
+                handle = provider.submit({k: v for k, v in current['request'].items() if k != 'issue'}, task_id=task_id, owner=owner)
                 if not isinstance(handle, dict) or not handle:
                     raise ValueError('invalid provider handle')
                 serialized = _json(handle)

@@ -23,6 +23,7 @@ from .inference import ChatGPTPlanProvider
 from .gemini import GeminiProvider
 from .notifications import NativeNotifications
 from .providers import GrokWebhookProvider
+from .github_apps import GitHubApps, GitHubComments, validate_apps
 from .runtime import Conflict, NotFound, Policy, TaskRuntime
 from .transport import json_body
 from .worker_tools import worker_tools, tools_schema_sha256
@@ -33,9 +34,10 @@ class Application:
         self.runtime, self.auth, self.events = runtime, authorizer, events
         self.notifications = NativeNotifications(runtime)
 
-    @staticmethod
-    def public_record(record):
+    def public_record(self, record):
         result = dict(record)
+        if self.runtime.github_comments and 'request' in result and 'id' in result:
+            result['github_comments'] = self.runtime.github_comments.status(result['id'])
         if isinstance(result.get('handle'), dict):
             # Inference adapter keeps its result in the private durable handle until
             # schema validation. Only the validated top-level output is public.
@@ -299,6 +301,7 @@ def validate_configuration(config):
             raise ValueError('unsupported native provider')
     if dot_count > 1:
         raise ValueError('one Dot event provider per service deployment')
+    validate_apps(config)
     return auth, policies
 
 
@@ -339,7 +342,7 @@ def check_worker_tools(config, identity, expected_projects):
             'running_process_verified': False}
 
 
-def build_application(config):
+def build_application(config, *, github_key_loader=None, github_transport=None):
     auth, policies = validate_configuration(config)
     providers = {}
     runtime = TaskRuntime(Path(config['state_path']), providers, policies)
@@ -367,6 +370,8 @@ def build_application(config):
                 timeout_seconds=item.get('timeout_seconds', 60))
         else:
             raise ValueError('unsupported native provider')
+    if config.get('github_apps') is not None:
+        GitHubComments(runtime, GitHubApps(config, key_loader=github_key_loader, transport=github_transport))
     return Application(runtime, auth, events)
 
 
@@ -557,6 +562,8 @@ def main(configuration_guard=None):
             try:
                 application.runtime.tick()
                 application.notifications.flush()
+                if application.runtime.github_comments:
+                    application.runtime.github_comments.flush()
                 if application.events:
                     application.events.flush()
             except Exception:
