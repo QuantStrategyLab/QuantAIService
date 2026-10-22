@@ -26,12 +26,12 @@ jobs:
       - name: Record one bounded observation without creating AI work
         env:
           PYTHONPATH: src
-          AI_SERVICE_URL: ${{ vars.AI_SERVICE_URL }}
-          AI_SERVICE_AUDIENCE: ${{ vars.AI_SERVICE_AUDIENCE }}
-          AI_SERVICE_PROFILE: ${{ vars.AI_SERVICE_PROFILE }}
-          AI_SERVICE_MODEL: ${{ vars.AI_SERVICE_MODEL }}
+          AI_SERVICE_URL: ${{ secrets[vars.AI_HOOK_URL_SECRET] }}
+          AI_SERVICE_AUDIENCE: ${{ secrets[vars.AI_HOOK_AUDIENCE_SECRET] }}
+          AI_SERVICE_PROFILE: ${{ secrets[vars.AI_HOOK_PROFILE_SECRET] }}
+          AI_SERVICE_MODEL: ${{ secrets[vars.AI_HOOK_MODEL_SECRET] }}
           AI_HOOK_READ_TOKEN: ${{ secrets[vars.AI_HOOK_READ_TOKEN_SECRET] }}
-          AI_HOOK_EXISTING_TASK_ID: ${{ vars.AI_HOOK_EXISTING_TASK_ID }}
+          AI_HOOK_EXISTING_TASK_ID: ${{ secrets[vars.AI_HOOK_EXISTING_TASK_ID_SECRET] }}
         run: >-
           python -m quant_ai_service.research_hook
           --plan docs/q04-shadow-plan-20261022.json

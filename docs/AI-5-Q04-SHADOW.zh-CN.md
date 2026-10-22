@@ -2,7 +2,7 @@
 
 唯一目标是 QuantAIService v2。`config/ai-hook-shadow.json` 只存变量引用，严格拒绝第二目标、正式模式和额外配置字段。所需 URL、audience、profile、model 和只读凭据必须全部由运行环境注入；没有默认值。各调用仓库使用同一份绑定契约，不在代码中放组织、域名、账户或实际 secret 名称。
 
-`AI_HOOK_READ_TOKEN` 是进程内凭据别名，不是 secret 存储中的名称。工作流通过 `vars.AI_HOOK_READ_TOKEN_SECRET` 选择已有 secret；不创建凭据、不改 IAM、不扩大授权。若没有现成且获准的凭据，该次检查记 `blocked_configuration`，退出码 2，不联网、不提交任务。组织变量的实际注入与权限验收尚未完成；绑定文件不是配置已生效的证明。
+所有绑定值均通过动态 secret 引用注入，避免普通变量值出现在 runner 的环境输出中。`AI_HOOK_URL_SECRET`、`AI_HOOK_AUDIENCE_SECRET`、`AI_HOOK_PROFILE_SECRET`、`AI_HOOK_MODEL_SECRET`、`AI_HOOK_READ_TOKEN_SECRET` 是配置选择器，分别引用已有且获准的 secret；可选已有 task 使用 `AI_HOOK_EXISTING_TASK_ID_SECRET`。这些选择器不是实际 secret 名称，进程内别名仍以绑定文件为准。不创建凭据、不改 IAM、不扩大授权。若没有现成且获准的配置，该次检查记 `blocked_configuration`，退出码 2，不联网、不提交任务。组织变量的实际注入与权限验收尚未完成；绑定文件不是配置已生效的证明。
 
 ## 能力边界
 

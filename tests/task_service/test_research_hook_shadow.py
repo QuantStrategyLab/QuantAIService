@@ -43,6 +43,17 @@ class Transport:
 
 
 class ShadowTests(unittest.TestCase):
+    def test_workflow_uses_only_dynamic_secret_references_for_binding_values(self):
+        workflow = (ROOT / ".github/workflows/q04-shadow.yml").read_text()
+        for value, selector in (("AI_SERVICE_URL", "AI_HOOK_URL_SECRET"),
+                                ("AI_SERVICE_AUDIENCE", "AI_HOOK_AUDIENCE_SECRET"),
+                                ("AI_SERVICE_PROFILE", "AI_HOOK_PROFILE_SECRET"),
+                                ("AI_SERVICE_MODEL", "AI_HOOK_MODEL_SECRET"),
+                                ("AI_HOOK_READ_TOKEN", "AI_HOOK_READ_TOKEN_SECRET"),
+                                ("AI_HOOK_EXISTING_TASK_ID", "AI_HOOK_EXISTING_TASK_ID_SECRET")):
+            self.assertIn(value + ": ${{ secrets[vars." + selector + "] }}", workflow)
+            self.assertNotIn(value + ": ${{ vars.", workflow)
+
     def binding(self, env=None):
         return hook.load_binding(ROOT / "config/ai-hook-shadow.json", environment() if env is None else env)
 
