@@ -1,0 +1,52 @@
+name: Monthly Audit Evidence Report
+
+on:
+  schedule:
+    - cron: '17 4 3 * *'
+  workflow_dispatch:
+    inputs:
+      month:
+        description: 'Report month (YYYY-MM); empty uses current UTC month'
+        required: false
+        default: ''
+      dry_run:
+        description: 'Read evidence only; do not create an issue'
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: monthly-audit-evidence
+  cancel-in-progress: false
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+      - name: Collect source-owned monthly evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPORT_MONTH: ${{ inputs.month }}
+          DRY_RUN: ${{ github.event_name == 'schedule' && 'false' || inputs.dry_run }}
+        run: |
+          arguments=()
+          if [[ "$DRY_RUN" == "false" ]]; then
+            arguments+=(--publish)
+          fi
+          python scripts/monthly_audit_report.py --month "$REPORT_MONTH" "${arguments[@]}" > "$RUNNER_TEMP/qar-monthly.json"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: qar-monthly-evidence-${{ github.run_id }}
+          path: ${{ runner.temp }}/qar-monthly.json
+          retention-days: 90
+          if-no-files-found: error
