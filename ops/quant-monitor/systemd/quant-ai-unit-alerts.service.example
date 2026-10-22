@@ -1,0 +1,25 @@
+[Unit]
+Description=QuantSentinel AI unit failure observer (read-only)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+Group=ubuntu
+SupplementaryGroups=systemd-journal
+RuntimeDirectory=quant-ai-unit-alerts
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
+StateDirectory=quant-ai-unit-alerts
+StateDirectoryMode=0700
+EnvironmentFile=/etc/quant-ai-unit-alerts/route.env
+EnvironmentFile=-/run/quant-ai-unit-alerts/telegram.env
+ExecStartPre=/bin/bash /home/ubuntu/quant-monitor-runtime/AIAuditBridge/ops/quant-monitor/scripts/load_telegram_env.sh /run/quant-ai-unit-alerts/telegram.env
+ExecStart=/usr/bin/python3 /opt/quant-ai-unit-alerts/ai_unit_alerts.py --state /var/lib/quant-ai-unit-alerts/state.json
+TimeoutStartSec=90
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
