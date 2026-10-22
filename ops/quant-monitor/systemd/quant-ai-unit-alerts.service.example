@@ -1,0 +1,21 @@
+[Unit]
+Description=QuantSentinel AI unit failure observer (read-only)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+Group=ubuntu
+SupplementaryGroups=systemd-journal
+StateDirectory=quant-ai-unit-alerts
+StateDirectoryMode=0700
+EnvironmentFile=/etc/quant-ai-unit-alerts/route.env
+ExecStart=/usr/bin/python3 /opt/quant-ai-unit-alerts/ai_unit_alerts.py --state /var/lib/quant-ai-unit-alerts/state.json
+TimeoutStartSec=90
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=-/home/ubuntu/.config/gcloud

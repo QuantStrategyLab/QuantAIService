@@ -219,3 +219,5 @@ jobs:
       - uses: actions/checkout@v6
       - name: Validate workflows
         uses: docker://rhysd/actionlint:1.7.12
+      - name: Test monthly evidence report without external access
+        run: python3 -m unittest tests.test_monthly_audit_report -v
