@@ -1415,6 +1415,10 @@ def _run_operational_diagnosis(
                    "failure_stage": "diagnosis_result_processing", "failure_category": "result_unavailable"}
     if not data_errors:
         return {"status": "skipped", "reason": "no_data_errors"}
+    if config_loader is None and client_factory is None and not (
+        os.environ.get("ACTIONS_ID_TOKEN_REQUEST_URL") and os.environ.get("ACTIONS_ID_TOKEN_REQUEST_TOKEN")
+    ):
+        return {"status": "skipped", "reason": "no_oidc"}
     if not isinstance(fingerprint, str) or not re.fullmatch(r"[0-9a-f]{64}", fingerprint):
         return {"status": "rejected", "reason": "invalid_fingerprint"}
     failure_stage = "diagnosis_state_processing"

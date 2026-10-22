@@ -114,7 +114,7 @@ def test_no_gateway_configuration_does_not_spend_daily_attempt(tmp_path, monkeyp
         health._operational_diagnosis_fingerprint([ERROR]),
         attempt_date="2026-09-11",
     )
-    assert result == {"status": "deferred", "reason": "ai_task_service_not_configured"}
+    assert result == {"status": "skipped", "reason": "no_oidc"}
     assert health._load_operational_diagnosis_state(root) == {}
 
 
@@ -135,7 +135,7 @@ def test_actual_cli_uses_recent_consumer_without_model_or_recollection(
         runpy.run_path(spec.origin, run_name="__main__")
     assert exit_info.value.code == 0
     result = json.loads(capsys.readouterr().out)
-    assert result["reason"] == "ai_task_service_not_configured"
+    assert result["reason"] == "no_oidc"
     assert result["observation"]["current_state"] == "not_observed_in_latest"
     assert (
         health._load_operational_diagnosis_state(tmp_path / "data/diagnosis-consumer")
@@ -642,7 +642,7 @@ def test_native_explicit_file_binding_is_private_and_no_oidc_is_no_attempt(
     result = health._run_operational_diagnosis(
         fresh, [ERROR], health._operational_diagnosis_fingerprint([ERROR])
     )
-    assert result["reason"] == "ai_task_service_not_configured"
+    assert result["reason"] == "no_oidc"
     assert health._load_operational_diagnosis_state(fresh) == {}
 
 
