@@ -1,0 +1,45 @@
+name: Quant monitor operational diagnosis
+on:
+  schedule:
+    - cron: '37 * * * *'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: quant-monitor-operational-diagnosis
+  cancel-in-progress: false
+jobs:
+  diagnose:
+    if: github.repository == 'QuantStrategyLab/QuantAIService' && github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, codex-vps]
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Diagnose saved observation with native OIDC
+        env:
+          CODEX_AUDIT_SERVICE_URL: ${{ secrets.CODEX_AUDIT_SERVICE_URL }}
+          CODEX_AUDIT_SERVICE_AUDIENCE: quant-codex-audit
+          PYTHONDONTWRITEBYTECODE: '1'
+          MANUAL_DISPATCH: ${{ github.event_name == 'workflow_dispatch' }}
+        run: |
+          set -euo pipefail
+          args=()
+          if [ "$MANUAL_DISPATCH" = true ]; then args+=(--include-healthy); fi
+          python3 -B scripts/diagnose_monitor_oidc.py \
+            --root /home/ubuntu/quant-monitor-runtime/AIAuditBridge/ops/quant-monitor \
+            --state-dir /home/ubuntu/quant-monitor-runtime/diagnosis-actions \
+            --receipt "$RUNNER_TEMP/operational-diagnosis-receipt.json" "${args[@]}"
+      - name: Save sanitized service receipt
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: operational-diagnosis-receipt
+          path: ${{ runner.temp }}/operational-diagnosis-receipt.json
+          if-no-files-found: error
+          retention-days: 14

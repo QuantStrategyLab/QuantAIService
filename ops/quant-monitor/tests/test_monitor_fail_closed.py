@@ -203,7 +203,7 @@ class MonitorFailClosedTests(unittest.TestCase):
     def test_static_dashboard_token_cannot_submit_diagnosis(self):
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"CODEX_AUDIT_SERVICE_TOKEN": "synthetic-readonly", "CODEX_AUDIT_SERVICE_URL": "https://invalid"}, clear=True), mock.patch.object(HEALTH_CYCLE, "_record_operational_diagnosis_attempt") as record:
             result = HEALTH_CYCLE._run_operational_diagnosis(Path(tmp), [{"domain": "crypto"}], "3" * 64)
-            self.assertEqual(result, {"status": "deferred", "reason": "ai_task_service_not_configured"})
+            self.assertEqual(result, {"status": "skipped", "reason": "no_oidc"})
             record.assert_not_called()
 
     def test_health_cycle_collects_drift_errors_without_aborting(self) -> None:
@@ -597,7 +597,7 @@ class MonitorFailClosedTests(unittest.TestCase):
                 "3" * 64,
             )
 
-        self.assertEqual(result, {"status": "deferred", "reason": "ai_task_service_not_configured"})
+        self.assertEqual(result, {"status": "skipped", "reason": "no_oidc"})
         self.assertFalse(HEALTH_CYCLE._operational_diagnosis_attempted(root, "3" * 64))
 
     def test_health_cycle_builds_issue_only_monitoring_finding(self) -> None:
