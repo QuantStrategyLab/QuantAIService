@@ -15,6 +15,8 @@ from pathlib import Path
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
+import pytest
+
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "daily_briefing_pipeline.sh"
 ZONE = "Pacific/Kiritimati"
 
@@ -26,8 +28,19 @@ def _layout(tmp_path: Path) -> tuple[Path, Path, Path]:
     (aab / "scripts").mkdir(parents=True, exist_ok=True)
     (root / "scripts" / "source_telegram_env.sh").write_text("# stub\n", encoding="utf-8")
     (root / "scripts" / "common_env.sh").write_bytes((SCRIPT.parent / "common_env.sh").read_bytes())
+    (root / "scripts" / "daily_briefing_builder.py").write_text(
+        "import os\nfrom pathlib import Path\n"
+        "Path(os.environ['CONSUME_LOG'] + '.builder').touch()\n"
+        "raise SystemExit(int(os.environ.get('DOMAIN_BUILD_EXIT', '0')))\n",
+        encoding="utf-8",
+    )
+    bin_dir = root / ".venv/bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    if not (bin_dir / "python").exists():
+        (bin_dir / "python").symlink_to(sys.executable)
+    # The old pipeline enters through this script and therefore uses PATH Python.
     (root / "scripts" / "daily_briefing.sh").write_text(
-        "#!/bin/bash\nexit \"${DOMAIN_BUILD_EXIT:-0}\"\n",
+        '#!/bin/bash\npython3 "$QUANT_MONITOR_ROOT/scripts/daily_briefing_builder.py"\n',
         encoding="utf-8",
     )
     (aab / "scripts" / "consume_daily_briefing.py").write_text(
@@ -96,14 +109,16 @@ def test_domain_and_runtime_use_the_release_selected_python(tmp_path: Path) -> N
     bin_dir = tmp_path / "daily-venv/bin"
     bin_dir.mkdir(parents=True)
     marker = tmp_path / "python-calls"
-    wrapper = bin_dir / "python3"
+    wrapper = bin_dir / "python"
     wrapper.write_text(
         f"#!/bin/bash\nprintf 'selected\\n' >> {shlex.quote(str(marker))}\n"
         f"exec {shlex.quote(sys.executable)} \"$@\"\n",
         encoding="utf-8",
     )
     wrapper.chmod(0o755)
-    (bin_dir / "python").symlink_to(wrapper)
+    wrong = bin_dir / "python3"
+    wrong.write_text("#!/bin/bash\nexit 99\n", encoding="utf-8")
+    wrong.chmod(0o755)
     result = _run(
         tmp_path,
         QUANT_MONITOR_VENV=str(bin_dir.parent),
@@ -113,8 +128,31 @@ def test_domain_and_runtime_use_the_release_selected_python(tmp_path: Path) -> N
         QUANT_MONITOR_RUNTIME_EXPECTED_TARGET_KEY="synthetic-service|rot|paper",
     )
     assert result.returncode == 0, result.stderr
-    assert len(marker.read_text().splitlines()) == 3
+    # UTC day, builder, domain consumer, runtime day, runtime consumer.
+    assert len(marker.read_text().splitlines()) == 5
     assert "domain_exit=0 runtime_exit=0" in result.stderr
+
+
+@pytest.mark.parametrize("broken", ["missing", "not_executable", "cannot_start"])
+@pytest.mark.parametrize("runtime_enabled", ["false", "true"])
+def test_invalid_selected_python_never_builds_or_consumes(tmp_path, broken, runtime_enabled):
+    selected = tmp_path / "selected-venv"
+    if broken != "missing":
+        binary = selected / "bin/python"
+        binary.parent.mkdir(parents=True)
+        binary.write_text("#!/bin/bash\nexit 97\n", encoding="utf-8")
+        binary.chmod(0o755 if broken == "cannot_start" else 0o644)
+    result = _run(
+        tmp_path,
+        QUANT_MONITOR_VENV=str(selected),
+        QUANT_MONITOR_RUNTIME_DIGEST_ENABLED=runtime_enabled,
+        QUANT_MONITOR_RUNTIME_PROJECTION_PREFIX="gs://synthetic/runtime_daily",
+        QUANT_MONITOR_RUNTIME_TIMEZONE="UTC",
+        QUANT_MONITOR_RUNTIME_EXPECTED_TARGET_KEY="synthetic|rot|paper",
+    )
+    assert result.returncode != 0
+    assert not _calls(result)
+    assert not (tmp_path / "consume.log.builder").exists()
 
 
 def test_enabled_pipeline_uses_timezone_day_and_fixed_handoff_prefix(tmp_path: Path) -> None:

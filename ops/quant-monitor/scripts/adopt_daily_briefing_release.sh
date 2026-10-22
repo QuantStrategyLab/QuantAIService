@@ -68,6 +68,8 @@ for path in "$REPO_ROOT" "$RELEASE_ROOT" "$RUNTIME_DATA" "$RUNTIME_VENV" "$UNIT_
 done
 [[ -d "$UNIT_ROOT" && ! -L "$UNIT_ROOT" ]] || die "systemd_unit_root_unavailable"
 [[ -x "$SYSTEMCTL" ]] || die "systemctl_unavailable"
+[[ -d "$RUNTIME_VENV" && ! -L "$RUNTIME_VENV" && -x "$RUNTIME_VENV/bin/python" ]] \
+  || die "runtime_python_unavailable"
 CURRENT_ROOT="$(dirname "$RELEASE_ROOT")/current"
 CURRENT_MONITOR="$CURRENT_ROOT/ops/quant-monitor"
 [[ ! -e "$CURRENT_ROOT" || -L "$CURRENT_ROOT" ]] || die "current_link_unexpected"
@@ -96,8 +98,11 @@ load_properties() {
   local unit_name="$1" output="$2"; shift 2
   local raw line key value properties parsed_count=0 expected_count=$#
   properties="$(IFS=,; printf '%s' "$*")"
-  raw="$("$SYSTEMCTL" --no-pager show "$unit_name" "--property=$properties" 2>/dev/null)" \
-    || return 1
+  if [[ -n "$unit_name" ]]; then
+    raw="$("$SYSTEMCTL" --no-pager show "$unit_name" "--property=$properties" 2>/dev/null)" || return 1
+  else
+    raw="$("$SYSTEMCTL" --no-pager show "--property=$properties" 2>/dev/null)" || return 1
+  fi
   (( ${#raw} <= 32768 )) || return 1
   while IFS= read -r line; do
     key="${line%%=*}"
@@ -106,7 +111,8 @@ load_properties() {
     case "$output:$key" in
       service:WorkingDirectory|service:ExecStart|service:ExecStartPre|service:FragmentPath|service:DropInPaths|service:ActiveState|service:SubState|service:UnitFileState|\
       timer:FragmentPath|timer:DropInPaths|timer:Unit|timer:ActiveState|timer:SubState|timer:UnitFileState|\
-      health:WorkingDirectory|health:ExecStart|health:ExecStartPre|health:FragmentPath|health:DropInPaths|health:ActiveState|health:SubState|health:UnitFileState)
+      health:WorkingDirectory|health:ExecStart|health:ExecStartPre|health:FragmentPath|health:DropInPaths|health:ActiveState|health:SubState|health:UnitFileState|\
+      health:Environment|health:EnvironmentFiles|health:PassEnvironment|health:UnsetEnvironment|health:ExecSearchPath|health:RootDirectory|health:RootImage|manager:Environment)
         printf -v "${output}_${key}" '%s' "$value"
         parsed_count=$((parsed_count + 1)) ;;
       *) return 1 ;;
@@ -129,9 +135,194 @@ read_timer() {
 }
 
 read_health() {
-  for key in WorkingDirectory ExecStart ExecStartPre FragmentPath DropInPaths ActiveState SubState UnitFileState; do unset "health_$key"; done
-  load_properties codex-quant.service health WorkingDirectory ExecStart ExecStartPre FragmentPath DropInPaths ActiveState SubState UnitFileState \
+  for key in WorkingDirectory ExecStart ExecStartPre FragmentPath DropInPaths ActiveState SubState UnitFileState Environment EnvironmentFiles PassEnvironment UnsetEnvironment ExecSearchPath RootDirectory RootImage; do unset "health_$key"; done
+  load_properties codex-quant.service health WorkingDirectory ExecStart ExecStartPre FragmentPath DropInPaths ActiveState SubState UnitFileState Environment EnvironmentFiles PassEnvironment UnsetEnvironment ExecSearchPath RootDirectory RootImage \
     || return 1
+  load_properties "" manager Environment \
+    || return 1
+}
+
+health_environment_identity() {
+  # Values travel over stdin, never command arguments or diagnostic output.
+  # EnvironmentFile is systemd data, not shell code: never source/eval it.
+  "$RUNTIME_VENV/bin/python" -I -B - "$CURRENT_ROOT" "$health_WorkingDirectory" 3<<< "$(printf '%s\n' \
+    "$manager_Environment" "$health_Environment" "$health_EnvironmentFiles" \
+    "$health_PassEnvironment" "$health_UnsetEnvironment" "$health_ExecSearchPath" \
+    "$health_RootDirectory" "$health_RootImage" "$1" END)" <<'PY' 2>/dev/null
+import hashlib
+import os
+import re
+import shlex
+import sys
+from pathlib import Path
+
+class SharedCurrent(Exception):
+    pass
+
+current, working_directory = sys.argv[1:]
+digest = hashlib.sha256()
+path_keys = {"ROOT", "VENV", "AAB_ROOT", "QPK_ROOT", "PATH", "PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV", "QUANT_MONITOR_ROOT",
+             "QUANT_MONITOR_VENV", "AIAUDIT_BRIDGE_ROOT", "QUANT_SENTINEL_ENV_FILE",
+             "BASH_ENV", "ENV"}
+
+def inspect_path(value):
+    # Check lexical paths before resolving: resolving current alone hides its
+    # dependence on the mutable link. Also follow aliases one symlink at a time.
+    pending = Path(os.path.abspath(value))
+    for _ in range(64):
+        if pending == Path(current) or Path(current) in pending.parents:
+            raise SharedCurrent
+        for part in (*reversed(pending.parents), pending):
+            if part.is_symlink():
+                target = Path(os.readlink(part))
+                if not target.is_absolute():
+                    target = part.parent / target
+                pending = Path(os.path.abspath(target / pending.relative_to(part)))
+                break
+        else:
+            digest.update(str(pending).encode() + b"\0")
+            return
+    raise ValueError("unresolved path")
+
+def inspect_value(key, value):
+    if current in value:
+        raise SharedCurrent
+    if key in path_keys or key.endswith(("_ROOT", "_PATH", "_VENV", "_FILE")):
+        if key in {"BASH_ENV", "ENV"} and value:
+            raise ValueError("unresolved shell startup environment")
+        if any(char in value for char in ('$', '%', '\\', '`', '\n')):
+            raise ValueError("dynamic path")
+        for entry in value.split(":"):
+            inspect_path(entry if entry.startswith("/") else os.path.join(working_directory, entry))
+
+def assignments(raw):
+    # systemctl quotes strv items; unsupported C escapes fail closed.
+    if "\\" in raw:
+        raise ValueError("escaped environment")
+    values = {}
+    for item in shlex.split(raw):
+        key, separator, value = item.partition("=")
+        if not separator or not re.fullmatch(r"[A-Za-z_][A-Za-z_0-9]*", key):
+            raise ValueError("invalid assignment")
+        inspect_value(key, value)
+        values[key] = value
+    return values
+
+def read_environment_file(filename, *, shell_source=False):
+    if not filename.startswith("/") or any(char in filename for char in "$%*?[]\\"):
+        raise ValueError("unresolved environment file")
+    inspect_path(filename)
+    # Missing optional files are also uncertain: they can appear on next start.
+    with open(filename, "rb") as handle:
+        data = handle.read(65537)
+    if len(data) > 65536:
+        raise ValueError("environment file too large")
+    digest.update(filename.encode() + b"\0" + data + b"\0")
+    values = {}
+    for line in data.decode("utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith(("#", ";")):
+            continue
+        # Only literal single-line assignments are proven safe. Multiline,
+        # escapes and shell statements require operator inspection.
+        key, separator, value = line.partition("=")
+        key = key.strip()
+        if not separator or not re.fullmatch(r"[A-Za-z_][A-Za-z_0-9]*", key) or "\\" in value:
+            raise ValueError("unsupported environment syntax")
+        value = value.strip()
+        if shell_source and any(char in value for char in "$`;|&()<>"):
+            raise ValueError("nonliteral shell environment")
+        if shell_source or value.startswith(("'", '"')):
+            parsed = shlex.split(value)
+            if len(parsed) > 1:
+                raise ValueError("unsupported quoted value")
+            value = parsed[0] if parsed else ""
+        inspect_value(key, value)
+        values[key] = value
+    return values
+
+try:
+    with os.fdopen(3) as handle:
+        raw = handle.read(32769)
+    fields = raw.splitlines()
+    if len(raw) > 32768 or len(fields) != 10 or fields[-1] != "END":
+        raise ValueError("environment readback unavailable")
+    default, environment, files, inherited, unset, search, root, image, execution = fields[:-1]
+    if inherited or root or image:
+        raise ValueError("unresolved inherited or rooted environment")
+    digest.update(raw.encode())
+    values = assignments(default)
+    values.update(assignments(environment))
+    # UnsetEnvironment can only remove values. Conservatively inspect all
+    # sources, including overridden values, rather than waive a dependency.
+    inspect_value("PATH", search)
+    tokens = shlex.split(files)
+    if len(tokens) % 2:
+        raise ValueError("environment file readback unavailable")
+    for filename, flags in zip(tokens[::2], tokens[1::2]):
+        if flags not in {"(ignore_errors=yes)", "(ignore_errors=no)"}:
+            raise ValueError("environment file flags unavailable")
+        values.update(read_environment_file(filename))
+    # ExecStart's literal /usr/bin/env assignments override unit environment.
+    # Accept the known health entry point only; shell -c and env options cannot
+    # establish a static source root without executing code.
+    argv_text = execution.split(" ; argv[]=", 1)[1].split(" ; ignore_errors=", 1)[0]
+    if "\\" in argv_text:
+        raise ValueError("escaped health command")
+    argv = shlex.split(argv_text)
+    if argv[0] == "/usr/bin/env":
+        argv.pop(0)
+        while argv and re.match(r"^[A-Za-z_][A-Za-z_0-9]*=", argv[0]):
+            item = argv.pop(0)
+            key, value = item.split("=", 1)
+            inspect_value(key, value)
+            values[key] = value
+    if len(argv) == 2 and argv[0] in {"/bin/bash", "/usr/bin/bash"}:
+        inspect_path(argv.pop(0))
+    if len(argv) != 1 or not argv[0].startswith("/") or not argv[0].endswith("/scripts/health_check.sh"):
+        raise ValueError("unresolved health entry point")
+    inspect_path(argv[0])
+    monitor_root = values.get("QUANT_MONITOR_ROOT") or str(Path(argv[0]).parent.parent)
+    inspect_value("ROOT", monitor_root)
+    inspect_path(os.path.join(monitor_root, "scripts/common_env.sh"))
+    selected_venv = values.get("QUANT_MONITOR_VENV") or os.path.join(monitor_root, ".venv")
+    inspect_value("VENV", selected_venv)
+    for name in ("python", "python3"):
+        inspect_path(os.path.join(selected_venv, "bin", name))
+        for directory in (values.get("PATH") or search or "/usr/local/bin:/usr/bin:/bin").split(":"):
+            inspect_path(os.path.join(directory or working_directory, name))
+    # health_check also sources its Telegram environment before running Python.
+    runtime_env = values.get("QUANT_SENTINEL_ENV_FILE") or "/run/quant-monitor/telegram.env"
+    inspect_path(runtime_env)
+    fallback_env = os.path.join(monitor_root, ".env")
+    inspect_path(fallback_env)
+    if Path(runtime_env).exists():
+        shell_values = read_environment_file(runtime_env, shell_source=True)
+    elif Path(fallback_env).exists():
+        shell_values = read_environment_file(fallback_env, shell_source=True)
+    else:
+        shell_values = {}
+    # These are live shell variables after source_telegram_env, unlike the
+    # similarly named systemd environment entries overwritten by common_env.
+    for key in ("ROOT", "QUANT_MONITOR_ROOT"):
+        shell_root = shell_values.get(key)
+        if shell_root:
+            inspect_path(os.path.join(shell_root, "scripts"))
+            inspect_path(os.path.join(shell_root, ".venv"))
+            inspect_path(os.path.join(shell_root, ".venv/bin/python3"))
+    for key in ("VENV", "QUANT_MONITOR_VENV"):
+        if shell_values.get(key):
+            for name in ("python", "python3"):
+                inspect_path(os.path.join(shell_values[key], "bin", name))
+    for directory in shell_values.get("PATH", "").split(":"):
+        if directory:
+            inspect_path(os.path.join(directory, "python3"))
+    print(digest.hexdigest())
+except SharedCurrent:
+    print("shared_current")
+except Exception:
+    sys.exit(2)
+PY
 }
 
 exec_is_release() {
@@ -213,16 +404,18 @@ exec_property_identity() {
 }
 
 health_configuration_identity() {
-  local exec_start exec_start_pre
+  local exec_start exec_start_pre environment_identity
   exec_start="$(exec_property_identity "$health_ExecStart")" || return 1
   exec_start_pre="$(exec_property_identity "$health_ExecStartPre")" || return 1
+  environment_identity="$(health_environment_identity "$exec_start")" || return 1
   printf '%s\n' \
     "$health_FragmentPath" \
     "$health_DropInPaths" \
     "$health_WorkingDirectory" \
     "$exec_start" \
     "$exec_start_pre" \
-    "$health_UnitFileState"
+    "$health_UnitFileState" \
+    "$environment_identity"
 }
 
 postflight_unknown() {
@@ -248,7 +441,8 @@ DAILY_UNIT_FILE_STATE_BEFORE="${service_UnitFileState}"
 DAILY_WORKING_DIRECTORY_BEFORE="${service_WorkingDirectory}"
 TIMER_BEFORE="${timer_FragmentPath}|${timer_DropInPaths}|${timer_Unit}|${timer_UnitFileState}|${timer_ActiveState}|${timer_SubState}"
 HEALTH_BEFORE="$(health_configuration_identity)" || die "health_service_identity_unavailable"
-[[ "$HEALTH_BEFORE" != *"$CURRENT_ROOT"* ]] || die "current_link_shared_with_health_service"
+[[ "$HEALTH_BEFORE" != *"$CURRENT_ROOT"* && "$HEALTH_BEFORE" != *shared_current* ]] \
+  || die "current_link_shared_with_health_service"
 DROPINS_BEFORE="$service_DropInPaths"
 
 BASELINE_DROPINS=""

@@ -171,20 +171,38 @@ case "$unit" in
     printf 'FragmentPath=%s\\nDropInPaths=\\nUnit=codex-daily-briefing.service\\nActiveState=active\\nSubState=waiting\\nUnitFileState=enabled\\n' "$TEST_UNIT_ROOT/codex-daily-briefing.timer"
     ;;
   codex-quant.service)
+    if [[ -n "${TEST_HEALTH_MUTATION_FILE:-}" ]]; then
+      count_file="$TEST_RELOADED.health-reads"
+      count=0
+      if [[ -f "$count_file" ]]; then count="$(cat "$count_file")"; fi
+      count=$((count + 1)); printf '%s' "$count" > "$count_file"
+      if [[ "$count" == "${TEST_HEALTH_MUTATION_READ:-2}" ]]; then
+        printf 'QUANT_MONITOR_ROOT=%s\\n' "$TEST_HEALTH_MUTATED_ROOT" > "$TEST_HEALTH_MUTATION_FILE"
+      fi
+    fi
+    if [[ "$4" == *Environment* ]]; then
+      printf 'Environment=%s\\nEnvironmentFiles=%s\\nPassEnvironment=%s\\nUnsetEnvironment=\\nExecSearchPath=%s\\nRootDirectory=\\nRootImage=\\n' \\
+        "${TEST_HEALTH_ENVIRONMENT:-}" "${TEST_HEALTH_ENV_FILES:-}" "${TEST_HEALTH_PASS_ENV:-}" "${TEST_HEALTH_EXEC_SEARCH_PATH:-}"
+    fi
     health_wd="${TEST_HEALTH_CURRENT_ROOT:-/health}"
     health_state=failed
     health_substate=failed
-    health_exec='{ path=/bin/bash ; argv[]=/bin/bash /health/health_check.sh ; ignore_errors=no ; start_time=[old] ; stop_time=[old] ; pid=101 ; code=(exited) ; status=0/0 }'
+    health_exec='{ path=/bin/bash ; argv[]=/bin/bash /health/scripts/health_check.sh ; ignore_errors=no ; start_time=[old] ; stop_time=[old] ; pid=101 ; code=(exited) ; status=0/0 }'
+    if [[ -n "${TEST_HEALTH_EXECSTART:-}" ]]; then health_exec="$TEST_HEALTH_EXECSTART"; fi
     health_pre='{ path=/bin/true ; argv[]=/bin/true ; ignore_errors=no ; start_time=[old] ; stop_time=[old] ; pid=102 ; code=(exited) ; status=0/0 }'
     if [[ -e "$TEST_RELOADED" ]]; then
       health_state=active
       health_substate=running
-      health_exec='{ path=/bin/bash ; argv[]=/bin/bash /health/health_check.sh ; ignore_errors=no ; start_time=[new] ; stop_time=[n/a] ; pid=201 ; code=(null) ; status=0/0 }'
+      health_exec='{ path=/bin/bash ; argv[]=/bin/bash /health/scripts/health_check.sh ; ignore_errors=no ; start_time=[new] ; stop_time=[n/a] ; pid=201 ; code=(null) ; status=0/0 }'
+      if [[ -n "${TEST_HEALTH_EXECSTART:-}" ]]; then health_exec="$TEST_HEALTH_EXECSTART"; fi
       health_pre='{ path=/bin/true ; argv[]=/bin/true ; ignore_errors=no ; start_time=[new] ; stop_time=[n/a] ; pid=202 ; code=(null) ; status=0/0 }'
       if [[ "${TEST_HEALTH_CONFIG_CHANGE:-false}" == true ]]; then health_wd=/changed-health-root; fi
     fi
     printf 'WorkingDirectory=%s\\nExecStart=%s\\nExecStartPre=%s\\nFragmentPath=/etc/systemd/system/codex-quant.service\\nDropInPaths=\\nActiveState=%s\\nSubState=%s\\nUnitFileState=static\\n' \\
       "$health_wd" "$health_exec" "$health_pre" "$health_state" "$health_substate"
+    ;;
+  --property=Environment)
+    printf 'Environment=%s\\n' "${TEST_MANAGER_ENVIRONMENT:-}"
     ;;
   *) exit 9 ;;
 esac
@@ -422,6 +440,142 @@ def test_current_link_shared_with_health_is_not_switched(adoption_case):
     assert "current_link_shared_with_health_service" in result.stderr
     assert current.resolve().name == case["old_sha"]
     assert not Path(str(case["reloaded"])).exists()
+
+
+@pytest.mark.parametrize("key", ["QUANT_MONITOR_ROOT", "PATH", "QUANT_MONITOR_VENV", "PYTHONPATH", "AIAUDIT_BRIDGE_ROOT"])
+@pytest.mark.parametrize("source", ["unit", "file", "manager"])
+def test_health_environment_only_current_dependency_is_rejected(adoption_case, key, source):
+    case = adoption_case
+    current = Path(str(case["release_root"])).parent / "current"
+    value = f"{key}={current}/ops/quant-monitor"
+    if source == "file":
+        env_file = Path(str(case["unit_root"])) / "health.env"
+        env_file.write_text(f"# synthetic private settings\nSYNTHETIC_SECRET=do-not-print-me\n{value}\n")
+        extra = {"TEST_HEALTH_ENV_FILES": f"{env_file} (ignore_errors=no)"}
+    else:
+        extra = {"TEST_HEALTH_ENVIRONMENT" if source == "unit" else "TEST_MANAGER_ENVIRONMENT": value}
+    result = _run(case, extra_env=extra)
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "current_link_shared_with_health_service" in result.stderr
+    assert "do-not-print-me" not in result.stdout + result.stderr
+    assert str(current) not in result.stdout + result.stderr
+    assert current.resolve().name == case["old_sha"]
+    assert not Path(str(case["reloaded"])).exists()
+    assert not (Path(str(case["release_root"])) / str(case["sha"])).exists()
+
+
+@pytest.mark.parametrize("source", ["unit", "file", "runtime_file", "exec_search"])
+def test_health_quoted_normalized_or_aliased_current_path_is_rejected(adoption_case, source):
+    case = adoption_case
+    current = Path(str(case["release_root"])).parent / "current"
+    alias = current.with_name("health-alias")
+    alias.symlink_to(current, target_is_directory=True)
+    env_file = Path(str(case["unit_root"])) / "health.env"
+    env_file.write_text(f"QUANT_MONITOR_VENV='{alias}/ops/quant-monitor/.venv'\n")
+    extra = {
+        "unit": {"TEST_HEALTH_ENVIRONMENT": f'"QUANT_MONITOR_ROOT={current.parent}/other/../current/ops/quant-monitor"'},
+        "file": {"TEST_HEALTH_ENV_FILES": f"{env_file} (ignore_errors=no)"},
+        "runtime_file": {"TEST_HEALTH_ENVIRONMENT": f"QUANT_SENTINEL_ENV_FILE={env_file}"},
+        "exec_search": {"TEST_HEALTH_EXEC_SEARCH_PATH": f"{alias}/bin:/usr/bin"},
+    }[source]
+    result = _run(case, extra_env=extra)
+    assert result.returncode == 2
+    assert "current_link_shared_with_health_service" in result.stderr
+    assert current.resolve().name == case["old_sha"]
+    assert not Path(str(case["reloaded"])).exists()
+
+
+@pytest.mark.parametrize("config", ["missing_file", "optional_missing", "glob_file", "dynamic_path", "escaped_path", "pass_environment"])
+def test_unresolved_health_environment_fails_before_switch(adoption_case, config):
+    case = adoption_case
+    missing = Path(str(case["unit_root"])) / "missing.env"
+    extra = {
+        "missing_file": {"TEST_HEALTH_ENV_FILES": f"{missing} (ignore_errors=no)"},
+        "optional_missing": {"TEST_HEALTH_ENV_FILES": f"{missing} (ignore_errors=yes)"},
+        "glob_file": {"TEST_HEALTH_ENV_FILES": f"{missing}* (ignore_errors=no)"},
+        "dynamic_path": {"TEST_HEALTH_ENVIRONMENT": "QUANT_MONITOR_ROOT=$OTHER_ROOT"},
+        "escaped_path": {"TEST_HEALTH_ENVIRONMENT": r"QUANT_MONITOR_ROOT=/opt/quant-monitor/cur\x72ent"},
+        "pass_environment": {"TEST_HEALTH_PASS_ENV": "QUANT_MONITOR_ROOT PATH"},
+    }[config]
+    result = _run(case, extra_env=extra)
+    assert result.returncode == 2
+    assert "health_service_identity_unavailable" in result.stderr
+    current = Path(str(case["release_root"])).parent / "current"
+    assert current.resolve().name == case["old_sha"]
+    assert not Path(str(case["reloaded"])).exists()
+
+
+@pytest.mark.parametrize("change_at", [None, "2", "3"])
+def test_health_environment_file_is_checked_again_before_and_after_switch(adoption_case, change_at):
+    case = adoption_case
+    env_file = Path(str(case["unit_root"])) / "health.env"
+    env_file.write_text("QUANT_MONITOR_ROOT='/fixed-health-root'\nSYNTHETIC_SECRET=do-not-print-me\n")
+    extra = {"TEST_HEALTH_ENV_FILES": f"{env_file} (ignore_errors=no)"}
+    if change_at:
+        extra.update({
+            "TEST_HEALTH_MUTATION_FILE": str(env_file),
+            "TEST_HEALTH_MUTATED_ROOT": "/different-fixed-health-root",
+            "TEST_HEALTH_MUTATION_READ": change_at,
+        })
+    result = _run(case, extra_env=extra)
+    assert result.returncode == {None: 0, "2": 2, "3": 3}[change_at], result.stderr
+    assert "do-not-print-me" not in result.stdout + result.stderr
+    if change_at == "2":
+        assert "health_service_changed_during_adoption" in result.stderr
+        current = Path(str(case["release_root"])).parent / "current"
+        assert current.resolve().name == case["old_sha"]
+        assert not Path(str(case["reloaded"])).exists()
+    elif change_at == "3":
+        assert "health_configuration_changed" in result.stderr
+        assert "manual_readback_no_retry" in result.stderr
+
+
+@pytest.mark.parametrize("dependency", ["ROOT", "VENV", "default_venv", "python3_link", "inline_root", "inferred_root"])
+def test_health_effective_shell_root_and_default_interpreter_cannot_follow_current(adoption_case, dependency):
+    case = adoption_case
+    current = Path(str(case["release_root"])).parent / "current"
+    alias = current.with_name("health-alias")
+    alias.symlink_to(current, target_is_directory=True)
+    health_root = Path(str(case["unit_root"])) / "fixed-health"
+    health_root.mkdir()
+    extra = {"TEST_HEALTH_ENVIRONMENT": f"QUANT_MONITOR_ROOT={health_root}"}
+    if dependency in {"ROOT", "VENV"}:
+        env_file = health_root / "runtime.env"
+        env_file.write_text(f"{dependency}={alias}/ops/quant-monitor\n")
+        extra["TEST_HEALTH_ENVIRONMENT"] += f" QUANT_SENTINEL_ENV_FILE={env_file}"
+    elif dependency == "python3_link":
+        bin_dir = health_root / ".venv/bin"
+        bin_dir.mkdir(parents=True)
+        (bin_dir / "python3").symlink_to(alias / "python3")
+    else:
+        (health_root / ".venv").symlink_to(alias / "venv", target_is_directory=True)
+        if dependency == "inline_root":
+            extra["TEST_HEALTH_EXECSTART"] = (
+                "{ path=/usr/bin/env ; argv[]=/usr/bin/env "
+                f"QUANT_MONITOR_ROOT={alias}/ops/quant-monitor /bin/bash /health/scripts/health_check.sh"
+                " ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }"
+            )
+        elif dependency == "inferred_root":
+            extra["TEST_HEALTH_ENVIRONMENT"] = ""
+            extra["TEST_HEALTH_EXECSTART"] = _command(str(health_root.parents[1]), "health_check.sh").replace(
+                str(health_root.parents[1]) + "/ops/quant-monitor", str(health_root)
+            )
+    result = _run(case, extra_env=extra)
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "current_link_shared_with_health_service" in result.stderr
+    assert current.resolve().name == case["old_sha"]
+    assert not Path(str(case["reloaded"])).exists()
+
+
+def test_runtime_shell_environment_is_never_executed(adoption_case):
+    case = adoption_case
+    env_file = Path(str(case["unit_root"])) / "runtime.env"
+    marker = env_file.with_name("must-not-exist")
+    env_file.write_text(f'UNRELATED=$(touch "{marker}")\n')
+    result = _run(case, extra_env={"TEST_HEALTH_ENVIRONMENT": f"QUANT_SENTINEL_ENV_FILE={env_file}"})
+    assert result.returncode == 2
+    assert "health_service_identity_unavailable" in result.stderr
+    assert not marker.exists()
 
 
 def test_health_runtime_state_and_exec_times_do_not_block_adoption(adoption_case: dict[str, Path | str]) -> None:
