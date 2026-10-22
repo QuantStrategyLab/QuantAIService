@@ -122,10 +122,11 @@ class TaskRuntime:
         result['result_kind'] = 'advisory'
         return result
 
-    def _state(self, db, task_id, status, **fields):
-        fields.update(status=status, updated=time.time())
+    def _state(self, db, task_id, status, *, recorded_at=None, **fields):
+        recorded_at = time.time() if recorded_at is None else recorded_at
+        fields.update(status=status, updated=recorded_at)
         db.execute('UPDATE tasks SET ' + ','.join(f'{key}=?' for key in fields) + ' WHERE id=?', (*fields.values(), task_id))
-        db.execute('INSERT INTO events(task_id,status,created) VALUES(?,?,?)', (task_id, status, time.time()))
+        db.execute('INSERT INTO events(task_id,status,created) VALUES(?,?,?)', (task_id, status, recorded_at))
 
     def submit(self, owner, idempotency_key, request):
         policy = self.policies.get(owner)
@@ -263,13 +264,19 @@ class TaskRuntime:
             if row['status'] not in {'running', 'cancel_requested'}:
                 raise Conflict('task is not accepting results')
             error = None
+            accepted_at = None
             if status == 'completed':
                 try:
                     Draft202012Validator(json.loads(row['request'])['output_schema']).validate(output)
                 except (ValidationError, ValueError, TypeError, RecursionError, Unresolvable):
                     status, output, error = 'invalid_output', None, 'output_schema_mismatch'
+                if status == 'completed':
+                    accepted_at = time.time()
+                    if accepted_at >= row['deadline']:
+                        raise Conflict('task deadline passed')
+            # Persist the same completion time checked above, including its event.
             self._state(db, task_id, status, output=_json(output), artifacts=_json(artifacts),
-                        report_digest=digest, error=error)
+                        report_digest=digest, error=error, recorded_at=accepted_at)
         return self.get(owner, task_id)
 
     def message(self, owner, task_id, idempotency_key, message):

@@ -342,6 +342,146 @@ class AgentTaskTests(unittest.TestCase):
             self.runtime.claim('owner/repo', task['id'], 'reviewer-provider', 'reviewer', 'attempt')
 
 
+class AgentDeadlineReportTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.case_number = 0
+
+    def claimed_task(self, state='running'):
+        self.case_number += 1
+        provider = CallbackProvider()
+        policy = Policy(providers={'agent': 'test'}, models={'test': {'test-model'}})
+        runtime = TaskRuntime(Path(self.tmp.name) / f'{self.case_number}.sqlite',
+                              {'test': provider}, {'owner/repo': policy})
+        request = {'mode': 'agent', 'objective': 'Synthetic deadline regression',
+                   'model': 'test-model', 'timeout_seconds': 60,
+                   'output_schema': {'type': 'object', 'required': ['summary'],
+                                     'properties': {'summary': {'type': 'string'}},
+                                     'additionalProperties': False}}
+        with patch('ai_service.runtime.time.time', return_value=1000.0):
+            task = runtime.submit('owner/repo', 'key', request)
+            runtime.tick()
+            runtime.claim('owner/repo', task['id'], 'test', 'bot', 'attempt')
+            if state == 'cancel_requested':
+                runtime.cancel('owner/repo', task['id'])
+        return runtime, task
+
+    def test_first_completed_report_has_exclusive_deadline(self):
+        for state in ('running', 'cancel_requested'):
+            for offset in (-0.001, 0.0, 0.001):
+                with self.subTest(state=state, offset=offset):
+                    runtime, task = self.claimed_task(state)
+                    before = runtime.get('owner/repo', task['id'])
+                    with patch('ai_service.runtime.time.time', return_value=task['deadline'] + offset):
+                        if offset < 0:
+                            result = runtime.report('owner/repo', task['id'], 'test', 'bot',
+                                                    'attempt', 1, 'completed', {'summary': 'ok'})
+                            self.assertEqual(result['status'], 'completed')
+                            self.assertEqual(result['updated'], task['deadline'] + offset)
+                        else:
+                            with self.assertRaisesRegex(Conflict, 'deadline'):
+                                runtime.report('owner/repo', task['id'], 'test', 'bot',
+                                               'attempt', 1, 'completed', {'summary': 'ok'})
+                            self.assertEqual(runtime.get('owner/repo', task['id']), before)
+
+    def test_timeout_cancel_cannot_be_overwritten_by_late_completion(self):
+        runtime, task = self.claimed_task()
+        with patch('ai_service.runtime.time.time', return_value=task['deadline'] + 0.464):
+            runtime.tick()
+        before = runtime.get('owner/repo', task['id'])
+        self.assertEqual(before['status'], 'cancel_requested')
+        with patch('ai_service.runtime.time.time', return_value=task['deadline'] + 10.695):
+            with self.assertRaisesRegex(Conflict, 'deadline'):
+                runtime.report('owner/repo', task['id'], 'test', 'bot', 'attempt',
+                               1, 'completed', {'summary': 'ok'})
+        self.assertEqual(runtime.get('owner/repo', task['id']), before)
+
+    def test_valid_completion_replay_keeps_original_terminal_after_deadline(self):
+        runtime, task = self.claimed_task()
+        with patch('ai_service.runtime.time.time', return_value=task['deadline'] - 0.001):
+            first = runtime.report('owner/repo', task['id'], 'test', 'bot', 'attempt',
+                                   1, 'completed', {'summary': 'ok'})
+        with patch('ai_service.runtime.time.time', return_value=task['deadline'] + 10):
+            self.assertEqual(runtime.report('owner/repo', task['id'], 'test', 'bot', 'attempt',
+                                            1, 'completed', {'summary': 'ok'}), first)
+            with self.assertRaisesRegex(Conflict, 'different final report'):
+                runtime.report('owner/repo', task['id'], 'test', 'bot', 'attempt',
+                               1, 'completed', {'summary': 'changed'})
+            for worker, attempt, revision, error in [('other', 'attempt', 1, PermissionError),
+                                                     ('bot', 'other', 1, PermissionError),
+                                                     ('bot', 'attempt', 2, Conflict)]:
+                with self.subTest(worker=worker, attempt=attempt, revision=revision):
+                    with self.assertRaises(error):
+                        runtime.report('owner/repo', task['id'], 'test', worker, attempt,
+                                       revision, 'completed', {'summary': 'ok'})
+        self.assertEqual(runtime.get('owner/repo', task['id']), first)
+
+    def test_late_cancelled_and_failed_confirmation_and_replay_are_preserved(self):
+        for state in ('running', 'cancel_requested'):
+            for status in ('cancelled', 'failed'):
+                with self.subTest(state=state, status=status):
+                    runtime, task = self.claimed_task(state)
+                    with patch('ai_service.runtime.time.time', return_value=task['deadline'] + 10):
+                        first = runtime.report('owner/repo', task['id'], 'test', 'bot',
+                                               'attempt', 1, status)
+                    self.assertEqual(first['status'], status)
+                    with patch('ai_service.runtime.time.time', return_value=task['deadline'] + 20):
+                        self.assertEqual(runtime.report('owner/repo', task['id'], 'test', 'bot',
+                                                        'attempt', 1, status), first)
+                        with self.assertRaisesRegex(Conflict, 'different final report'):
+                            runtime.report('owner/repo', task['id'], 'test', 'bot', 'attempt',
+                                           1, 'completed', {'summary': 'ok'})
+
+    def test_wrong_attempt_or_revision_cannot_bypass_first_report_checks(self):
+        for state in ('running', 'cancel_requested'):
+            for offset in (-1, 1):
+                for worker, attempt, revision, error in [('other', 'attempt', 1, PermissionError),
+                                                         ('bot', 'other', 1, PermissionError),
+                                                         ('bot', 'attempt', 2, Conflict)]:
+                    with self.subTest(state=state, offset=offset, worker=worker,
+                                      attempt=attempt, revision=revision):
+                        runtime, task = self.claimed_task(state)
+                        before = runtime.get('owner/repo', task['id'])
+                        with patch('ai_service.runtime.time.time', return_value=task['deadline'] + offset):
+                            with self.assertRaises(error):
+                                runtime.report('owner/repo', task['id'], 'test', worker, attempt,
+                                               revision, 'completed', {'summary': 'ok'})
+                        self.assertEqual(runtime.get('owner/repo', task['id']), before)
+
+    def test_completed_report_uses_one_acceptance_timestamp(self):
+        runtime, task = self.claimed_task()
+        accepted = task['deadline'] - 0.001
+        with patch('ai_service.runtime.time.time', side_effect=[accepted, task['deadline'] + 1]) as clock:
+            result = runtime.report('owner/repo', task['id'], 'test', 'bot', 'attempt',
+                                    1, 'completed', {'summary': 'ok'})
+        self.assertEqual(clock.call_count, 1)
+        self.assertEqual(result['updated'], accepted)
+        self.assertEqual(runtime.events('owner/repo', task['id'])[-1]['created'], accepted)
+
+    def test_late_first_report_does_not_bypass_provider_or_project_binding(self):
+        for state in ('running', 'cancel_requested'):
+            for owner, provider, error in [('owner/repo', 'other-provider', PermissionError),
+                                           ('other/repo', 'test', NotFound)]:
+                with self.subTest(state=state, owner=owner, provider=provider):
+                    runtime, task = self.claimed_task(state)
+                    runtime.policies['other/repo'] = runtime.policies['owner/repo']
+                    before = runtime.get('owner/repo', task['id'])
+                    with patch('ai_service.runtime.time.time', return_value=task['deadline'] + 1):
+                        with self.assertRaises(error):
+                            runtime.report(owner, task['id'], provider, 'bot', 'attempt',
+                                           1, 'completed', {'summary': 'ok'})
+                    self.assertEqual(runtime.get('owner/repo', task['id']), before)
+
+    def test_invalid_output_remains_invalid_before_deadline(self):
+        runtime, task = self.claimed_task()
+        with patch('ai_service.runtime.time.time', return_value=task['deadline'] - 1):
+            result = runtime.report('owner/repo', task['id'], 'test', 'bot', 'attempt',
+                                    1, 'completed', {'summary': 12})
+        self.assertEqual(result['status'], 'invalid_output')
+        self.assertIsNone(result['output'])
+
+
 class RecordingAPIProvider(CallbackProvider):
     mode = 'api'
     callback_driven = False
