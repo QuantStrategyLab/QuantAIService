@@ -6,6 +6,7 @@ import {
   OAuthResourceServer,
   insufficientScope,
 } from '@cloudflare/workers-oauth-provider';
+import {githubWorkloadToken, authenticateGitHubWorkload, workloadOperation} from './workload.mjs';
 
 // Names come from existing server-controlled grants. Never rename an admitted alias.
 const validProvider = (value) => value===null || typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(value);
@@ -74,6 +75,25 @@ export function createAuthApplication(config, { taskHandler } = {}) {
     onError: ({ code }) => { /* Never log bearer tokens, claims, callback URLs or request data. */ },
   });
 
+  async function downstream(request, identity, env) {
+    const headers = new Headers(request.headers);
+    for (const name of TRUST_HEADERS) headers.delete(name);
+    const cleanRequest = new Request(request, { headers });
+    if (taskHandler) return taskHandler(cleanRequest, identity, env);
+    if (!env.TASK_SERVICE?.handleAuthenticated) return deny('task_service_not_configured', 503);
+    // Service binding RPC is the trust boundary. No identity header crosses public HTTP.
+    return env.TASK_SERVICE.handleAuthenticated(cleanRequest, identity);
+  }
+
+  async function workload(request, env, token) {
+    let identity;
+    try {identity = await authenticateGitHubWorkload(token, env, config);}
+    catch {return deny('workload_token_rejected', 401);}
+    const scope = workloadOperation(request);
+    if (!scope || !identity.scopes.includes(scope)) return deny('workload_operation_denied');
+    return downstream(request, identity, env);
+  }
+
   async function authorized(request, env, ctx) {
     const isMcp = new URL(request.url).pathname.startsWith('/mcp');
     const needed = requiredScopesFor(request, isMcp);
@@ -100,13 +120,7 @@ export function createAuthApplication(config, { taskHandler } = {}) {
       resource: ctx.auth.audience,
       clientId: ctx.auth.clientId,
     });
-    const headers = new Headers(request.headers);
-    for (const name of TRUST_HEADERS) headers.delete(name);
-    const cleanRequest = new Request(request, { headers });
-    if (taskHandler) return taskHandler(cleanRequest, identity, env);
-    if (!env.TASK_SERVICE?.handleAuthenticated) return deny('task_service_not_configured', 503);
-    // Service binding RPC is the trust boundary. No identity header crosses public HTTP.
-    return env.TASK_SERVICE.handleAuthenticated(cleanRequest, identity);
+    return downstream(request, identity, env);
   }
 
   const resourceServer = (resource, request) => new OAuthResourceServer({
@@ -208,6 +222,10 @@ export function createAuthApplication(config, { taskHandler } = {}) {
       try {
         if (url.pathname === '/authorize') return await authorize(request, env);
         if (url.pathname === '/callback' && request.method==='GET') return callback(request,env);
+        if (url.pathname === '/v1/tasks' || url.pathname.startsWith('/v1/tasks/')) {
+          const token = githubWorkloadToken(request);
+          if (token !== null) return await workload(request, env, token);
+        }
         for (let index = 0; index < resources.length; index++) {
           const path = new URL(resources[index]).pathname;
           if (url.pathname === path || url.pathname.startsWith(`${path}/`) ||

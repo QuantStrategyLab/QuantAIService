@@ -173,3 +173,5 @@ try{
  await mkdir('test-results',{recursive:true});await writeFile('test-results/native-'+organization+'.json',JSON.stringify({organization,cases,count:cases.length,realWorkerd:true,realGithub:false,realDot:false,testWebhookDeliveries:deliveries.length,externalRealRequests:0,outboundIntercepted:outbound},null,2)+'\n');
  console.log(`RESULT ${cases.length}/${cases.length} PASS; real workerd, test GitHub/webhook only`);
 }finally{await mf.dispose();}
+// npm test runs both organizations; the workload suite already covers both, so run it once.
+if (!process.argv.includes('--pigbibi')) await import('./workload.mjs');
