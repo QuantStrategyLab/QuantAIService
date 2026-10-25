@@ -1,0 +1,49 @@
+{
+  "name": "CONFIGURE_WORKER_NAME",
+  "main": "dist/worker.mjs",
+  "compatibility_date": "2026-07-30",
+  "compatibility_flags": [
+    "global_fetch_strictly_public"
+  ],
+  "vars": {
+    "ORGANIZATION": "quant",
+    "ORGANIZATION_ID": "Quant",
+    "PUBLIC_ORIGIN": "https://tasks.example.test",
+    "PROJECT_ID": "CONFIGURE_EXISTING_PROJECT",
+    "TASK_STORE_NAME": "CONFIGURE_STORE_NAME",
+    "AUTH_CLIENTS": {},
+    "ADMISSIONS_JSON": "[]",
+    "PROJECT_CONTEXTS": {},
+    "PROJECT_POLICIES": {}
+  },
+  "kv_namespaces": [
+    {
+      "binding": "OAUTH_KV",
+      "id": "CONFIGURE_NAMESPACE_ID"
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "TASK_STATE",
+        "class_name": "PersonalTaskStore"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": [
+        "PersonalTaskStore"
+      ]
+    }
+  ],
+  "services": [
+    {
+      "binding": "TASK_SERVICE",
+      "service": "CONFIGURE_WORKER_NAME",
+      "entrypoint": "TaskService"
+    }
+  ],
+  "no_bundle": true
+}
