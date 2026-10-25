@@ -10,9 +10,48 @@ API 只调用固定的 Google `generateContent` HTTPS 端点，不接收调用�
 
 本实现只移植 Gemini API 纵切，旧 ChatGPT-plan OAuth Responses 提供者尚未迁入 Worker；不能据此认定所有旧 API 提供者或整个迁移已完成。
 
+## GitHub Actions 调用方身份
+
+REST 机器调用方可使用 GitHub Actions OIDC JWT。`TaskClient` 分别配置服务 URL 与 token audience；旧 Python 服务对 REST 和 MCP 都核对同一个 `config.resource`，不能因 REST 路径是 `/v1/tasks` 就替原调用方重写 audience。本入口与 Dot 的 OAuth、MCP 身份分开，不能领取任务、回传结果或管理事件订阅。
+
+配置机器 grant 时必须同时显式设置服务端 `GITHUB_WORKLOAD_AUDIENCE`，值为该原调用方已批准的准确 audience（包括既有 `/mcp` resource 的场合）；必须是单个、不含凭据、query、fragment或空白的 HTTPS URL。缺失或无效均拒绝，不推断旧地址，不同时接受新旧两个 audience。迁移时可仅更改调用方的服务 URL，保留其原 token audience；这里的值只用于 JWT 精确核对，不作为请求 URL，也不会开放 MCP。内部服务绑定的 resource 仍固定为当前 `PUBLIC_ORIGIN + "/v1/tasks"`。
+
+默认不准入任何机器调用。受保护服务端变量 `GITHUB_WORKLOAD_GRANTS_JSON` 只接收一个准确既有调用方的 grant，沿用 Python 的 `issuer`、`subject`、`identity`、`project`、`scopes` 和 `claims` 字段。`project` 必须等于当前 `PROJECT_ID` 在 `PROJECT_CONTEXTS` 中的准确仓库，owner 和组织也由该映射提供；不能用其他仓库的 token、请求头或请求参数更改项目。不得直接复制占位值上线。例如，以下仅表示合成配置的结构：
+
+```json
+[
+  {
+    "issuer": "https://token.actions.githubusercontent.com",
+    "subject": "repo:example-org/ExampleProject:ref:refs/heads/main",
+    "identity": "example-project-workflow",
+    "project": "example-org/ExampleProject",
+    "scopes": ["tasks:read", "tasks:submit"],
+    "claims": {
+      "repository": "example-org/ExampleProject",
+      "workflow_ref": "example-org/ExampleProject/.github/workflows/ai-task.yml@refs/heads/main",
+      "ref": "refs/heads/main"
+    }
+  }
+]
+```
+
+按 [GitHub OIDC 参考](https://docs.github.com/en/actions/reference/security/oidc)及[固定发现文档](https://token.actions.githubusercontent.com/.well-known/openid-configuration)，只接受固定 issuer、HTTPS JWKS 与 RS256；验证唯一字符串 audience、kid、签名、exp/iat/nbf、subject、仓库、workflow_ref 和分支 ref，不使用 JWT 的 jku/x5u。密钥缓存5分钟；未知 kid 或取钥失败均拒绝，不回退其他身份源。
+
+普通分支 subject 必须与准确仓库及 ref 一致；若既有仓库使用 immutable subject，必须在 grant 中同时准确绑定 `repository_owner_id`、`repository_id`，并使用 GitHub 实际的精确 subject。不能据仓库名猜测或自动转换 subject。PR、PR target、tag、环境 subject 和多仓 grant 均不进入本次准入。
+
+GitHub 通常不提供 OAuth scope；权限取自有限 grant，如 token 显式带 scope 则只取交集。内部 RPC 的 `githubUserId` 对机器调用方沿用 GitHub 签名 `actor_id` 的数字形状，仅作身份记录，不能据此授予权限；`provider` 固定为 null。外部提供的身份、项目、组织和 provider 头在进入服务绑定前删除。业务 `mode` 仍由既有项目策略选择 Dot 或已明确启用的 API，本鉴权不会启用任何 provider。
+
+本包开放 `POST /v1/tasks`、`GET /v1/tasks/lookup`、`GET /v1/tasks/{id}`，并保留已存在的 `POST /v1/tasks/{id}/cancel`（JSON body 必须为 `{}`，权限仍为 `tasks:submit`）。保留原幂等键、请求 SHA256、任务 ID、未知任务404与冲突409；取消沿用既有幂等及终态语义，不能把已失败任务改称已取消。
+
+隔离单位沿用原合同的仓库 project：task owner 是仓库，只有当前精确 grant 准入的项目可访问/取消该项目任务，不能跨项目或组织；不声称已提供同一项目内逐人或逐 client 的提交者隔离。SDK 的 message、任务事件读取等其他操作尚未迁入此机器入口，不能据此宣称整个 SDK 已兼容。
+
+生产验收还需核定一个实际原调用程序、其有效原 grant/audience、准确服务端映射及受限配置。由原程序请求真实 GitHub token，提交有限任务后用同一幂等键和任务 ID 完成查询及原客户端消费；单独的 events 合成提交脚本不等于业务调用闭环。离线测试不替代该闭环。
+
 ## 本地验证与部署
 
 运行 `npm ci`、`npm test`、`npm run build`。测试在本地 workerd 中分别验证 Quant、Pigbibi，以及跨组织、错误 owner 拒绝；GitHub、webhook 与 Gemini HTTP 使用合成替身，包含真实 SQLite 状态、输出验证、跨组织、未知回执与不重发回归；不证明线上 Dot 或生产 API 完成。
+
+机器入口另运行 `node test/workload.mjs`：本地生成临时 RSA 密钥、模拟固定 JWKS，验证两组织本地 SQLite 提交/读取/lookup、错误身份和越权拒绝；不请求外网 JWT、不调用模型，也不把测试签发能力放进生产 bundle。
 
 将 wrangler.example.jsonc 复制到受保护配置目录并填入已有资源与批准的项目策略；真实账号、客户端和授权名单不进入仓库。GitHub client secret 通过批准的凭据存储配置。部署由统筹执行 `wrangler deploy --config /absolute/private/wrangler.jsonc`，不依赖默认目录。占位示例不可直接上线。
 
