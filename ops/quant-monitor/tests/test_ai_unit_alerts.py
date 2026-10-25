@@ -187,7 +187,7 @@ class AIUnitAlertsTests(unittest.TestCase):
         with patch.object(ALERTS, "github_json", side_effect=[{"workflow_runs": runs}, jobs]):
             ALERTS.workflow_events(self.state, "fixture/repo", "fixture.yml", "test")
         self.assertEqual([item["kind"] for item in self.state["outbox"]], ["failure", "recovery"])
-        self.assertIn("controlled-test-exit-42", self.state["outbox"][0]["text"])
+        self.assertEqual("controlled-test-exit-42", self.state["outbox"][0]["reason"])
         self.assertIn("/runs/1", self.state["outbox"][0]["text"])
         with patch.object(ALERTS, "github_json", return_value={"workflow_runs": runs}):
             ALERTS.workflow_events(self.state, "fixture/repo", "fixture.yml", "test")
