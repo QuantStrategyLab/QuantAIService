@@ -73,15 +73,23 @@ def observe(state, *, unit, invocation, failed, reason, run_url, observed_at, th
             kind = "recovery"
             record["episode"] = None
     if kind:
-        text = (
-            f"quant-monitor AI {kind}\nunit: {unit}\n"
-            f"consecutive_failures: {record['failures']}\nreason: {reason}\n"
-            f"run: {run_url}\nevent_at: {observed_at}\n"
-            "scope: observation only; no trading or service restart"
+        label = "路由网络观察器" if unit == "codex-router-observer.service" else unit
+        status = "异常" if kind == "failure" else "恢复"
+        description = (
+            f"连续 {record['failures']} 次运行未完成"
+            if kind == "failure" else "本次运行正常完成"
         )
+        event_time = datetime.fromisoformat(observed_at).astimezone().strftime("%Y-%m-%d %H:%M:%S %z")
+        text = (
+            f"运行监控 · {status}\n服务：{label}\n"
+            f"状态：{description}\n时间：{event_time}"
+        )
+        if run_url.startswith("https://github.com/"):
+            text += f"\n详情：{run_url}"
         state["outbox"].append({
             "id": hashlib.sha256(f"{unit}:{invocation}:{kind}".encode()).hexdigest(),
             "kind": kind, "unit": unit, "event_at": observed_at, "text": text,
+            "reason": reason, "source_ref": run_url,
             "receipts": {},
         })
 
