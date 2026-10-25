@@ -78,7 +78,7 @@ class CallerTests(unittest.TestCase):
 
         def request(url, *, method, headers, body):
             self.requests.append((method, url, json.loads(body) if body else None, headers.get('Idempotency-Key')))
-            if self.fail_delete and b'delete_event_subscription' in body:
+            if self.fail_delete and b'delete_event_subscription' in (body or b''):
                 raise TimeoutError('private cleanup response')
             reply = original(url, method=method, headers=headers, body=body)
             if method == 'POST' and url.endswith('/v1/tasks'):
