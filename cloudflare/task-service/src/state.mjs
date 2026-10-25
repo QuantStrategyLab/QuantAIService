@@ -1,4 +1,7 @@
 import {callbackURL,signingKey,signedHeaders} from './webhooks.mjs';
+import {apiConfiguration,executeAPI} from './api.mjs';
+import {outputValid} from './validation.mjs';
+import {serialize,valueOf,objectNode,nodeFrom} from './canonical.mjs';
 import { DurableObject } from "cloudflare:workers";
 
 // M1 is a storage capability, not an HTTP API or an authentication layer.
@@ -54,6 +57,7 @@ export class TaskStore extends DurableObject {
     if (!object(this.policies)) denied("project policies are not configured");
     this.sql = ctx.storage.sql;
     this.env = env;
+    this.apiInFlight = new Set();
     this.sql.exec(`
       CREATE TABLE IF NOT EXISTS tasks (
         id TEXT PRIMARY KEY, owner TEXT NOT NULL, idem TEXT NOT NULL,
@@ -121,7 +125,7 @@ export class TaskStore extends DurableObject {
 
   #agentRow(owner, taskId, providerName) {
     const row = this.#row(owner, taskId);
-    if (row.provider !== providerName || !Object.values(this.#policy(owner).providers).includes(providerName)) {
+    if (JSON.parse(row.request).mode !== "agent" || row.provider !== providerName || !Object.values(this.#policy(owner).providers).includes(providerName)) {
       denied("worker is not assigned to this task");
     }
     return row;
@@ -144,8 +148,10 @@ export class TaskStore extends DurableObject {
     }
     const route = profile === "default" ? request.mode : `${request.mode}:${profile}`;
     const provider = policy.providers[route];
-    // M1 deliberately admits callback-driven agent storage only: no API fallback.
-    if (request.mode !== "agent" || !provider) denied("execution mode is unavailable");
+    if (!["agent","api"].includes(request.mode) || !provider) denied("execution mode is unavailable");
+    if (request.mode === "api") {
+      try { apiConfiguration(this.env,provider,request); } catch { denied("execution mode is unavailable"); }
+    }
     if (!policy.models[provider]?.includes(request.model)) denied("model is not admitted");
     const timeout = Object.hasOwn(request, "timeout_seconds") ? request.timeout_seconds : policy.max_timeout_seconds;
     if (!Number.isSafeInteger(timeout) || timeout < 1 || timeout > policy.max_timeout_seconds) invalid("timeout_seconds exceeds project policy");
@@ -390,17 +396,20 @@ export class TaskStore extends DurableObject {
   }
 
   async alarm() {
-    return this.ctx.blockConcurrencyWhile(async()=>{
+    const apiJobs=[];
+    await this.ctx.blockConcurrencyWhile(async()=>{
       const timestamp=now();
       this.ctx.storage.transactionSync(()=>{
-        for(const task of this.sql.exec("SELECT * FROM tasks WHERE status IN ('queued','submitting','running')").toArray()){
-          if(task.status==='submitting'){
+        for(const task of this.sql.exec("SELECT * FROM tasks WHERE status IN ('queued','submitting','running') OR (status='cancel_requested' AND json_extract(request,'$.mode')='api' AND handle IS NULL)").toArray()){
+          if(task.status==='submitting'||task.status==='cancel_requested'){
+            if(this.apiInFlight.has(task.id))continue;
             // Crash before acceptance is unknown, never an instruction to submit a new task.
             this.#state(task.id,'outcome_unknown',{error:'acceptance_unknown'});continue;
           }
           if(task.deadline<=timestamp){this.#state(task.id,task.status==='queued'?'cancelled':'cancel_requested',{error:task.status==='queued'?'deadline_before_submission':'deadline_exceeded'});continue;}
           if(task.status!=='queued')continue;
           this.#state(task.id,'submitting');
+          if(JSON.parse(task.request).mode==='api'){this.apiInFlight.add(task.id);apiJobs.push(task);continue;}
           const active=this.sql.exec('SELECT * FROM subscriptions WHERE owner=? AND deleted IS NULL AND expires>?',task.owner,timestamp).toArray().some(s=>this.#eventAccess(task.owner,JSON.parse(s.identity_json)));
           if(task.provider!=='dot'||!active){this.#state(task.id,'failed',{error:'submission_rejected'});continue;}
           // Pure durable event acceptance has no remote side effect between these writes.
@@ -427,10 +436,39 @@ export class TaskStore extends DurableObject {
         this.sql.exec('UPDATE event_deliveries SET status=?,attempts=?,next_attempt=? WHERE subscription=? AND seq=?',state,attempts,now()+Math.min(2**attempts,60),row.subscription,row.seq);
       }
       const delivery=this.sql.exec("SELECT MIN(next_attempt) AS n FROM event_deliveries WHERE status='pending'").one().n;
-      const task=this.sql.exec("SELECT MIN(deadline) AS n FROM tasks WHERE status IN ('queued','running')").one().n;
-      const next=[delivery,task].filter(v=>v!==null);
+      // An expired live API call can only finish or become unknown; inspect its
+      // recovery state at most once per second instead of rearming every 10ms.
+      const scheduledAt=now();
+      const taskDeadlines=this.sql.exec("SELECT id,deadline FROM tasks WHERE status IN ('queued','submitting','running') OR (status='cancel_requested' AND json_extract(request,'$.mode')='api' AND handle IS NULL)").toArray()
+        .map(task=>this.apiInFlight.has(task.id)&&task.deadline<=scheduledAt?scheduledAt+1:task.deadline);
+      const next=[delivery,...taskDeadlines].filter(v=>v!==null);
       if(next.length)await this.ctx.storage.setAlarm(Math.max(Date.now()+10,Math.min(...next)*1000));
     });
+    // The durable submitting transition commits before any outbound inference.
+    // A crash/lost receipt is outcome_unknown and never submits a replacement.
+    for(const task of apiJobs){
+      const before=this.#row(task.owner,task.id);
+      if(before.status==='cancel_requested'||task.deadline<=now()){
+        this.ctx.storage.transactionSync(()=>{this.#state(task.id,'cancelled',{error:before.status==='cancel_requested'?null:'deadline_before_submission'});});
+        this.apiInFlight.delete(task.id);
+        continue;
+      }
+      let result,error;
+      try{
+        result=await executeAPI(this.env,task.provider,JSON.parse(task.request),task.deadline-now());
+        if(result.status==='completed'&&!await outputValid(JSON.parse(task.request).output_schema,valueOf(result.output))){
+          result={...result,status:'invalid_output',output:null};error='output_schema_mismatch';
+        }
+      }catch(e){result={status:e.name==='SubmissionRejected'?'failed':'outcome_unknown',output:null};error=e.name==='SubmissionRejected'?'submission_rejected':'acceptance_unknown';}
+      this.ctx.storage.transactionSync(()=>{
+        const current=this.#row(task.owner,task.id);
+        if(!['submitting','cancel_requested'].includes(current.status))return;
+        const {output,...handle}=result;
+        const report=objectNode([['revision',nodeFrom(current.revision)],['status',nodeFrom(result.status)],['output',output??nodeFrom(null)],['artifacts',nodeFrom([])]]);
+        this.#state(task.id,result.status,{handle:JSON.stringify({task_id:task.id,...handle}),output:output?serialize(output):null,report_json:serialize(report),error:error??null});
+      });
+      this.apiInFlight.delete(task.id);
+    }
   }
 
 }
