@@ -11,6 +11,8 @@ from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
 
 from .transport import PublicHTTPS, json_body
 
+USER_AGENT = 'ai-service-task-client/2.0'
+
 
 class TaskClient:
     def __init__(self, resource, token, *, transport=None, max_response_bytes=2_000_000):
@@ -27,7 +29,7 @@ class TaskClient:
         token = self.token() if callable(self.token) else self.token
         if not isinstance(token, str) or not token or '\n' in token or '\r' in token:
             raise ValueError('an authenticated token is required')
-        headers = {'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json'}
+        headers = {'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json', 'User-Agent': USER_AGENT}
         if idempotency_key is not None:
             if not isinstance(idempotency_key, str) or not idempotency_key or '\r' in idempotency_key or '\n' in idempotency_key:
                 raise ValueError('invalid idempotency key')
@@ -37,7 +39,7 @@ class TaskClient:
                 raise ValueError('invalid request SHA256')
             headers['X-Request-SHA256'] = request_sha256
         reply = self.transport.request(self.resource + path, method=method, headers=headers,
-                                       body=b'' if body is None else json_body(body))
+                                       body=None if body is None else json_body(body))
         if not 200 <= reply.status < 300:
             raise RuntimeError('AI service request rejected (HTTP ' + str(reply.status) + ')')
         return json.loads(reply.body)

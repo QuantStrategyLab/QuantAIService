@@ -1,13 +1,98 @@
 import json
+import http.client
 import os
+import socket
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
+from urllib.parse import urlsplit
 
-from ai_service.client import TaskClient, github_token
-from ai_service.transport import HttpReply
+from ai_service.client import USER_AGENT, TaskClient, github_token
+from ai_service.transport import HttpReply, TransportError
 
 
 class ClientTests(unittest.TestCase):
+    def test_real_http_get_has_no_entity_body_or_content_length(self):
+        # Exercise http.client's wire encoding without a socket or credentials.
+        # An empty bytes body emits Content-Length: 0, which the deployed
+        # Cloudflare request path rejected; None is an ordinary bodyless GET.
+        for label, call in [('lookup', lambda client: client.lookup('original-key', 'a' * 64)),
+                            ('get', lambda client: client.get('original-task')),
+                            ('events', lambda client: client.request('GET', '/v1/tasks/original-task/events'))]:
+            with self.subTest(request=label):
+                writes, connections = [], []
+
+                class Wire(http.client.HTTPConnection):
+                    def send(self, data):
+                        writes.append(data)
+
+                    def getresponse(self):
+                        return SimpleNamespace(status=200, read=lambda _limit: b'{"id":"original-task"}')
+
+                def connect(*_args, **_kwargs):
+                    connections.append(Wire('service.example'))
+                    return connections[-1]
+
+                with patch('ai_service.transport.public_destination',
+                           side_effect=lambda url: (urlsplit(url), [(socket.AF_INET, '1.1.1.1')])), \
+                        patch('ai_service.transport._PinnedConnection', side_effect=connect):
+                    call(TaskClient('https://service.example', 'synthetic-only'))
+                request = b''.join(writes)
+                header, _, body = request.partition(b'\r\n\r\n')
+                self.assertEqual(len(connections), 1)
+                self.assertTrue(header.startswith(b'GET /v1/tasks'))
+                self.assertNotIn(b'Content-Length:', request)
+                self.assertNotIn(b'Transfer-Encoding:', request)
+                self.assertIn(b'User-Agent: ' + USER_AGENT.encode(), header)
+                self.assertEqual(body, b'')
+
+    def test_real_http_post_keeps_json_entity_and_declares_its_length(self):
+        writes = []
+
+        class Wire(http.client.HTTPConnection):
+            def send(self, data):
+                writes.append(data)
+
+            def getresponse(self):
+                return SimpleNamespace(status=200, read=lambda _limit: b'{"status":"queued"}')
+
+        with patch('ai_service.transport.public_destination',
+                   side_effect=lambda url: (urlsplit(url), [(socket.AF_INET, '1.1.1.1')])), \
+                patch('ai_service.transport._PinnedConnection', return_value=Wire('service.example')):
+            client = TaskClient('https://service.example', 'synthetic-only')
+            self.assertEqual(client.submit({'mode': 'agent'}, 'synthetic-key'), {'status': 'queued'})
+        request = b''.join(writes)
+        header, _, body = request.partition(b'\r\n\r\n')
+        self.assertTrue(request.startswith(b'POST /v1/tasks HTTP/1.1\r\n'))
+        self.assertIn(b'Content-Length: ' + str(len(body)).encode(), header)
+        self.assertNotIn(b'Transfer-Encoding:', request)
+        self.assertIn(b'Content-Type: application/json', header)
+        self.assertIn(b'Idempotency-Key: synthetic-key', header)
+        self.assertIn(b'User-Agent: ' + USER_AGENT.encode(), header)
+        self.assertEqual(json.loads(body), {'mode': 'agent'})
+
+    def test_real_http_lost_reply_is_not_retried(self):
+        attempts, writes = [], []
+
+        class Wire(http.client.HTTPConnection):
+            def send(self, data):
+                writes.append(data)
+
+            def getresponse(self):
+                raise TimeoutError('synthetic lost reply')
+
+        def connect(*_args, **_kwargs):
+            attempts.append(1)
+            return Wire('service.example')
+
+        with patch('ai_service.transport.public_destination',
+                   side_effect=lambda url: (urlsplit(url), [(socket.AF_INET, '1.1.1.1')])), \
+                patch('ai_service.transport._PinnedConnection', side_effect=connect):
+            with self.assertRaises(TransportError):
+                TaskClient('https://service.example', 'synthetic-only').lookup('original-key', 'a' * 64)
+        self.assertEqual(attempts, [1])
+        self.assertEqual(len(writes), 1)
+
     def test_lookup_sends_only_the_frozen_key_and_digest_by_get(self):
         calls = []
         class Transport:
@@ -20,7 +105,7 @@ class ClientTests(unittest.TestCase):
         url, arguments = calls[0]
         self.assertEqual(url, 'https://service.example/v1/tasks/lookup')
         self.assertEqual(arguments['method'], 'GET')
-        self.assertEqual(arguments['body'], b'')
+        self.assertIsNone(arguments['body'])
         self.assertEqual(arguments['headers']['Idempotency-Key'], 'original-key')
         self.assertEqual(arguments['headers']['X-Request-SHA256'], 'a' * 64)
 
