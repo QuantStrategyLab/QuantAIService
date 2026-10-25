@@ -2,8 +2,18 @@
 import {WorkerEntrypoint} from 'cloudflare:workers';
 import {configuration,createAuthApplication} from '../src/auth.mjs';
 export {TaskService} from '../src/task-service.mjs';
-export {PigbibiTaskStore as PersonalFixtureStore,QuantTaskStore as QuantFixtureStore} from '../src/state.mjs';
+import {PigbibiTaskStore,QuantTaskStore} from '../src/state.mjs';
+const observed=Base=>class extends Base {
+  async alarm(){this.testAlarmCount=(this.testAlarmCount??0)+1;return super.alarm();}
+  async probeTick(){return this.alarm();}
+  async alarmStats(){const scheduled=await this.ctx.storage.getAlarm();return {count:this.testAlarmCount??0,scheduledDelayMs:scheduled===null?null:scheduled-Date.now()};}
+  async expireAPI(owner,id){this.sql.exec('UPDATE tasks SET deadline=? WHERE id=? AND owner=?',Date.now()/1000-0.01,id,owner);await this.ctx.storage.setAlarm(Date.now()+10);}
+};
+export class PersonalFixtureStore extends observed(PigbibiTaskStore){}
+export class QuantFixtureStore extends observed(QuantTaskStore){}
 export default class Fixture extends WorkerEntrypoint {
+  async alarmProbe(action,owner,id){const store=this.env.TASK_STATE.get(this.env.TASK_STATE.idFromName(this.env.TASK_STORE_NAME));if(action==='expire')await store.expireAPI(owner,id);else if(action==='tick')await store.probeTick();return store.alarmStats();}
+  async abandonAPI(owner,request,cancel=false){const store=this.env.TASK_STATE.get(this.env.TASK_STATE.idFromName(this.env.TASK_STORE_NAME));const task=await store.submit(owner,'fixture-abandoned-api-'+cancel,JSON.stringify(request));await store.beginSubmission(owner,task.id);if(cancel)await store.cancel(owner,task.id);return task.id;}
   async client(redirect='https://chatgpt.com/connector_platform_oauth_redirect'){
     const app=createAuthApplication(configuration(this.env));return app.authorizationServer.getOAuthApi(this.env).createClient({clientName:'Local protocol test',redirectUris:[redirect],tokenEndpointAuthMethod:'none',grantTypes:['authorization_code','refresh_token'],responseTypes:['code']});
   }
