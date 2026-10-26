@@ -40,7 +40,7 @@ const request=(path,init={})=>worker.fetch(origin+path,{...init,redirect:'manual
 let ids,tokens;
 const auth=t=>({'Authorization':'Bearer '+t,'Content-Type':'application/json'});
 const mint=async(provider,resource,scope,clientId,overrides={})=>{const verifier=randomBytes(48).toString('base64url'),challenge=createHash('sha256').update(verifier).digest('base64url');const code=await worker.grant({clientId,scope,resource,challenge,provider,...overrides});const r=await request('/oauth/token',{method:'POST',body:new URLSearchParams({grant_type:'authorization_code',code,client_id:clientId,redirect_uri:'http://localhost:8989/callback',code_verifier:verifier,resource})});assert.equal(r.status,200);return (await r.json()).access_token;};
-const rpc=async(method,params={},token=tokens.dot)=>{const r=await request('/mcp',{method:'POST',headers:auth(token),body:JSON.stringify({jsonrpc:'2.0',id:1,method,params})});const text=await r.text();return {status:r.status,body:text?JSON.parse(text):null};};
+const rpc=async(method,params={},token=tokens.dot)=>{const r=await request('/mcp',{method:'POST',headers:auth(token),body:JSON.stringify({jsonrpc:'2.0',id:1,method,params})});const text=await r.text();return {status:r.status,body:text?JSON.parse(text):null,challenge:r.headers.get('WWW-Authenticate')};};
 const tool=(name,args)=>rpc('tools/call',{name,arguments:args});
 const taskRequest={mode:'agent',model:'configured-dot',objective:'Synthetic engineering counts only',materials:[{source_id:'first-org-synthetic-v1',checks:[{id:'a',passed:true},{id:'b',passed:false}]}],output_schema:{type:'object',properties:{source_id:{const:'first-org-synthetic-v1'},passed:{const:1},failed:{const:1},trade_authorized:{const:false}},required:['source_id','passed','failed','trade_authorized'],additionalProperties:false}};
 const submit=async(key,body=taskRequest)=>{const r=await request('/v1/tasks',{method:'POST',headers:{...auth(tokens.caller),'Idempotency-Key':key},body:JSON.stringify(body)});assert.equal(r.status,202);return r.json();};
@@ -64,12 +64,21 @@ try{
   const restMetadata=await request('/.well-known/oauth-protected-resource/v1/tasks');assert.equal(restMetadata.status,200);assert.deepEqual((await restMetadata.json()).scopes_supported,['tasks:read']);
   for(const [method,scope] of [['GET','tasks:read'],['POST','tasks:submit']]){const r=await request('/v1/tasks',{method});assert.equal(r.status,401);assert.ok(r.headers.get('WWW-Authenticate').includes('scope="'+scope+'"'));}
  });
- await test('work-only grant is not expanded by MCP scope advertisement',async()=>{
+ await test('work-only grant discovers event capability and receives scope challenges without side effects',async()=>{
   const limited=await mint('dot',origin+'/mcp',['tasks:work'],ids.dot),before=outbound;
-  assert.deepEqual((await rpc('tools/list',{},limited)).body.result.tools.map(t=>t.name),['get_task','claim_task','report_task_result']);
-  assert.deepEqual((await rpc('server/discover',{},limited)).body.result.capabilities,{tools:{}});
-  const denied=await rpc('events/subscribe',{name:'task.requested',arguments:{project},delivery:{mode:'webhook',url:'https://dot-callback.example/events',secret},ttlMs:3600000},limited);
-  assert.equal(denied.body.error.code,-32003);assert.equal(outbound,before);
+  const subscriptionCount=await worker.subscriptionCount(),tools=(await rpc('tools/list',{},limited)).body.result.tools;
+  assert.deepEqual(tools.map(t=>t.name),['get_task','claim_task','report_task_result','get_event_subscription','delete_event_subscription']);
+  for(const t of tools)assert.deepEqual(t.securitySchemes,[{type:'oauth2',scopes:t.name.endsWith('event_subscription')?['tasks:work','events:subscribe']:['tasks:work']}]);
+  assert.deepEqual((await rpc('server/discover',{},limited)).body.result.capabilities,{tools:{},events:{}});
+  const checkChallenge=challenge=>{assert.ok(challenge.includes('error="insufficient_scope"'));assert.ok(challenge.includes('scope="tasks:work events:subscribe"'));assert.ok(challenge.includes('resource_metadata="'+origin+'/.well-known/oauth-protected-resource/mcp"'));assert.ok(challenge.includes('error_description='));};
+  for(const [method,params] of [['events/list',{}],['events/subscribe',{name:'task.requested',arguments:{project},delivery:{mode:'webhook',url:'https://dot-callback.example/events',secret},ttlMs:3600000}],['events/unsubscribe',{id:'synthetic-subscription'}]]){
+   const denied=await rpc(method,params,limited);assert.equal(denied.status,403);assert.equal(denied.body.error,'insufficient_scope');checkChallenge(denied.challenge);
+  }
+  for(const name of ['get_event_subscription','delete_event_subscription']){
+   const denied=await rpc('tools/call',{name,arguments:{subscription_id:'synthetic-subscription'}},limited);assert.equal(denied.status,200);assert.equal(denied.body.result.isError,true);assert.ok(!denied.body.error);checkChallenge(denied.body.result._meta['mcp/www_authenticate'][0]);
+  }
+  assert.equal((await rpc('ping',{},limited)).status,200);
+  assert.equal(await worker.subscriptionCount(),subscriptionCount);assert.equal(outbound,before);
  });
  await test('configured scope advertisement does not admit an unknown OAuth client',async()=>{
   const unknown=(await worker.client('http://localhost:8989/callback')).clientId;
