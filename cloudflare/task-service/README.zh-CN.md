@@ -45,7 +45,7 @@ REST 机器调用方可使用 GitHub Actions OIDC JWT。`TaskClient` 分别配�
 
 普通分支 subject 必须与准确仓库及 ref 一致；若既有仓库使用 immutable subject，必须在 grant 中同时准确绑定 `repository_owner_id`、`repository_id`，并使用 GitHub 实际的精确 subject。不能据仓库名猜测或自动转换 subject。PR、PR target、tag、环境 subject 和多仓 grant 均不进入本次准入。
 
-GitHub 通常不提供 OAuth scope；权限取自有限 grant，如 token 显式带 scope 则只取交集。内部 RPC 的 `githubUserId` 对机器调用方沿用 GitHub 签名 `actor_id` 的数字形状，仅作身份记录，不能据此授予权限；`provider` 固定为 null。外部提供的身份、项目、组织和 provider 头在进入服务绑定前删除。业务 `mode` 仍由既有项目策略选择 Dot 或已明确启用的 API，本鉴权不会启用任何 provider。
+GitHub 通常不提供 OAuth scope；权限取自有限 grant，如 token 显式带 scope 则只取交集。GitHub 签名的 `repository_owner` 必须等于准确仓库 `project` 的所属组织；`PROJECT_CONTEXTS.ownerId` 是既有内部身份名，可以与 GitHub 组织名不同，进入 RPC 时原样保留，不为迁移改名。内部 RPC 的 `githubUserId` 对机器调用方沿用 GitHub 签名 `actor_id` 的数字形状，仅作身份记录，不能据此授予权限；`provider` 固定为 null。外部提供的身份、项目、组织和 provider 头在进入服务绑定前删除。业务 `mode` 仍由既有项目策略选择 Dot 或已明确启用的 API，本鉴权不会启用任何 provider。
 
 本包开放 `POST /v1/tasks`、`GET /v1/tasks/lookup`、`GET /v1/tasks/{id}`，并保留已存在的 `POST /v1/tasks/{id}/cancel`（JSON body 必须为 `{}`，权限仍为 `tasks:submit`）。保留原幂等键、请求 SHA256、任务 ID、未知任务404与冲突409；取消沿用既有幂等及终态语义，不能把已失败任务改称已取消。
 

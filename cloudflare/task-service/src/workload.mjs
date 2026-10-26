@@ -42,7 +42,7 @@ function configuredGrant(env, config) {
   if (!object(grant) || !object(context) || context.organization !== config.organization ||
       typeof context.project !== 'string' || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(context.project) ||
       context.project.split('/').some(part => ['.', '..'].includes(part)) ||
-      context.ownerId !== context.project.split('/')[0] || grant.project !== context.project ||
+      typeof context.ownerId !== 'string' || !context.ownerId || grant.project !== context.project ||
       grant.issuer !== ISSUER || typeof grant.identity !== 'string' ||
       !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(grant.identity) ||
       grant.provider != null || Object.keys(grant).some(k => !['issuer', 'identity', 'subject', 'project', 'scopes', 'claims', 'provider'].includes(k)) ||
@@ -93,7 +93,7 @@ export async function authenticateGitHubWorkload(token, env, config) {
       !['exp', 'iat', 'nbf'].every(name => Number.isSafeInteger(claims[name])) ||
       claims.exp <= Date.now() / 1000 || claims.iat > Date.now() / 1000 || claims.nbf > Date.now() / 1000 ||
       claims.exp <= claims.iat || claims.exp <= claims.nbf || !numericID(claims.actor_id) ||
-      claims.repository_owner !== context.ownerId ||
+      claims.repository_owner !== context.project.split('/')[0] ||
       typeof claims.event_name === 'string' && claims.event_name.startsWith('pull_request') ||
       Object.entries(grant.claims).some(([name, value]) => claims[name] !== value)) rejected();
   const key = await signingKey(header.kid);

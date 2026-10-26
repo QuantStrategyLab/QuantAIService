@@ -20,7 +20,7 @@ const test = async (name, fn) => {await fn(); passed++; console.log('PASS ' + na
 const fixtures = [];
 const organizations = [];
 
-async function organizationFixture(organization, ownerId) {
+async function organizationFixture(organization, ownerId, internalOwnerId = ownerId) {
   const origin = `https://${organization}.example.test`, projectId = organization + '-synthetic';
   const project = ownerId + '/SyntheticProject', ref = 'refs/heads/main';
   const grant = {issuer, identity: 'synthetic-workflow', subject: `repo:${project}:ref:${ref}`,
@@ -30,7 +30,7 @@ async function organizationFixture(organization, ownerId) {
     PROJECT_ID: projectId, TASK_STORE_NAME: 'synthetic-tasks', AUTH_CLIENTS: {}, ADMISSIONS_JSON: '[]',
     GITHUB_WORKLOAD_AUDIENCE: origin + '/v1/tasks',
     GITHUB_WORKLOAD_GRANTS_JSON: JSON.stringify([grant]),
-    PROJECT_CONTEXTS: {[projectId]: {organization, ownerId, project, providers: ['dot']}},
+    PROJECT_CONTEXTS: {[projectId]: {organization, ownerId: internalOwnerId, project, providers: ['dot']}},
     PROJECT_POLICIES: {[project]: {providers: {agent: 'dot'}, models: {dot: ['configured-dot']},
       max_active: 20, max_timeout_seconds: 3600, max_request_bytes: 2000000}}};
   const outbound = [];
@@ -100,6 +100,24 @@ try {
       assert.equal((await f.request('/v1/tasks/' + id + '?project=OtherOwner%2FPrivate')).status, 403);
       assert.equal((await f.request('/v1/tasks', {method: 'POST', body: {...task, provider: 'grok'},
         headers: {'Idempotency-Key': 'forged-provider'}})).status, 400);
+    });
+    await test(organization + ': preserves the internal owner alias and validates the signed repository owner', async () => {
+      const alias = organization + '-existing-owner';
+      const a = await organizationFixture(organization, ownerId, alias);
+      const submitted = await a.request('/v1/tasks', {method: 'POST', body: task,
+        headers: {'Idempotency-Key': 'synthetic-owner-alias'}});
+      assert.equal(submitted.status, 202, await submitted.clone().text());
+      const record = await submitted.json();
+      const read = await a.request('/v1/tasks/' + record.id);
+      assert.equal(read.status, 200, await read.clone().text());
+      assert.equal((await read.json()).owner, a.project);
+      assert.equal((await a.request('/v1/tasks/' + record.id,
+        {bearer: a.token({repository_owner: alias})})).status, 401);
+      for (const ownerId of ['', null]) {
+        const context = {...a.bindings.PROJECT_CONTEXTS[a.projectId], ownerId};
+        await a.worker.policy({PROJECT_CONTEXTS: {[a.projectId]: context}});
+        assert.equal((await a.request('/v1/tasks/' + record.id)).status, 401);
+      }
     });
     for (const [name, claims, headers, key] of [
       ['wrong issuer', {iss: 'https://issuer.example.test'}],
