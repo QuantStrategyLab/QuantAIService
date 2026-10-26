@@ -18,6 +18,13 @@ const escape = (value) => String(value).replace(/[&<>"']/g, (char) => `&#${char.
 const deny = (error, status = 403) => Response.json({ error }, { status, headers: { 'Cache-Control': 'no-store' } });
 const requiredScopesFor = (request, isMcp) => [isMcp ? 'tasks:work'
   : (['GET', 'HEAD'].includes(request.method) ? 'tasks:read' : 'tasks:submit')];
+const advertisedScopesFor = (resource, request, env) => {
+  if (!resource.endsWith('/mcp')) return requiredScopesFor(request, false);
+  const configured = Object.values(env.AUTH_CLIENTS ?? {}).filter((client) =>
+    client?.provider !== null && validProvider(client?.provider) &&
+    Array.isArray(client.resources) && client.resources.includes(resource) && Array.isArray(client.scopes));
+  return SCOPES.filter((scope) => configured.some((client) => client.scopes.includes(scope)));
+};
 
 /** Server-controlled configuration, never request headers or body. One instance per organization. */
 export function configuration(env) {
@@ -123,11 +130,12 @@ export function createAuthApplication(config, { taskHandler } = {}) {
     return downstream(request, identity, env);
   }
 
-  const resourceServer = (resource, request) => new OAuthResourceServer({
+  const resourceServer = (resource, request, env) => new OAuthResourceServer({
     resourceMetadata: { resource, authorization_servers: [config.origin] },
-    // The 401 must ask only for this operation's minimum, not read+submit for a POST.
-    // The handler above enforces the same policy; the library advertises it.
-    requiredScopes: requiredScopesFor(request, resource.endsWith('/mcp')),
+    // Advertise configured MCP worker capabilities so clients can request them at consent.
+    // The library only advertises these scopes; authorized() retains operation enforcement.
+    // REST still asks only for this operation's minimum, not read+submit for a POST.
+    requiredScopes: advertisedScopesFor(resource, request, env),
     validateToken: (env) => (audience, token) => authorizationServer.validateToken(audience, token, env),
     handler: { fetch: authorized },
   });
@@ -230,7 +238,7 @@ export function createAuthApplication(config, { taskHandler } = {}) {
           const path = new URL(resources[index]).pathname;
           if (url.pathname === path || url.pathname.startsWith(`${path}/`) ||
               url.pathname === `/.well-known/oauth-protected-resource${path}`) {
-            return await resourceServer(resources[index], request).fetch(request, env, ctx);
+            return await resourceServer(resources[index], request, env).fetch(request, env, ctx);
           }
         }
         if (url.pathname === '/.well-known/oauth-authorization-server' || url.pathname === '/oauth/token') {

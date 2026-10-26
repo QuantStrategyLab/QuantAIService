@@ -57,6 +57,25 @@ try{
  // Namespace policy is evaluated in its own constructor from configured environment.
  await mf.setOptions({cf:false,workers:[{name:'personal',modules:true,script:fixture,compatibilityDate:'2026-07-30',compatibilityFlags:['global_fetch_strictly_public'],bindings:policy,kvNamespaces:{OAUTH_KV:'test-oauth'},durableObjects:{TASK_STATE:{className:stateClass,useSQLite:true}},serviceBindings:{TASK_SERVICE:{name:'personal',entrypoint:'TaskService'}},outboundService}]});
  worker=await mf.getWorker();
+ await test('MCP advertises configured worker scopes; REST advertises only its operation',async()=>{
+  const advertised=['tasks:read','tasks:work','events:subscribe'];
+  const metadata=await request('/.well-known/oauth-protected-resource/mcp');assert.equal(metadata.status,200);assert.deepEqual((await metadata.json()).scopes_supported,advertised);
+  const mcp=await request('/mcp',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});assert.equal(mcp.status,401);assert.ok(mcp.headers.get('WWW-Authenticate').includes('scope="'+advertised.join(' ')+'"'));
+  const restMetadata=await request('/.well-known/oauth-protected-resource/v1/tasks');assert.equal(restMetadata.status,200);assert.deepEqual((await restMetadata.json()).scopes_supported,['tasks:read']);
+  for(const [method,scope] of [['GET','tasks:read'],['POST','tasks:submit']]){const r=await request('/v1/tasks',{method});assert.equal(r.status,401);assert.ok(r.headers.get('WWW-Authenticate').includes('scope="'+scope+'"'));}
+ });
+ await test('work-only grant is not expanded by MCP scope advertisement',async()=>{
+  const limited=await mint('dot',origin+'/mcp',['tasks:work'],ids.dot),before=outbound;
+  assert.deepEqual((await rpc('tools/list',{},limited)).body.result.tools.map(t=>t.name),['get_task','claim_task','report_task_result']);
+  assert.deepEqual((await rpc('server/discover',{},limited)).body.result.capabilities,{tools:{}});
+  const denied=await rpc('events/subscribe',{name:'task.requested',arguments:{project},delivery:{mode:'webhook',url:'https://dot-callback.example/events',secret},ttlMs:3600000},limited);
+  assert.equal(denied.body.error.code,-32003);assert.equal(outbound,before);
+ });
+ await test('configured scope advertisement does not admit an unknown OAuth client',async()=>{
+  const unknown=(await worker.client('http://localhost:8989/callback')).clientId;
+  const token=await mint('dot',origin+'/mcp',['tasks:work','events:subscribe'],unknown);
+  assert.equal((await rpc('tools/list',{},token)).status,403);
+ });
  tokens={dot:await mint('dot',origin+'/mcp',['tasks:read','tasks:work','events:subscribe'],ids.dot),caller:await mint(null,origin+'/v1/tasks',['tasks:read','tasks:submit'],ids.caller)};
  await test('client role/audience cannot self grant submit or worker',async()=>{const r=await request('/v1/tasks',{method:'POST',headers:auth(tokens.dot),body:'{}'});assert.equal(r.status,401);assert.equal((await rpc('tools/list',{},tokens.caller)).status,401);});
  await test('foreign organization and owner grants cannot cross configured admission',async()=>{
@@ -78,6 +97,7 @@ try{
  tokens.caller=await mint(null,origin+'/v1/tasks',['tasks:read','tasks:submit'],ids.caller);
  let sub;
  await test('native MCP catalog/challenge/owned subscription actual HMAC',async()=>{
+  assert.equal((await rpc('tools/list')).body.result.tools.length,5);
   assert.deepEqual((await rpc('server/discover')).body.result.capabilities,{tools:{},events:{}});assert.equal((await rpc('events/list')).body.result.events[0].name,'task.requested');
   const r=await rpc('events/subscribe',{name:'task.requested',arguments:{project},delivery:{mode:'webhook',url:'https://dot-callback.example/events',secret},ttlMs:3600000});assert.ok(r.body.result,r.body.error?.message);sub=r.body.result.id;
   assert.equal((await tool('get_event_subscription',{subscription_id:sub})).body.result.structuredContent.status,'active');
