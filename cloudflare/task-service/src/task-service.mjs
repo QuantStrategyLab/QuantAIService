@@ -1,5 +1,6 @@
 import {eventCatalog} from './webhooks.mjs';
 import {WorkerEntrypoint} from 'cloudflare:workers';
+import {insufficientScope} from '@cloudflare/workers-oauth-provider';
 import {parseJson, serialize, valueOf, field, nodeFrom, objectNode, replaceFields} from './canonical.mjs';
 import {check, checkOutputSchema, outputValid} from './validation.mjs';
 const fail=(name)=>{throw Object.assign(new Error(name),{name});};
@@ -9,11 +10,14 @@ const json=(node,status=200)=>new Response(serialize(node),{status,headers:{'Con
 const ordinary=(v,status=200)=>Response.json(v,{status,headers:{'Cache-Control':'no-store'}});
 const schema=(properties,required=Object.keys(properties))=>({type:'object',properties,required,additionalProperties:false});
 const string={type:'string'}, fields={task_id:string,attempt_id:string,revision:{type:'integer',minimum:1},status:{enum:['completed','failed','cancelled']},output:{},artifacts:{type:'array',items:{type:'object'}}};
+const EVENT_SCOPES=['tasks:work','events:subscribe'];
+const securitySchemes=scopes=>[{type:'oauth2',scopes}];
+const eventScopeChallenge=c=>insufficientScope({audience:c.identity.resource},EVENT_SCOPES,'Authorize event subscription access to continue.');
 export const TOOLS=[
   ['get_task','Read assigned task, current materials, revision and cancellation state.',['task_id'],['task_id']],
   ['claim_task','Claim one execution attempt. Reuse the same attempt_id for retries.',['task_id','attempt_id'],['task_id','attempt_id']],
   ['report_task_result','Report a final advisory result for the claimed attempt and current revision.',Object.keys(fields),['task_id','attempt_id','revision','status']]
-].map(([name,description,allowed,required])=>({name,description,inputSchema:schema(Object.fromEntries(allowed.map(k=>[k,fields[k]])),required)}));
+].map(([name,description,allowed,required])=>({name,description,inputSchema:schema(Object.fromEntries(allowed.map(k=>[k,fields[k]])),required),securitySchemes:securitySchemes(['tasks:work'])}));
 const REQUEST=schema({mode:{enum:['agent','api']},profile:{type:'string',minLength:1,maxLength:100,pattern:'^[^:]+$'},objective:{type:'string',minLength:1},model:string,materials:{type:'array'},output_schema:{type:'object'},timeout_seconds:{type:'integer',minimum:1},issue:{type:'object'}},['mode','objective','model','output_schema']);
 const MESSAGE=schema({text:string,materials:{type:'array'}},['text']);
 
@@ -86,8 +90,8 @@ export class TaskService extends WorkerEntrypoint {
     }
   }
   tools(c){
-    if(c.provider!=='dot'||!c.scopes.includes('events:subscribe'))return TOOLS;
-    return [...TOOLS,...['get_event_subscription','delete_event_subscription'].map(name=>({name,description:name==='get_event_subscription'?'Read owned subscription lifecycle.':'Delete owned subscription and stop delivery.',inputSchema:schema({subscription_id:{type:'string',minLength:1,maxLength:200}})}))];
+    if(c.provider!=='dot')return TOOLS;
+    return [...TOOLS,...['get_event_subscription','delete_event_subscription'].map(name=>({name,description:name==='get_event_subscription'?'Read owned subscription lifecycle.':'Delete owned subscription and stop delivery.',inputSchema:schema({subscription_id:{type:'string',minLength:1,maxLength:200}}),securitySchemes:securitySchemes(EVENT_SCOPES)}))];
   }
   async mcp(request,c){
     const root=parseJson(await request.text()),message=valueOf(root);
@@ -104,20 +108,27 @@ export class TaskService extends WorkerEntrypoint {
       switch(message.method){
         case 'initialize':if(typeof params.protocolVersion!=='string'||!obj(params.capabilities)||!obj(params.clientInfo))bad();result=nodeFrom({protocolVersion:['2025-03-26','2025-06-18','2025-11-25'].includes(params.protocolVersion)?params.protocolVersion:'2025-11-25',capabilities:{tools:{}},serverInfo:{name:c.organization==='pigbibi'?'personal-ai-service':'quant-ai-service',version:'2.0.14-cloudflare.1'}});break;
         case 'ping':result=nodeFrom({});break;
-        case 'server/discover':result=nodeFrom({resultType:'complete',supportedVersions:['2026-07-28'],capabilities:{tools:{},...(c.provider==='dot'&&c.scopes.includes('events:subscribe')?{events:{}}:{})}});break;
-        case 'events/list':this.scope(c,'events:subscribe');if(c.provider!=='dot')denied();result=nodeFrom(eventCatalog());break;
-        case 'events/subscribe':this.scope(c,'events:subscribe');if(c.provider!=='dot')denied();result=nodeFrom(await this.store().subscribe(c.project,c.worker,c.identity,params));break;
-        case 'events/unsubscribe':this.scope(c,'events:subscribe');if(c.provider!=='dot')denied();result=nodeFrom(await this.store().unsubscribeRequest(c.project,c.worker,params));break;
+        case 'server/discover':result=nodeFrom({resultType:'complete',supportedVersions:['2026-07-28'],capabilities:{tools:{},...(c.provider==='dot'?{events:{}}:{})}});break;
+        // Discovery describes the Dot capability; the token must still authorize its use.
+        case 'events/list':case 'events/subscribe':case 'events/unsubscribe':{
+          if(c.provider!=='dot')denied();
+          if(!c.scopes.includes('events:subscribe'))return eventScopeChallenge(c);
+          result=nodeFrom(message.method==='events/list'?eventCatalog():message.method==='events/subscribe'?await this.store().subscribe(c.project,c.worker,c.identity,params):await this.store().unsubscribeRequest(c.project,c.worker,params));break;
+        }
         case 'tools/list':result=nodeFrom({tools:this.tools(c)});break;
         case 'tools/call':{
           await check(schema({name:string,arguments:{type:'object'}}),params);
           const tool=this.tools(c).find(t=>t.name===params.name);if(!tool)bad();await check(tool.inputSchema,params.arguments);
-          const a=params.arguments,store=this.store();
+          const a=params.arguments;
           if(['get_event_subscription','delete_event_subscription'].includes(params.name)){
-            this.scope(c,'events:subscribe');
+            if(!c.scopes.includes('events:subscribe')){
+              result=nodeFrom({content:[{type:'text',text:'Authorize event subscription access to continue.'}],isError:true,_meta:{'mcp/www_authenticate':[eventScopeChallenge(c).headers.get('WWW-Authenticate')]}});break;
+            }
+            const store=this.store();
             const value=params.name==='get_event_subscription'?await store.subscriptionStatus(c.project,c.worker,a.subscription_id):await store.unsubscribe(c.project,c.worker,a.subscription_id);
             result=nodeFrom({content:[{type:'text',text:JSON.stringify(value)}],structuredContent:value,isError:false});break;
           }
+          const store=this.store();
           await this.snapshot(c,a.task_id,true);
           if(params.name==='claim_task')await store.claim(c.project,a.task_id,c.provider,c.worker,a.attempt_id);
           if(params.name==='report_task_result'){

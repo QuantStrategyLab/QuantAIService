@@ -6,7 +6,9 @@ Dot 是当前 agent 执行方。API 模式保留同一任务提交、查询、�
 
 MCP 的资源 metadata 和未登录 challenge 广告 `AUTH_CLIENTS` 中精确匹配该资源、provider 非 null 的已配置工作角色 scope 并集，顺序沿服务端 `SCOPES`；不根据请求、当前 token 或 REST 调用方推断权限。该广告供客户端在正常授权时申请所需能力，不是执行许可：MCP 基本操作仍要求 `tasks:work`，订阅及其管理仍要求 `events:subscribe`，原 client、admission、组织、项目和 audience 校验保持不变。REST 继续只广告当前读取或提交操作的最小 scope。
 
-部署这个广告修复不会扩大已有 grant。若旧连接仅授予 `tasks:work`，它仍只显示三个任务工具，不能订阅；需要使用原插件正常再次授权所需 scope，再核验五个工具、事件目录、active 订阅及真实任务结果，不能修改 KV grant 或借用其他客户端 token 代替。
+部署这个广告修复不会扩大已有 grant。已准入的 Dot 连接可发现事件能力及五个工具，各工具的 `securitySchemes` 明确声明所需 scope。若旧连接仅授予 `tasks:work`，它仍不能执行订阅或读取、删除订阅记录：原生事件请求返回官方 OAuth 403 scope challenge，订阅管理工具返回带 `_meta["mcp/www_authenticate"]` 的错误结果，提示正常补充授权；拒绝时不写订阅、不发送 webhook。普通任务操作仍只要求 `tasks:work`。
+
+需要使用原插件正常授权所需 scope，再核验事件目录、active 订阅及真实任务结果，不能修改 KV grant 或借用其他客户端 token 代替。资源 metadata 更新不保证宿主立即更新已保存的 scope；以工具和事件实际发现、授权页面及最终 grant 为准。
 
 API 路由由受保护的服务端配置注入：项目 `PROJECT_POLICIES[project].providers` 的 `api` 或 `api:<profile>` 指向显式 provider 别名，`models[别名]` 限定模型。另在 Worker 的 `API_PROVIDERS[别名]` 配置 `type: "gemini_api"`、`enabled: true`、`api_usage_authorized: true`、准确 `model` 和 `key_env`（已有 Secret 的绑定名）；可设置 `max_output_tokens`（1..8192，默认1024）与 `timeout_seconds`（1..60，默认60）。缺少任一启用、授权、模型或凭据条件时拒绝 API 请求，不影响 Dot。这里的布尔配置记录既有批准，本身不授予付费授权；生产启用与真实调用仍需相应授权。
 
