@@ -115,8 +115,8 @@ cycle. An uncertain checkpoint still stops before further operations and retains
 ownership. Notification delivery and unknown-effect ledgers keep their existing
 protection. Preview mode cannot invoke either publication path or read the Secret.
 
-The hosted `quant-monitor-inputs.yml` adapter uses separate, short-lived App
-identities for source Actions reads and four-repository issue-only writes.
+The hosted `quant-monitor-inputs.yml` adapter uses separate App identities to
+mint short-lived tokens for source Actions reads and four-repository issue-only writes.
 Bind them with `QUANT_MONITOR_READER_APP_ID` /
 `QUANT_MONITOR_READER_APP_PRIVATE_KEY` and `QUANT_MONITOR_ISSUES_APP_ID` /
 `QUANT_MONITOR_ISSUES_APP_PRIVATE_KEY` in protected deployment configuration.
