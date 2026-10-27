@@ -120,9 +120,42 @@ class CloudJobTests(unittest.TestCase):
         self.assertEqual(second['status'], 'blocked')
         self.assertEqual(self.store.calls.count('read'), 1)
 
-    def test_production_cli_cannot_be_enabled_by_an_environment_flag(self):
-        with patch.dict(os.environ, {'MONITOR_MODE': 'run'}), self.assertRaisesRegex(ValueError, 'not_configured'):
-            job.main()
+    def test_production_cli_requires_notification_binding_before_any_claim(self):
+        storage = types.ModuleType('google.cloud.storage')
+        storage.Client = Mock()
+        with patch.dict(os.environ, {'MONITOR_MODE': 'run', 'MONITOR_STATE_GCS_URI': 'gs://synthetic/state'}, clear=True), \
+                patch.dict(sys.modules, {'google.cloud.storage': storage}), patch.object(job, 'CloudState') as store:
+            self.assertEqual(job.main(), 1)
+            store.return_value.claim.assert_not_called()
+
+    def test_checkpoint_failure_stops_before_telegram_and_retains_claim(self):
+        send = Mock()
+        self.store.checkpoint = Mock(side_effect=state.StateUnavailable('unknown_write'))
+        def evaluate(root, **kwargs):
+            health_cycle._write_alert_state(root / 'monitor', LEDGER)
+            send()
+        with self.assertRaises(state.StateUnavailable):
+            job.run_once(self.store, evaluate, mode='run', execution_id='first')
+        send.assert_not_called()
+        self.assertIsNotNone(self.store.owner)
+        self.assertEqual(job.run_once(self.store, evaluate, mode='run', execution_id='second')['status'], 'blocked')
+
+    def test_intermediate_checkpoint_keeps_image_code_out_of_state(self):
+        def save(raw, **kwargs):
+            self.store.raw = raw
+            self.store.generation += 1
+            return self.store.generation
+        self.store.checkpoint = Mock(side_effect=save)
+        def evaluate(root, **kwargs):
+            code = root / 'projects/CryptoStrategies/script.py'
+            code.parent.mkdir(parents=True)
+            code.write_text('image code')
+            health_cycle._write_alert_state(root / 'monitor', LEDGER)
+            code.unlink()
+            return {'healthy': False, 'snapshot_count': 0, 'data_status': 'unavailable'}
+        job.run_once(self.store, evaluate, mode='run', execution_id='first')
+        self.store.checkpoint.assert_called_once()
+        self.assertNotIn(b'image code', self.store.raw)
 
 
 class PortableStateTests(unittest.TestCase):
