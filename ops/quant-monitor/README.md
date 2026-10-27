@@ -99,6 +99,32 @@ failures and do not present them as strategy or trading anomalies.
 | `GH_TOKEN` | No | none | Used by `gh` for repository fetch and issue creation. |
 | `QSL_GITHUB_REPO` | No | none | Default repository for non-strategy briefing issues; strategy evidence goes to the matching strategy repository. |
 
+### Sentinel Secret maintenance
+
+The manual `sync_quant_sentinel_telegram.yml` workflow runs on a GitHub-hosted
+runner using its own direct Workload Identity Federation identity. Its default
+`inspect` mode validates the approved Bot identity and append permissions on all
+four configured Secrets without creating a version or sending a message. It
+does not refresh or restart a VPS service.
+
+Keep the existing `TG_TOKEN` in the organization/repository Secret store and
+configure these non-credential repository variables:
+
+| Variable | Value |
+|---|---|
+| `QUANT_SENTINEL_GCP_PROJECT_ID` | Project hosting the federation provider. |
+| `QUANT_SENTINEL_GCP_WIF_PROVIDER` | Exact provider resource restricted to this workflow on `main`. |
+| `QUANT_SENTINEL_EXPECTED_BOT_ID_SHA256` | SHA256 of `str(getMe.result.id)` from the approved Bot. |
+| `QUANT_SENTINEL_SECRET_TARGETS_JSON` | JSON array of four unique `projects/PROJECT/secrets/SECRET` resources. |
+
+The identity needs only `roles/secretmanager.secretVersionAdder` on those four
+Secrets, with no Secret-reading or project-wide roles. Choose `sync` explicitly
+to append versions after every target passes preflight. The token stays out of
+command arguments and receipts; HTTP redirects are refused. If a write outcome
+is unknown, the workflow stops without retrying or continuing to later targets.
+Inspect the credential-free receipt and the affected version metadata before a
+new attempt; do not assume that an unknown write added no version.
+
 ### Telegram
 
 The bot token is loaded from a GCP Secret. Set the secret name with

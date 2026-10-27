@@ -2,9 +2,16 @@ name: Sync QuantSentinel Telegram Secret
 
 on:
   workflow_dispatch:
+    inputs:
+      mode:
+        description: Inspect permissions or explicitly append Secret versions
+        type: choice
+        options: [inspect, sync]
+        default: inspect
 
 permissions:
   contents: read
+  id-token: write
 
 concurrency:
   group: sync-quant-sentinel-secret
@@ -13,43 +20,43 @@ concurrency:
 jobs:
   sync:
     name: Sync org TG_TOKEN to GCP sentinel secrets
-    runs-on:
-      - self-hosted
-      - codex-vps
+    if: github.repository == 'QuantStrategyLab/QuantAIService' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: Sync sentinel secret across GCP projects
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+      - name: Install the existing hash-pinned runtime dependencies
+        run: |
+          python -m pip --isolated install --require-hashes --only-binary=:all: \
+            -r ops/quant-monitor/requirements-linux-py312.lock
+      - name: Authenticate with the isolated maintenance identity
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
+        with:
+          project_id: ${{ vars.QUANT_SENTINEL_GCP_PROJECT_ID }}
+          workload_identity_provider: ${{ vars.QUANT_SENTINEL_GCP_WIF_PROVIDER }}
+          create_credentials_file: true
+          export_environment_variables: true
+      - name: Inspect or explicitly sync the approved Bot
         env:
+          MAINTENANCE_MODE: ${{ inputs.mode }}
           TG_TOKEN: ${{ secrets.TG_TOKEN }}
-          SECRET_NAME: quant-sentinel-telegram-bot-token
+          QUANT_SENTINEL_EXPECTED_BOT_ID_SHA256: ${{ vars.QUANT_SENTINEL_EXPECTED_BOT_ID_SHA256 }}
+          QUANT_SENTINEL_SECRET_TARGETS_JSON: ${{ vars.QUANT_SENTINEL_SECRET_TARGETS_JSON }}
         run: |
           set -euo pipefail
-          if [[ -z "${TG_TOKEN}" ]]; then
-            echo "TG_TOKEN is not configured for this repository." >&2
-            exit 1
-          fi
-          echo "::add-mask::${TG_TOKEN}"
-          if ! curl -fsS "https://api.telegram.org/bot${TG_TOKEN}/getMe" | grep -q '"ok":true'; then
-            echo "TG_TOKEN failed Telegram getMe validation." >&2
-            exit 1
-          fi
-          for project in firstradequant longbridgequant charlesschwabquant interactivebrokersquant; do
-            printf '%s' "${TG_TOKEN}" | gcloud secrets versions add "${SECRET_NAME}" \
-              --project="${project}" \
-              --data-file=-
-            echo "synced ${SECRET_NAME} in ${project}"
-          done
-
-      - name: Refresh VPS telegram env
-        env:
-          GLOBAL_TELEGRAM_CHAT_ID: ${{ vars.GLOBAL_TELEGRAM_CHAT_ID }}
-        run: |
-          set -euo pipefail
-          export QUANT_SENTINEL_GCP_PROJECT="${QUANT_SENTINEL_GCP_PROJECT:-firstradequant}"
-          if [[ -z "${GLOBAL_TELEGRAM_CHAT_ID:-}" ]]; then
-            echo "GLOBAL_TELEGRAM_CHAT_ID org/repo variable required" >&2
-            exit 1
-          fi
-          bash /home/ubuntu/Projects/AIAuditBridge/ops/quant-monitor/scripts/load_telegram_env.sh
-          systemctl restart codex-quant.service
-          systemctl is-active codex-quant.service
+          python3 -B ops/quant-monitor/scripts/sync_sentinel_secret.py \
+            --mode "$MAINTENANCE_MODE" --receipt "$RUNNER_TEMP/sentinel-maintenance-receipt.json"
+      - name: Save the credential-free maintenance receipt
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: sentinel-maintenance-receipt
+          path: ${{ runner.temp }}/sentinel-maintenance-receipt.json
+          if-no-files-found: error
+          retention-days: 14
