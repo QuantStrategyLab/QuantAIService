@@ -55,6 +55,14 @@ class MemoryStore:
         self.raw, self.owner = raw, None
         self.generation += 1
 
+    def checkpoint(self, raw, *, state_generation, claim_generation):
+        self.calls.append('checkpoint')
+        if (state_generation, claim_generation) != (self.generation, 5) or self.owner is None:
+            raise state.StateUnavailable('generation_conflict')
+        self.raw = raw
+        self.generation += 1
+        return self.generation
+
     def release(self, *, claim_generation):
         if claim_generation != 5:
             raise state.StateUnavailable('claim_conflict')
@@ -76,16 +84,18 @@ class CloudJobTests(unittest.TestCase):
         return {'healthy': False, 'snapshot_count': 0, 'data_status': 'unavailable'}
 
     def test_preview_is_read_only_even_with_all_callbacks_present(self):
-        refresh, publish = Mock(), Mock()
+        refresh, publish, website_publish = Mock(), Mock(), Mock()
         before = self.store.raw
         def evaluate(root, *, effects_enabled):
             self.assertFalse(effects_enabled)
             return self.evaluate(root, effects_enabled=effects_enabled)
-        result = job.run_once(self.store, evaluate, refresh=refresh, publish=publish)
+        result = job.run_once(self.store, evaluate, refresh=refresh, publish=publish,
+                              website_publish=website_publish)
         self.assertEqual(self.store.calls, ['read'])
         self.assertEqual(self.store.raw, before)
         refresh.assert_not_called()
         publish.assert_not_called()
+        website_publish.assert_not_called()
         self.assertEqual((result['healthy'], result['data_status']), (False, 'unavailable'))
         self.assertNotIn('deliveries', json.dumps(result))
 
@@ -110,6 +120,51 @@ class CloudJobTests(unittest.TestCase):
         result = job.run_once(self.store, uncertain, mode='run', execution_id='second')
         self.assertEqual(calls, ['effect'])
         self.assertEqual(result['status'], 'blocked')
+
+    def test_computed_results_are_saved_before_derived_publication(self):
+        def publish(root, **kwargs):
+            self.assertEqual(self.store.calls, ['claim', 'read', 'checkpoint'])
+            with tempfile.TemporaryDirectory() as directory:
+                restored = Path(directory)
+                state.restore(self.store.raw, restored)
+                ledger = json.loads((restored / 'monitor/data/alert-state/health_cycle.json').read_text())
+                self.assertEqual(ledger['new_event'], 'sent')
+        job.run_once(self.store, self.evaluate, mode='run', execution_id='first', publish=publish)
+        self.assertEqual(self.store.calls[-1], 'commit')
+        self.assertIsNone(self.store.owner)
+
+    def test_failed_website_does_not_lose_results_or_block_next_cycle(self):
+        from monitor_website_publish import publish_saved_snapshot
+
+        with patch('monitor_website_publish.read_sync_token', side_effect=RuntimeError('synthetic denied')) as read:
+            def website(root, *, checkpoint):
+                return publish_saved_snapshot(root, checkpoint=checkpoint, url='synthetic', secret_version='synthetic')
+            result = job.run_once(self.store, self.evaluate, mode='run', execution_id='first', website_publish=website)
+            self.assertEqual(result['website_publication'], 'unconfirmed')
+            self.assertIsNone(self.store.owner)
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                state.restore(self.store.raw, root)
+                receipt = json.loads((root / 'monitor/data/health/website-publication.json').read_text())
+                self.assertEqual(receipt['status'], 'unconfirmed')
+                ledger = json.loads((root / 'monitor/data/alert-state/health_cycle.json').read_text())
+                self.assertEqual(ledger['deliveries'], LEDGER['deliveries'])
+                self.assertEqual(ledger['new_event'], 'sent')
+            evaluate = Mock(return_value={'healthy': True, 'snapshot_count': 1, 'data_status': 'ready'})
+            again = job.run_once(self.store, evaluate, mode='run', execution_id='second', website_publish=website)
+            self.assertEqual(again['status'], 'evaluated')
+            self.assertIsNone(self.store.owner)
+            self.assertEqual(read.call_count, 2)
+
+    def test_uncertain_computation_save_stops_before_any_publication(self):
+        publish, website = Mock(), Mock()
+        self.store.checkpoint = Mock(side_effect=state.StateUnavailable('unknown_write'))
+        with self.assertRaises(state.StateUnavailable):
+            job.run_once(self.store, self.evaluate, mode='run', execution_id='first',
+                         publish=publish, website_publish=website)
+        publish.assert_not_called()
+        website.assert_not_called()
+        self.assertIsNotNone(self.store.owner)
 
     def test_definite_input_failure_before_effects_releases_only_its_claim(self):
         before = self.store.raw
@@ -148,6 +203,24 @@ class CloudJobTests(unittest.TestCase):
                 patch.object(job, 'CloudState') as store:
             self.assertEqual(job.main(), 1)
             store.return_value.claim.assert_not_called()
+
+    def test_missing_website_binding_does_not_block_cli_and_is_reported_as_warning(self):
+        storage = types.ModuleType('google.cloud.storage')
+        storage.Client = Mock()
+        google = types.ModuleType('google')
+        cloud = types.ModuleType('google.cloud')
+        google.cloud, cloud.storage = cloud, storage
+        result = {'status': 'evaluated', 'healthy': True, 'website_publication': 'unconfirmed'}
+        output = io.StringIO()
+        with patch.dict(os.environ, {'MONITOR_MODE': 'run', 'MONITOR_STATE_GCS_URI': 'gs://synthetic/state',
+                                     'TELEGRAM_TOKEN': 'synthetic', 'GLOBAL_TELEGRAM_CHAT_ID': 'synthetic'}, clear=True), \
+                patch.dict(sys.modules, {'google': google, 'google.cloud': cloud, 'google.cloud.storage': storage}), \
+                patch.object(job, 'run_once', return_value=result) as run, \
+                patch('sys.stdout', output):
+            self.assertEqual(job.main(), 0)
+            run.assert_called_once()
+            self.assertTrue(callable(run.call_args.kwargs['website_publish']))
+        self.assertEqual(json.loads(output.getvalue())['severity'], 'WARNING')
 
     def test_checkpoint_failure_stops_before_telegram_and_retains_claim(self):
         send = Mock()

@@ -17,7 +17,8 @@ from pathlib import Path
 from monitor_cloud_state import CloudState, PROJECTS, StateUnavailable, pack, restore
 
 
-def run_once(store, evaluate, *, mode='preview', execution_id='', refresh=None, publish=None):
+def run_once(store, evaluate, *, mode='preview', execution_id='', refresh=None, publish=None,
+             website_publish=None):
     if mode not in {'preview', 'run'}:
         raise ValueError('monitor_mode_invalid')
     if mode == 'run' and not execution_id:
@@ -48,12 +49,20 @@ def run_once(store, evaluate, *, mode='preview', execution_id='', refresh=None, 
             effects_started = mode == 'run'
             with health_cycle.cloud_alert_checkpoint(checkpoint if mode == 'run' else None):
                 result = evaluate(root, effects_enabled=mode == 'run')
+            website_status = 'not_requested'
             if mode == 'run':
+                if publish is not None or website_publish is not None:
+                    # Derived publication cannot precede durable computation and
+                    # notification state. Retain ownership through publication.
+                    checkpoint()
                 if publish is not None:
                     publish(root, claim_generation=claim_generation)
+                if website_publish is not None:
+                    website_status = website_publish(root, checkpoint=checkpoint)
                 store.commit(pack(root), state_generation=generation, claim_generation=claim_generation)
             return {'status': 'evaluated', 'mode': mode, 'healthy': result['healthy'],
                     'snapshot_count': result['snapshot_count'], 'data_status': result['data_status'],
+                    'website_publication': website_status,
                     'source_matches_runtime': manifest['source_revision'] == os.environ.get('MONITOR_SOURCE_REVISION'),
                     'qpk_matches_runtime': manifest['qpk_revision'] == os.environ.get('MONITOR_QPK_REVISION')}
     except Exception:
@@ -135,9 +144,6 @@ def publish_projections(client, uri, root, *, claim_generation):
             if_generation_match=claim_generation, timeout=20, retry=None)
         blob.upload_from_string(raw, content_type='application/json', if_generation_match=generation,
                                 timeout=30, retry=None)
-    from monitor_website_publish import publish_snapshot
-    publish_snapshot(root / 'monitor/data/health/strategy_health_dashboard.v1.json',
-                     url=os.environ['STRATEGY_HEALTH_SYNC_URL'], token=os.environ['STRATEGY_HEALTH_SYNC_TOKEN'])
 
 
 def main():
@@ -157,14 +163,23 @@ def main():
                 refresh(root)
             return evaluate_workspace(root, effects_enabled=effects_enabled)
         if mode == 'run' and any(not os.environ.get(key) for key in (
-                'TELEGRAM_TOKEN', 'GLOBAL_TELEGRAM_CHAT_ID', 'STRATEGY_HEALTH_SYNC_TOKEN', 'STRATEGY_HEALTH_SYNC_URL')):
+                'TELEGRAM_TOKEN', 'GLOBAL_TELEGRAM_CHAT_ID')):
             raise StateUnavailable('monitor_notification_binding_missing')
+        from monitor_website_publish import publish_saved_snapshot
+
+        def publish_website(root, *, checkpoint):
+            return publish_saved_snapshot(root, checkpoint=checkpoint,
+                                          url=os.environ.get('STRATEGY_HEALTH_SYNC_URL', ''),
+                                          secret_version=os.environ.get('STRATEGY_HEALTH_SYNC_SECRET_VERSION', ''))
+
         result = run_once(store, evaluate, mode=mode, execution_id=os.environ.get('CLOUD_RUN_EXECUTION', ''),
-                          refresh=refresh, publish=lambda root, **kwargs: publish_projections(client, uri, root, **kwargs))
+                          refresh=refresh, publish=lambda root, **kwargs: publish_projections(client, uri, root, **kwargs),
+                          website_publish=publish_website)
         if result['status'] == 'blocked':
             print(json.dumps({'component': 'strategy_health', 'severity': 'ERROR', **result}))
             return 1
-        print(json.dumps({'component': 'strategy_health', 'severity': 'INFO' if result['healthy'] else 'WARNING', **result}))
+        healthy = result['healthy'] and result['website_publication'] != 'unconfirmed'
+        print(json.dumps({'component': 'strategy_health', 'severity': 'INFO' if healthy else 'WARNING', **result}))
         return 0
     except Exception:
         print(json.dumps({'component': 'strategy_health', 'severity': 'ERROR',
