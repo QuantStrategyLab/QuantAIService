@@ -162,8 +162,20 @@ def verify_storage_bounds(client):
     return {"archive_metadata_denied": True, "object_listing_denied": True}
 
 
+def unresolved_attempts(state_dir):
+    attempts = []
+    for path in sorted(state_dir.glob("*.json")):
+        state = json.loads(path.read_text())
+        if not isinstance(state, dict):
+            raise Rejected("invalid_saved_attempt")
+        if not state.get("receipt"):
+            attempts.append((path, state))
+    return attempts
+
+
 def diagnose(root, state_dir, *, include_healthy=False, env=None, opener=None,
-             now=None, monotonic=time.monotonic, sleep=time.sleep, checkpoint=None):
+             now=None, monotonic=time.monotonic, sleep=time.sleep, checkpoint=None,
+             prepare_observation=None):
     """Diagnose a saved observation, optionally persisting each state transition.
 
     A portable-state adapter must acquire its shared claim before restoring the
@@ -184,45 +196,51 @@ def diagnose(root, state_dir, *, include_healthy=False, env=None, opener=None,
     service = env.get("CODEX_AUDIT_SERVICE_URL", "").rstrip("/")
     https_url(service, base=True)
     now = now or datetime.now(timezone.utc)
-    paths = sorted((root / "data/health").glob("cycle_*.json"))
-    if not paths:
-        raise Rejected("latest_cycle_unavailable")
-    observed_at, errors = _read_diagnosis_cycle(paths[-1], now=now, max_age=timedelta(hours=2))
-    if not errors and not include_healthy:
-        return {"status": "skipped", "reason": "no_data_errors"}
-    observation = {"observed_at": observed_at.isoformat(), "latest_cycle_at": observed_at.isoformat(),
-                   "current_state": "still_observed" if errors else "no_data_errors"}
-    payload = {"task": TASK, "mode": "review_only", "sandbox": "read-only",
-               "allowed_providers": ["codex"], "research_stage": "drift_analysis",
-               "complexity": "high", "model": "auto", "reasoning_effort": "auto",
-               "source_repository": REPOSITORY, "source_ref": "main", "timeout_seconds": 600,
-               "prompt": _operational_diagnosis_prompt(errors, observation=observation)
-               + "\nThis is a real saved observation. An empty incident list means no data errors "
-               "were recorded; do not invent an incident or infer trading/account health. "
-               "Use only this supplied classification and state its limits; no external tools or actions."}
     opener = opener or request.build_opener(NoRedirect())
     state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     # The file and lock are separate from the monitor's own attempt/alert ledgers.
     with (state_dir / "lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         path = state_dir / (now.date().isoformat() + ".json")
-        for previous in state_dir.glob("*.json"):
-            if previous != path and not json.loads(previous.read_text()).get("receipt"):
+        pending = unresolved_attempts(state_dir)
+        for previous, state in pending:
+            if previous != path and not state.get("job_id"):
                 raise Rejected("previous_outcome_unresolved")
-        if path.exists():
-            state = json.loads(path.read_text())
-            if state.get("receipt"):
-                return {"status": "skipped", "reason": "daily_attempt_limit"}
+        # Recover the oldest accepted job before looking at any new observation.
+        # A newer cycle, midnight or expired polling budget cannot authorize POST.
+        if pending:
+            path, state = pending[0]
             # An ambiguous POST is never automatically resubmitted, even on rerun.
             if not state.get("job_id"):
                 raise Rejected("submit_outcome_unknown")
-            if state.get("request_sha256") != digest(payload) or state.get("service_sha256") != digest(service):
+            if (not re.fullmatch(r"[0-9a-f]{64}", str(state.get("request_sha256", "")))
+                    or state.get("service_sha256") != digest(service)):
                 raise Rejected("pending_request_changed")
             check_job({"job_id": state["job_id"], "status": "queued", "task": TASK,
                        "source_repository": REPOSITORY, **state["route"]})
             if type(state.get("deadline")) not in (float, int) or not math.isfinite(state["deadline"]):
                 raise Rejected("invalid_pending_deadline")
         else:
+            if path.exists():
+                return {"status": "skipped", "reason": "daily_attempt_limit"}
+            if prepare_observation is not None:
+                prepare_observation()
+            paths = sorted((root / "data/health").glob("cycle_*.json"))
+            if not paths:
+                raise Rejected("latest_cycle_unavailable")
+            observed_at, errors = _read_diagnosis_cycle(paths[-1], now=now, max_age=timedelta(hours=2))
+            if not errors and not include_healthy:
+                return {"status": "skipped", "reason": "no_data_errors"}
+            observation = {"observed_at": observed_at.isoformat(), "latest_cycle_at": observed_at.isoformat(),
+                           "current_state": "still_observed" if errors else "no_data_errors"}
+            payload = {"task": TASK, "mode": "review_only", "sandbox": "read-only",
+                       "allowed_providers": ["codex"], "research_stage": "drift_analysis",
+                       "complexity": "high", "model": "auto", "reasoning_effort": "auto",
+                       "source_repository": REPOSITORY, "source_ref": "main", "timeout_seconds": 600,
+                       "prompt": _operational_diagnosis_prompt(errors, observation=observation)
+                       + "\nThis is a real saved observation. An empty incident list means no data errors "
+                       "were recorded; do not invent an incident or infer trading/account health. "
+                       "Use only this supplied classification and state its limits; no external tools or actions."}
             state = {"request_sha256": digest(payload), "service_sha256": digest(service),
                      "observed_at": observed_at.isoformat(), "job_id": None,
                      "deadline": now.timestamp() + 660}
@@ -234,7 +252,9 @@ def diagnose(root, state_dir, *, include_healthy=False, env=None, opener=None,
             state.update(job_id=job["job_id"], route=route)
             persist(path, state)
         deadline = monotonic() + max(0, min(660, state["deadline"] - now.timestamp()))
-        while monotonic() < deadline:
+        first_poll = True
+        while first_poll or monotonic() < deadline:
+            first_poll = False
             job = json_request(opener, service + JOBS + "/" + state["job_id"], oidc_token(env, opener))
             check_job(job, state["job_id"], state["route"])
             if job["status"] == "failed":
@@ -252,7 +272,8 @@ def diagnose(root, state_dir, *, include_healthy=False, env=None, opener=None,
                            "execution_authority_granted": False}
                 persist(path, {**state, "receipt": receipt})
                 return receipt
-            sleep(5)
+            if monotonic() < deadline:
+                sleep(5)
         raise Rejected("audit_job_timeout")
 
 
@@ -287,44 +308,59 @@ def diagnose_cloud(*, include_healthy=False, verify_state_only=False, env=None,
             client, checkpoint_uri=f"gs://{CLOUD_BUCKET}/{CLOUD_LEDGER_PREFIX}/checkpoints.json",
             observation_uri=f"gs://{CLOUD_BUCKET}/{CLOUD_OBSERVATION}")
     now = now or datetime.now(timezone.utc)
-    # This producer-owned, generation-pinned projection is independent of the
-    # consumer ledger. Reject an unavailable/stale source before reserving it.
-    cycle = store.observation(now=now)
+    # Qualification still validates its source first. Normal execution restores
+    # pending jobs first; polling one does not depend on a fresh observation.
+    if verify_state_only:
+        store.observation(now=now)
     bounds = verify_storage_bounds(client) if verify_state_only else {}
     claim = store.claim("actions/" + env["GITHUB_RUN_ID"] + "/" + env["GITHUB_RUN_ATTEMPT"])
     if claim is None:
         raise Rejected("diagnosis_state_busy")
-    # There is deliberately no unconditional finally-release: an unreadable
-    # ledger or uncertain submission/checkpoint retains the claim for review.
     with tempfile.TemporaryDirectory(prefix="actions-diagnosis-") as directory:
         root = Path(directory)
         state_dir = root / "actions-state"
-        raw, generation = store.read()
-        store.restore(raw, state_dir)
-        cycle_path = root / "data/health/cycle_observation.json"
-        cycle_path.parent.mkdir(parents=True)
-        save(cycle_path, cycle)
+        retain_claim = False
+        try:
+            raw, generation = store.read()
+            store.restore(raw, state_dir)
+            retain_claim = any(not state.get("job_id") for _, state in unresolved_attempts(state_dir))
 
-        def checkpoint():
-            nonlocal generation
-            generation = store.checkpoint(state_dir, state_generation=generation, claim_generation=claim)
+            def checkpoint():
+                nonlocal generation, retain_claim
+                # Set before I/O: a lost response may conceal a successful write.
+                retain_claim = True
+                generation = store.checkpoint(state_dir, state_generation=generation, claim_generation=claim)
+                retain_claim = any(not state.get("job_id") for _, state in unresolved_attempts(state_dir))
 
-        if verify_state_only:
-            if refresh is None:
-                raise Rejected("credential_refresh_unavailable")
-            refresh()
-            # Exercise the real guarded write with the unchanged original daily
-            # ledger. No audit token is requested and no diagnostic is submitted.
-            checkpoint()
-            restored_raw, restored_generation = store.read()
-            if restored_raw != raw or restored_generation != generation:
-                raise Rejected("checkpoint_verification_failed")
-            result = {"status": "verified", "mode": "cloud_state_only", **bounds,
-                      "adc_refresh_verified": True, "checkpoint_unchanged": True,
-                      "audit_requests": 0}
-        else:
-            result = diagnose(root, state_dir, include_healthy=include_healthy, env=env, now=now,
-                              opener=opener, monotonic=monotonic, sleep=sleep, checkpoint=checkpoint)
+            def prepare_observation():
+                observed = store.observation(now=now)
+                cycle_path = root / "data/health/cycle_observation.json"
+                cycle_path.parent.mkdir(parents=True)
+                save(cycle_path, observed)
+
+            if verify_state_only:
+                if refresh is None:
+                    raise Rejected("credential_refresh_unavailable")
+                refresh()
+                # Save unchanged bytes; never obtain an audit token or submit.
+                checkpoint()
+                restored_raw, restored_generation = store.read()
+                if restored_raw != raw or restored_generation != generation:
+                    retain_claim = True
+                    raise Rejected("checkpoint_verification_failed")
+                result = {"status": "verified", "mode": "cloud_state_only", **bounds,
+                          "adc_refresh_verified": True, "checkpoint_unchanged": True,
+                          "audit_requests": 0}
+            else:
+                result = diagnose(root, state_dir, include_healthy=include_healthy, env=env, now=now,
+                                  opener=opener, monotonic=monotonic, sleep=sleep, checkpoint=checkpoint,
+                                  prepare_observation=prepare_observation)
+        except Exception:
+            # Read-only failures can recover next run. Ambiguous submission or
+            # checkpoint outcomes must still be reconciled before exact release.
+            if not retain_claim:
+                store.release(claim_generation=claim)
+            raise
         store.release(claim_generation=claim)
         return result
 
