@@ -282,7 +282,7 @@ def test_skipped_diagnosis_does_not_create_or_persist_an_attempt(tmp_path):
     assert run(tmp_path, Opener([]), checkpoint=checkpoint) == {
         "status": "skipped", "reason": "no_data_errors"}
     checkpoint.assert_not_called()
-    assert not (tmp_path / "actions-state").exists()
+    assert list((tmp_path / "actions-state").glob("*.json")) == []
 
 
 class StorageFailure(Exception):
@@ -404,7 +404,7 @@ def test_cloud_success_advances_each_generation_under_one_independent_claim():
                      job("succeeded", output="private advice")])
     result = cloud_run(store, opener)
     assert result["status"] == "succeeded" and store.active is None
-    assert store.events == ["observation", ("claim", "actions/123456/1"), ("read", 10), "restore",
+    assert store.events == [("claim", "actions/123456/1"), ("read", 10), "restore", "observation",
                             ("checkpoint", 10, 20), ("checkpoint", 11, 20),
                             ("checkpoint", 12, 20), ("release", 20)]
     states = [json.loads(item["2026-10-22.json"]) for item in store.saved]
@@ -441,26 +441,111 @@ def test_cloud_lost_submission_remains_unknown_after_operator_releases_claim():
     assert opener.calls == [] and store.active == 20
 
 
-def test_cloud_pending_job_resumes_with_get_only_after_operator_recovery():
+def test_cloud_pending_job_resumes_with_get_only_without_operator_recovery():
     store = SavedCloudState()
     with pytest.raises(error.URLError):
         cloud_run(store, Opener([{"value": "synthetic-oidc"}, job(), {"value": "synthetic-oidc"},
                                 error.URLError("lost poll")]))
     original_deadline = json.loads(store.files["2026-10-22.json"])["deadline"]
-    store.release(claim_generation=20)
+    assert store.active is None
     resumed = Opener([{"value": "synthetic-oidc"}, job("succeeded", output="advice")])
     assert cloud_run(store, resumed)["status"] == "succeeded"
     assert all(req.method == "GET" for req in resumed.calls)
     assert json.loads(store.files["2026-10-22.json"])["deadline"] == original_deadline
 
 
-def test_cloud_source_unavailable_does_not_reserve_state_or_request_audit():
+@pytest.mark.parametrize("operation", ["read", "restore"])
+def test_cloud_read_only_failure_releases_claim_and_next_run_can_recover(operation):
+    store = SavedCloudState()
+    opener = Opener([])
+    with mock.patch.object(store, operation, side_effect=RuntimeError("synthetic read-only failure")):
+        with pytest.raises(RuntimeError, match="synthetic read-only failure"):
+            cloud_run(store, opener)
+    assert store.active is None and store.files == {} and opener.calls == []
+    assert store.events[-1] == ("release", 20)
+    assert cloud_run(store, Opener([{"value": "synthetic-oidc"}, job(),
+                                   {"value": "synthetic-oidc"}, job("succeeded", output="advice")]))[
+                                       "status"] == "succeeded"
+
+
+@pytest.mark.parametrize("source", ["changed", "unavailable", "healthy"])
+def test_cloud_accepted_job_recovery_ignores_new_observation(source):
+    store = SavedCloudState()
+    with pytest.raises(error.URLError):
+        cloud_run(store, Opener([{"value": "synthetic-oidc"}, job(), {"value": "synthetic-oidc"},
+                                error.URLError("lost poll")]))
+    original = json.loads(store.files["2026-10-22.json"])
+    if source == "changed":
+        store.cycle["as_of"] = (NOW + timedelta(minutes=1)).isoformat()
+    elif source == "unavailable":
+        store.fail_observation = True
+    else:
+        store.cycle["data_errors"] = []
+    store.events.clear()
+    opener = Opener([{"value": "synthetic-oidc"}, job("succeeded", output="advice")])
+    result = cloud_run(store, opener)
+    assert result["observed_at"] == original["observed_at"]
+    assert result["request_sha256"] == original["request_sha256"]
+    assert "observation" not in store.events and store.active is None
+    assert all(req.method == "GET" for req in opener.calls)
+
+
+@pytest.mark.parametrize("terminal", [True, False])
+def test_cross_day_accepted_job_has_one_read_after_original_deadline_without_new_submit(terminal):
+    store = SavedCloudState()
+    with pytest.raises(error.URLError):
+        cloud_run(store, Opener([{"value": "synthetic-oidc"}, job(), {"value": "synthetic-oidc"},
+                                error.URLError("lost poll")]))
+    original = json.loads(store.files["2026-10-22.json"])
+    opener = Opener([{"value": "synthetic-oidc"},
+                     job("succeeded", output="advice") if terminal else job("running")])
+    args = dict(store=store, client=mock.Mock(), env=cloud_environment(), opener=opener,
+                now=NOW + timedelta(days=1), sleep=mock.Mock(side_effect=AssertionError("no extended polling")))
+    if terminal:
+        assert caller.diagnose_cloud(**args)["status"] == "succeeded"
+    else:
+        with pytest.raises(caller.Rejected, match="audit_job_timeout"):
+            caller.diagnose_cloud(**args)
+    assert len(opener.calls) == 2 and all(req.method == "GET" for req in opener.calls)
+    assert store.active is None and set(store.files) == {"2026-10-22.json"}
+    assert json.loads(store.files["2026-10-22.json"])["deadline"] == original["deadline"]
+
+
+def test_pending_job_cannot_be_polled_against_another_service():
+    store = SavedCloudState()
+    with pytest.raises(error.URLError):
+        cloud_run(store, Opener([{"value": "synthetic-oidc"}, job(), {"value": "synthetic-oidc"},
+                                error.URLError("lost poll")]))
+    original = dict(store.files)
+    opener = Opener([])
+    with pytest.raises(caller.Rejected, match="pending_request_changed"):
+        caller.diagnose_cloud(store=store, client=mock.Mock(),
+                              env={**cloud_environment(), "CODEX_AUDIT_SERVICE_URL": "https://other.invalid"},
+                              now=NOW, opener=opener)
+    assert store.files == original and store.active is None and opener.calls == []
+
+
+def test_cloud_daily_receipt_skips_without_reading_unavailable_observation():
+    store = SavedCloudState()
+    assert cloud_run(store, Opener([{"value": "synthetic-oidc"}, job(),
+                                   {"value": "synthetic-oidc"}, job("succeeded", output="advice")]))[
+                                       "status"] == "succeeded"
+    store.fail_observation = True
+    store.events.clear()
+    opener = Opener([])
+    assert cloud_run(store, opener) == {"status": "skipped", "reason": "daily_attempt_limit"}
+    assert "observation" not in store.events and not opener.calls and store.active is None
+
+
+def test_cloud_source_unavailable_releases_state_without_requesting_audit():
     store = SavedCloudState()
     store.fail_observation = True
     opener = Opener([])
     with pytest.raises(RuntimeError, match="synthetic unavailable projection"):
         cloud_run(store, opener)
-    assert store.events == ["observation"] and store.active is None and opener.calls == []
+    assert store.events == [("claim", "actions/123456/1"), ("read", 10), "restore", "observation",
+                            ("release", 20)]
+    assert store.active is None and opener.calls == []
 
 
 def test_cloud_preserves_cross_day_unknown_records_without_submission():
@@ -584,12 +669,14 @@ def test_cloud_caller_uses_real_shared_json_contract_and_preserves_original_byte
 
 
 @pytest.mark.parametrize("failure", ["unavailable", "stale", "old_time", "invalid_classification"])
-def test_cloud_real_projection_rejects_bad_source_before_claim_or_audit(failure):
+def test_cloud_real_projection_rejects_bad_source_and_releases_claim_without_audit(failure):
     shared = importlib.import_module("monitor_diagnosis_state")
     state = shared.DiagnosisState(
         mock.Mock(), checkpoint_uri=f"gs://{caller.CLOUD_BUCKET}/{caller.CLOUD_LEDGER_PREFIX}/checkpoints.json",
         observation_uri=f"gs://{caller.CLOUD_BUCKET}/{caller.CLOUD_OBSERVATION}")
     state.store = mock.Mock()
+    state.store.claim.return_value = 20
+    state.store.read.return_value = (json.dumps({"schema_version": shared.CHECKPOINT_SCHEMA, "files": {}}).encode(), 10)
     state.observations = mock.Mock()
     cycle = SavedCloudState().cycle
     observation = {"schema_version": shared.OBSERVATION_SCHEMA, "status": "available", "cycle": cycle}
@@ -603,7 +690,8 @@ def test_cloud_real_projection_rejects_bad_source_before_claim_or_audit(failure)
     opener = Opener([])
     with pytest.raises(shared.StateUnavailable):
         caller.diagnose_cloud(store=state, client=mock.Mock(), env=cloud_environment(), now=NOW, opener=opener)
-    state.store.claim.assert_not_called()
+    state.store.release.assert_called_once_with(claim_generation=20)
+    state.store.checkpoint.assert_not_called()
     assert opener.calls == []
 
 

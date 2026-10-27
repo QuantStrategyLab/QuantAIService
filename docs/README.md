@@ -29,8 +29,19 @@ binds the approved provider; the generated refreshable ADC file stays within the
 job. The audit service still receives its separate `quant-codex-audit` token
 from the original protected-main workflow. The `--cloud` CLI consumes only the
 shared `DiagnosisState` observation projection and this consumer's independent
-JSON ledger/claim. It retains the claim on an uncertain attempt or state write;
-operator recovery must preserve every daily checkpoint before releasing it.
+JSON ledger/claim. It releases its exact claim on read-only failures, including
+ledger reads and polling of a durably accepted job. An ambiguous submission or
+checkpoint write still retains the claim; operator recovery must preserve every
+daily checkpoint before releasing it. No claim expires automatically.
+
+Pending accepted jobs are recovered before reading a new observation. Recovery
+uses the original service binding, job ID, route, observation and request digest;
+a changed, missing or stale new observation cannot replace the original request.
+It never resubmits a pending job, including across UTC dates. After the original
+polling deadline it makes at most one status GET per run to collect a terminal
+receipt, without extending the polling budget. Unknown submissions remain
+blocked. New submissions still require a valid fresh saved observation and
+the existing daily attempt limit.
 
 Manual `verify_state_only=true` runs no audit request. It verifies that archive
 metadata and object listing are denied, refreshes ADC, saves the unchanged
