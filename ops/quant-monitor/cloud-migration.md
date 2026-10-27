@@ -84,6 +84,15 @@ stop the caller and retain ownership, never proceed to POST or polling.
 
 ## Adoption order
 
+The existing website snapshot publication remains part of the computing cycle.
+The dedicated sync credential moves directly from the protected source client
+to its own Secret Manager secret, with access only for the monitor runtime.
+The website's existing bearer contract and original token stay unchanged.
+`monitor_website_publish.py` posts the original snapshot once with no redirects,
+retries or credential-bearing command arguments. Unconfirmed delivery remains
+an error and cannot be reported as a successful website update. Preview mode
+cannot invoke this publisher.
+
 The hosted `quant-monitor-inputs.yml` adapter uses separate, short-lived App
 tokens for source Actions/contents reads and four-repository issue-only writes.
 Its direct WIF identity can mutate only its input archive and claim, and read

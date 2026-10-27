@@ -53,6 +53,8 @@ jobs:
           bash -n ops/quant-monitor/scripts/run_health_with_projection.sh
           python -m ruff check ops/quant-monitor/scripts/monitor_inputs.py ops/quant-monitor/scripts/monitor_findings.py ops/quant-monitor/tests/test_monitor_inputs.py ops/quant-monitor/tests/test_monitor_findings.py
           python -m unittest discover -s ops/quant-monitor/tests -p test_monitor_inputs.py -v
+          python -m ruff check ops/quant-monitor/scripts/monitor_website_publish.py ops/quant-monitor/tests/test_monitor_website_publish.py
+          python -m unittest discover -s ops/quant-monitor/tests -p test_monitor_website_publish.py -v
       - name: Validate SDK packages without monitor readiness in a temporary venv
         run: |
           pin=$(cat ops/quant-monitor/qpk-runtime.sha)
