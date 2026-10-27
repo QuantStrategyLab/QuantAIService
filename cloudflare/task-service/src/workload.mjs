@@ -113,6 +113,6 @@ export async function authenticateGitHubWorkload(token, env, config) {
 
 export function workloadOperation(request) {
   const path = new URL(request.url).pathname;
-  return request.method === 'POST' && (path === '/v1/tasks' || /^\/v1\/tasks\/[^/]+\/cancel$/.test(path)) ? 'tasks:submit'
-    : request.method === 'GET' && (/^\/v1\/tasks\/[^/]+$/.test(path)) ? 'tasks:read' : null;
+  return request.method === 'POST' && (path === '/v1/tasks' || /^\/v1\/tasks\/[^/]+\/(messages|cancel)$/.test(path)) ? 'tasks:submit'
+    : request.method === 'GET' && (/^\/v1\/tasks\/[^/]+(\/events)?$/.test(path)) ? 'tasks:read' : null;
 }
