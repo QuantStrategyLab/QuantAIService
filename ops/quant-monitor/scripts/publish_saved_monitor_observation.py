@@ -38,7 +38,8 @@ def plan_publication(new: bytes, previous: bytes, producer: str | None):
 def publish(monitor: Path, client, *, now=None):
     raw = observation_from_workspace(monitor, now=now)
     previous, metadata = client.read()
-    producer = (metadata.get('metadata') or metadata.get('custom_metadata') or {}).get('monitor-producer')
+    producer = (metadata.get('metadata') or metadata.get('custom_metadata')
+                or metadata.get('custom_fields') or {}).get('monitor-producer')
     reason = plan_publication(raw, previous, producer)
     if reason != 'publish':
         return {'status': 'skipped', 'reason': reason, 'generation': int(metadata['generation'])}

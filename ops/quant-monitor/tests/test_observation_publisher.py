@@ -35,7 +35,7 @@ class ObservationPublisherTests(unittest.TestCase):
             path.write_text(json.dumps(cycle(private_balance=123456)))
             client = Mock()
             client.read.return_value = (observation(NOW - timedelta(minutes=30)),
-                                        {'generation': '7', 'metadata': {'monitor-producer': publisher.PRODUCER}})
+                                        {'generation': '7', 'custom_fields': {'monitor-producer': publisher.PRODUCER}})
             client.write.return_value = 8
             result = publisher.publish(root, client, now=NOW)
             self.assertEqual((result['status'], result['observed_at']), ('published', NOW.isoformat()))
