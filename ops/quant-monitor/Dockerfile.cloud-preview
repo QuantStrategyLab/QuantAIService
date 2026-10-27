@@ -1,0 +1,42 @@
+# Independent, read-only migration qualification. See AGENTS.md and README.md.
+FROM python:3.12-slim@sha256:e70237b264442328526ff29d6b3c43bd8abcf6cbab78a949322fb69b7d91d6b6
+
+ARG MONITOR_SOURCE_SHA
+ARG QPK_SOURCE_SHA
+ARG CN_SOURCE_SHA
+ARG HK_SOURCE_SHA
+ARG US_SOURCE_SHA
+ARG CRYPTO_SOURCE_SHA
+
+COPY ops/quant-monitor/requirements-linux-py312.lock ops/quant-monitor/qpk-runtime.sha /build/
+RUN python -m pip --isolated install --no-cache-dir --require-hashes --only-binary=:all: -r /build/requirements-linux-py312.lock
+RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates && rm -rf /var/lib/apt/lists/*
+RUN set -eu; test "$QPK_SOURCE_SHA" = "$(cat /build/qpk-runtime.sha)"; \
+    for binding in "QuantPlatformKit:$QPK_SOURCE_SHA" "CnEquityStrategies:$CN_SOURCE_SHA" \
+      "HkEquityStrategies:$HK_SOURCE_SHA" "UsEquityStrategies:$US_SOURCE_SHA" "CryptoStrategies:$CRYPTO_SOURCE_SHA"; do \
+      repository="${binding%%:*}"; revision="${binding#*:}"; \
+      test "${#revision}" = 40; case "$revision" in *[!a-f0-9]*) exit 2;; esac; \
+      directory="/app/projects/$repository"; mkdir -p "$directory"; \
+      git -C "$directory" init -q; \
+      git -C "$directory" fetch -q --depth=1 "https://github.com/QuantStrategyLab/$repository.git" "$revision"; \
+      git -C "$directory" checkout -q --detach FETCH_HEAD; \
+      test "$(git -C "$directory" rev-parse HEAD)" = "$revision"; \
+      rm -rf "$directory/.git"; \
+    done
+COPY pyproject.toml /build/qas/
+COPY src /build/qas/src
+RUN python -m pip --isolated install --no-index --no-deps --no-build-isolation /app/projects/QuantPlatformKit /build/qas \
+    && python -m pip check && rm -rf /build /app/projects/QuantPlatformKit
+
+COPY ops/quant-monitor/quant_monitor_domain /app/monitor/quant_monitor_domain
+COPY ops/quant-monitor/scripts/health_cycle.py ops/quant-monitor/scripts/build_dashboard_snapshot.py \
+     ops/quant-monitor/scripts/monitor_cloud_state.py ops/quant-monitor/scripts/cloud_run_health_job.py /app/monitor/scripts/
+RUN PYTHONPATH=/app/monitor:/app/monitor/scripts python -c \
+    "import cloud_run_health_job, health_cycle; from quant_platform_kit.strategy_lifecycle.performance_monitor import run_monitor; from quant_platform_kit.strategy_lifecycle.drift_detector import run_drift_detection; from quant_platform_kit.strategy_lifecycle.health_dashboard import build_dashboard"
+
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PYTHONPATH=/app/monitor:/app/monitor/scripts \
+    MONITOR_MODE=preview MONITOR_PROJECT_CODE_ROOT=/app/projects \
+    MONITOR_SOURCE_REVISION=${MONITOR_SOURCE_SHA} MONITOR_QPK_REVISION=${QPK_SOURCE_SHA}
+USER 65532:65532
+WORKDIR /app/monitor
+CMD ["python", "/app/monitor/scripts/cloud_run_health_job.py"]
