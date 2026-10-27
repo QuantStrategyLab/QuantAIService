@@ -1,17 +1,98 @@
 """Synthetic website sync transport checks; no external calls."""
+import base64
+import hashlib
 import json
 import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock, Mock
+from unittest.mock import MagicMock, Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 from monitor_cloud_state import StateUnavailable
-from monitor_website_publish import NoRedirect, publish_snapshot
+from monitor_website_publish import NoRedirect, publish_snapshot, publish_saved_snapshot, read_sync_token
+
+VERSION = 'projects/123456/secrets/synthetic-sync/versions/1'
 
 
 class WebsitePublishTests(unittest.TestCase):
+    def test_adc_reads_only_the_exact_version_without_redirecting(self):
+        session = MagicMock()
+        response = session.get.return_value.__enter__.return_value
+        response.status_code, response.content = 200, b'synthetic response'
+        response.json.return_value = {'name': VERSION, 'payload': {'data': base64.b64encode(b'synthetic').decode()}}
+        self.assertEqual(read_sync_token(VERSION, session=session), 'synthetic')
+        session.get.assert_called_once_with('https://secretmanager.googleapis.com/v1/' + VERSION + ':access',
+                                            timeout=20, allow_redirects=False)
+
+    def test_unbound_secret_or_unconfirmed_access_never_supplies_a_token(self):
+        for version in ('', VERSION.replace('/1', '/latest'), 'https://other.invalid', VERSION + '?query=1'):
+            with self.subTest(version=version):
+                session = MagicMock()
+                with self.assertRaises(StateUnavailable):
+                    read_sync_token(version, session=session)
+                session.get.assert_not_called()
+        for status, name, encoded in ((403, VERSION, 'c3ludGhldGlj'),
+                                      (200, VERSION + '2', 'c3ludGhldGlj'), (200, VERSION, '%%%')):
+            with self.subTest(status=status, name=name, encoded=encoded):
+                session = MagicMock()
+                response = session.get.return_value.__enter__.return_value
+                response.status_code, response.content = status, b'synthetic response'
+                response.json.return_value = {'name': name, 'payload': {'data': encoded}}
+                with self.assertRaises(StateUnavailable):
+                    read_sync_token(VERSION, session=session)
+
+    def test_saved_receipt_is_checkpointed_before_credentials_or_http(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            snapshot = root / 'monitor/data/health/strategy_health_dashboard.v1.json'
+            snapshot.parent.mkdir(parents=True)
+            raw = b'{"schema_version":"strategy_health_dashboard.v1","generated_at":"original"}'
+            snapshot.write_bytes(raw)
+            receipt = snapshot.parent / 'website-publication.json'
+            events = []
+            def checkpoint():
+                events.append('checkpoint')
+                self.assertEqual(json.loads(receipt.read_text())['status'], 'unconfirmed')
+            def read(*args, **kwargs):
+                self.assertEqual(events, ['checkpoint'])
+                events.append('credential')
+                return 'synthetic-token'
+            def send(*args, **kwargs):
+                self.assertEqual(events, ['checkpoint', 'credential'])
+                events.append('http')
+            with patch('monitor_website_publish.read_sync_token', side_effect=read), \
+                    patch('monitor_website_publish.publish_snapshot', side_effect=send):
+                self.assertEqual(publish_saved_snapshot(root, checkpoint=checkpoint, url='synthetic',
+                                                        secret_version=VERSION), 'accepted')
+            record = json.loads(receipt.read_text())
+            self.assertEqual(record['snapshot_sha256'], hashlib.sha256(raw).hexdigest())
+            self.assertNotIn('synthetic-token', receipt.read_text())
+            self.assertEqual(snapshot.read_bytes(), raw)
+
+    def test_uncertain_checkpoint_never_reads_credentials_or_sends(self):
+        with tempfile.TemporaryDirectory() as directory, \
+                patch('monitor_website_publish.read_sync_token') as read, \
+                patch('monitor_website_publish.publish_snapshot') as send:
+            with self.assertRaises(StateUnavailable):
+                publish_saved_snapshot(Path(directory), url='synthetic', secret_version=VERSION,
+                                       checkpoint=Mock(side_effect=StateUnavailable('unknown write')))
+            read.assert_not_called()
+            send.assert_not_called()
+
+    def test_http_failure_remains_unconfirmed_and_is_not_retried(self):
+        with tempfile.TemporaryDirectory() as directory, \
+                patch('monitor_website_publish.read_sync_token', return_value='synthetic-token'), \
+                patch('monitor_website_publish.publish_snapshot', side_effect=TimeoutError('private detail')) as send:
+            root = Path(directory)
+            self.assertEqual(publish_saved_snapshot(root, checkpoint=Mock(), url='synthetic',
+                                                    secret_version=VERSION), 'unconfirmed')
+            send.assert_called_once()
+            receipt = (root / 'monitor/data/health/website-publication.json').read_text()
+            self.assertNotIn('private detail', receipt)
+            self.assertNotIn('synthetic-token', receipt)
+            self.assertIsNone(json.loads(receipt)['snapshot_sha256'])
+
     def test_original_snapshot_and_dedicated_token_are_sent_once_in_memory(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'snapshot.json'

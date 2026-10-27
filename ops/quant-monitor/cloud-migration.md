@@ -88,10 +88,32 @@ The existing website snapshot publication remains part of the computing cycle.
 The dedicated sync credential moves directly from the protected source client
 to its own Secret Manager secret, with access only for the monitor runtime.
 The website's existing bearer contract and original token stay unchanged.
-`monitor_website_publish.py` posts the original snapshot once with no redirects,
-retries or credential-bearing command arguments. Unconfirmed delivery remains
-an error and cannot be reported as a successful website update. Preview mode
-cannot invoke this publisher.
+Set `STRATEGY_HEALTH_SYNC_URL` to the original endpoint and
+`STRATEGY_HEALTH_SYNC_SECRET_VERSION` to its approved numeric resource reference
+(`projects/PROJECT_NUMBER/secrets/SECRET_NAME/versions/VERSION_NUMBER`). The Job
+reads that exact version using its existing runtime ADC only during publication;
+do not inject the website token as a startup-required secret. This avoids making
+website credential availability a prerequisite for independent computation.
+The existing Secret access binding is retained, without a new storage object,
+identity or dependency. The standalone `publish_snapshot(token=...)` transport
+continues to support its existing restricted callers.
+
+After evaluation, checkpoint the complete computed/notification state before
+publishing bounded GCS projections. Website publication then checkpoints a
+bounded `monitor/data/health/website-publication.json` record as `unconfirmed`
+before reading credentials or issuing HTTP. Only a verified response changes
+it to `accepted`. Commit the latest publication record with the existing core
+archive and release its exact claim even when website delivery is unconfirmed;
+that outcome produces a warning, not a claim that the website was updated.
+The record describes only the latest snapshot publication and contains its
+digest and the actual record time, never the snapshot, secret or raw error.
+
+`monitor_website_publish.py` posts each cycle's original snapshot once with no
+redirects, immediate retries or credential-bearing command arguments. A later
+cycle publishes its newly computed snapshot rather than replaying the failed
+cycle. An uncertain checkpoint still stops before further operations and retains
+ownership. Notification delivery and unknown-effect ledgers keep their existing
+protection. Preview mode cannot invoke either publication path or read the Secret.
 
 The hosted `quant-monitor-inputs.yml` adapter uses separate, short-lived App
 tokens for source Actions/contents reads and four-repository issue-only writes.
