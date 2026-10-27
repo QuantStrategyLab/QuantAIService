@@ -135,6 +135,9 @@ def publish_projections(client, uri, root, *, claim_generation):
             if_generation_match=claim_generation, timeout=20, retry=None)
         blob.upload_from_string(raw, content_type='application/json', if_generation_match=generation,
                                 timeout=30, retry=None)
+    from monitor_website_publish import publish_snapshot
+    publish_snapshot(root / 'monitor/data/health/strategy_health_dashboard.v1.json',
+                     url=os.environ['STRATEGY_HEALTH_SYNC_URL'], token=os.environ['STRATEGY_HEALTH_SYNC_TOKEN'])
 
 
 def main():
@@ -153,7 +156,8 @@ def main():
             if not effects_enabled:
                 refresh(root)
             return evaluate_workspace(root, effects_enabled=effects_enabled)
-        if mode == 'run' and (not os.environ.get('TELEGRAM_TOKEN') or not os.environ.get('GLOBAL_TELEGRAM_CHAT_ID')):
+        if mode == 'run' and any(not os.environ.get(key) for key in (
+                'TELEGRAM_TOKEN', 'GLOBAL_TELEGRAM_CHAT_ID', 'STRATEGY_HEALTH_SYNC_TOKEN', 'STRATEGY_HEALTH_SYNC_URL')):
             raise StateUnavailable('monitor_notification_binding_missing')
         result = run_once(store, evaluate, mode=mode, execution_id=os.environ.get('CLOUD_RUN_EXECUTION', ''),
                           refresh=refresh, publish=lambda root, **kwargs: publish_projections(client, uri, root, **kwargs))
