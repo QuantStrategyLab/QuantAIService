@@ -23,6 +23,23 @@ the adapter must restore the original observations and all daily checkpoints
 (including unknown outcomes), hold the common state claim, and have approved
 storage access before a hosted runner can replace the source host.
 
+The hosted diagnosis workflow uses the existing hashed Linux runtime lock and
+direct Google Workload Identity Federation. `QUANT_MONITOR_GCP_WIF_PROVIDER`
+binds the approved provider; the generated refreshable ADC file stays within the
+job. The audit service still receives its separate `quant-codex-audit` token
+from the original protected-main workflow. The `--cloud` CLI consumes only the
+shared `DiagnosisState` observation projection and this consumer's independent
+JSON ledger/claim. It retains the claim on an uncertain attempt or state write;
+operator recovery must preserve every daily checkpoint before releasing it.
+
+Manual `verify_state_only=true` runs no audit request. It verifies that archive
+metadata and object listing are denied, refreshes ADC, saves the unchanged
+ledger with a generation precondition, reads it back and releases the exact
+claim. Its receipt records only bounded results. This qualifies state access,
+not a real diagnosis or natural scheduled event. Pause the old workflow and
+drain its jobs before importing its final VPS ledger; adopt the hosted source
+and verify state access before restoring its hourly schedule.
+
 ## Historical architecture
 
 - [V1 AI Gateway architecture](architecture.md): former Analyze/Execute/Review interfaces and components, preserved for historical interpretation; not the V2 connection/API guide.
