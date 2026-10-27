@@ -16,7 +16,10 @@ MAX_ARCHIVE = 64 * 1024 * 1024
 MAX_EXPANDED = 256 * 1024 * 1024
 MAX_FILES = 20000
 PROJECTS = frozenset({'CnEquityStrategies', 'HkEquityStrategies', 'UsEquityStrategies', 'CryptoStrategies'})
-DATA = frozenset({'health', 'alert-state', 'lifecycle-store', 'lifecycle-artifacts', 'diagnosis-consumer', 'strategy-reviews'})
+DATA_PROJECTS = PROJECTS | frozenset({'CnEquitySnapshotPipelines', 'HkEquitySnapshotPipelines',
+                                     'UsEquitySnapshotPipelines', 'CryptoLivePoolPipelines'})
+DATA = frozenset({'health', 'alert-state', 'lifecycle-store', 'lifecycle-artifacts',
+                  'diagnosis-consumer', 'diagnosis-actions', 'strategy-reviews'})
 
 
 class StateUnavailable(RuntimeError):
@@ -36,7 +39,7 @@ def allowed(name: str) -> bool:
     if path.suffix not in {'.json', '.csv'}:
         return False
     return ((len(parts) >= 4 and parts[:2] == ('monitor', 'data') and parts[2] in DATA)
-            or (len(parts) >= 4 and parts[0] == 'projects' and parts[1] in PROJECTS and parts[2] == 'data'))
+            or (len(parts) >= 4 and parts[0] == 'projects' and parts[1] in DATA_PROJECTS and parts[2] == 'data'))
 
 
 def restore(raw: bytes, root: Path) -> dict:
@@ -85,7 +88,8 @@ def pack(root: Path) -> bytes:
             if not path.is_file():
                 continue
             name = path.relative_to(root).as_posix()
-            if path.name == 'health_cycle.json.lock':
+            if path.name == 'health_cycle.json.lock' or (
+                    path.name == 'lock' and path.parent.name == 'diagnosis-actions'):
                 # A local advisory lock is not portable state. The cloud claim
                 # above the cycle provides cross-instance exclusion.
                 continue
@@ -108,18 +112,25 @@ def pack(root: Path) -> bytes:
 class CloudState:
     """One explicit GCS prefix; no listing, deletes, retry or expiring locks."""
 
-    def __init__(self, client, uri: str):
+    def __init__(self, client, uri: str, *, state_name: str = 'current.tar.gz'):
         match = re.fullmatch(r'gs://([a-z0-9][a-z0-9._-]+)/([A-Za-z0-9/_-]+)', uri)
         if not match:
             raise ValueError('monitor_state_uri_invalid')
+        if state_name not in {'current.tar.gz', 'checkpoints.json', 'diagnosis-observation.json'}:
+            raise ValueError('monitor_state_name_invalid')
         self.bucket = client.bucket(match[1])
         self.prefix = match[2].rstrip('/')
+        self.state_name = state_name
 
-    def read(self, name: str):
+    def read(self, name: str | None = None):
+        name = self.state_name if name is None else name
+        if name != self.state_name:
+            raise ValueError('monitor_state_name_mismatch')
         blob = self.bucket.blob(self.prefix + '/' + name)
         try:
             blob.reload(timeout=20, retry=None)
-            if blob.size is None or blob.size > MAX_ARCHIVE:
+            limit = 2 * 1024 * 1024 if self.state_name.endswith('.json') else MAX_ARCHIVE
+            if blob.size is None or blob.size > limit:
                 raise StateUnavailable('workspace_too_large')
             generation = int(blob.generation)
             return blob.download_as_bytes(if_generation_match=generation, timeout=60, retry=None), generation
@@ -141,15 +152,32 @@ class CloudState:
         except Exception as exc:
             raise StateUnavailable('claim_outcome_unknown') from exc
 
-    def commit(self, raw: bytes, *, state_generation: int, claim_generation: int):
+    def checkpoint(self, raw: bytes, *, state_generation: int, claim_generation: int) -> int:
+        """Durably save an intermediate intent/receipt without releasing ownership."""
+        if len(raw) > (2 * 1024 * 1024 if self.state_name.endswith('.json') else MAX_ARCHIVE):
+            raise StateUnavailable('state_write_too_large')
         try:
-            self.bucket.blob(self.prefix + '/current.tar.gz').upload_from_string(
-                raw, content_type='application/gzip', if_generation_match=state_generation, timeout=60, retry=None,
+            self.bucket.blob(self.prefix + '/active.json').reload(
+                if_generation_match=claim_generation, timeout=20, retry=None,
             )
+            blob = self.bucket.blob(self.prefix + '/' + self.state_name)
+            blob.upload_from_string(
+                raw, content_type='application/json' if self.state_name.endswith('.json') else 'application/gzip',
+                if_generation_match=state_generation, timeout=60, retry=None,
+            )
+            return int(blob.generation)
+        except Exception as exc:
+            raise StateUnavailable('checkpoint_outcome_unknown') from exc
+
+    def release(self, *, claim_generation: int):
+        try:
             self.bucket.blob(self.prefix + '/active.json').delete(
                 if_generation_match=claim_generation, timeout=20, retry=None,
             )
         except Exception as exc:
-            # Keep the claim when completion is uncertain. A future invocation
-            # cannot replay notification/Issue/AI effects from an old snapshot.
-            raise StateUnavailable('commit_outcome_unknown') from exc
+            raise StateUnavailable('release_outcome_unknown') from exc
+
+    def commit(self, raw: bytes, *, state_generation: int, claim_generation: int):
+        generation = self.checkpoint(raw, state_generation=state_generation, claim_generation=claim_generation)
+        self.release(claim_generation=claim_generation)
+        return generation

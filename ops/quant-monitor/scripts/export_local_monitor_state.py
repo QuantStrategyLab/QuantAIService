@@ -15,17 +15,22 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
-from monitor_cloud_state import DATA, MAX_EXPANDED, PROJECTS, SCHEMA, StateUnavailable, allowed, pack
+from monitor_cloud_state import DATA, DATA_PROJECTS, MAX_EXPANDED, SCHEMA, StateUnavailable, allowed, pack, restore
 
 
-def capture(monitor: Path, projects: dict[str, Path], *, source_revision: str, qpk_revision: str):
-    if set(projects) != PROJECTS:
+def capture(monitor: Path, projects: dict[str, Path], *, source_revision: str, qpk_revision: str,
+            diagnosis_actions: Path | None = None):
+    if set(projects) != DATA_PROJECTS:
         raise ValueError('monitor_project_bindings_required')
-    roots = [(monitor / 'data' / name, 'monitor/data/' + name) for name in sorted(DATA)]
+    data_roots = {name: monitor / 'data' / name for name in DATA}
+    if diagnosis_actions is not None:
+        data_roots['diagnosis-actions'] = diagnosis_actions
+    roots = [(path, 'monitor/data/' + name) for name, path in sorted(data_roots.items())]
     roots += [(path, 'projects/' + name + '/data') for name, path in sorted(projects.items())]
     # Root bindings are explicit paths, not trust obtained by resolving an
     # arbitrary symlink. Artifact links may point back into monitor data.
-    trusted = tuple(path.parent.resolve() / path.name for path in [monitor / 'data', *projects.values()])
+    trusted = tuple(path.parent.resolve() / path.name for path in [monitor / 'data', *projects.values(),
+                                                                 *([diagnosis_actions] if diagnosis_actions else [])])
     observed, total, files = {}, 0, 0
     with tempfile.TemporaryDirectory(prefix='monitor-export-') as directory:
         destination = Path(directory)
@@ -43,7 +48,8 @@ def capture(monitor: Path, projects: dict[str, Path], *, source_revision: str, q
                 for child in sorted(source.iterdir()):
                     walk(child, relative + '/' + child.name, ancestors | {actual})
                 return
-            if source.name == 'health_cycle.json.lock':
+            if source.name == 'health_cycle.json.lock' or (
+                    source.name == 'lock' and relative.startswith('monitor/data/diagnosis-actions/')):
                 return
             if not stat.S_ISREG(info.st_mode) or not allowed(relative):
                 raise StateUnavailable('input_member_not_allowed')
@@ -84,7 +90,8 @@ def main():
         config = json.loads(args.config.read_text())
         raw, count = capture(Path(config['monitor_root']),
                              {key: Path(value) for key, value in config['project_data_roots'].items()},
-                             source_revision=config['source_revision'], qpk_revision=config['qpk_revision'])
+                             source_revision=config['source_revision'], qpk_revision=config['qpk_revision'],
+                             diagnosis_actions=Path(config['diagnosis_actions_root']) if config.get('diagnosis_actions_root') else None)
         from monitor_cloud_state import CloudState
 
         # Validate the URI without creating a storage client or copying the
@@ -97,15 +104,35 @@ def main():
                                              capture_output=True, check=True, timeout=20).stdout)
         account = next(row['account'] for row in accounts if hashlib.sha256(row['account'].encode()).hexdigest()
                        == config['gcloud_account_sha256'])
-        uri = config['state_uri'].rstrip('/') + '/current.tar.gz'
-        subprocess.run(['gcloud', 'storage', 'cp', '--account', account, '--if-generation-match=0', '-', uri],
-                       input=raw, capture_output=True, timeout=90, check=True)
-        metadata = json.loads(subprocess.run(['gcloud', 'storage', 'objects', 'describe', uri, '--account', account,
-                                              '--format=json'], capture_output=True, timeout=30, check=True).stdout)
-        if int(metadata['size']) != len(raw):
-            raise StateUnavailable('upload_size_mismatch')
-        print(json.dumps({'status': 'seeded', 'files': count, 'bytes': len(raw),
-                          'sha256': hashlib.sha256(raw).hexdigest(), 'generation': int(metadata['generation'])}))
+        def upload(body, uri, expected):
+            if type(expected) is not int or expected < 0:
+                raise ValueError('source_generation_invalid')
+            subprocess.run(['gcloud', 'storage', 'cp', '--account', account, '--if-generation-match=' + str(expected), '-', uri],
+                           input=body, capture_output=True, timeout=90, check=True)
+            metadata = json.loads(subprocess.run(['gcloud', 'storage', 'objects', 'describe', uri, '--account', account,
+                                                  '--format=json'], capture_output=True, timeout=30, check=True).stdout)
+            if int(metadata['size']) != len(body):
+                raise StateUnavailable('upload_size_mismatch')
+            return {'bytes': len(body), 'sha256': hashlib.sha256(body).hexdigest(), 'generation': int(metadata['generation'])}
+
+        # Compute every export before the first write. Diagnostic consumers get
+        # only their own exact ledger and a bounded observation, never the tar.
+        exports = []
+        if config.get('observation_uri') or config.get('checkpoint_uri'):
+            if not config.get('observation_uri') or not config.get('checkpoint_uri'):
+                raise ValueError('diagnosis_export_bindings_required')
+            from monitor_diagnosis_state import encode_checkpoints, observation_from_workspace
+            with tempfile.TemporaryDirectory(prefix='monitor-projection-') as directory:
+                view = Path(directory)
+                restore(raw, view)
+                observation = observation_from_workspace(view / 'monitor')
+                checkpoints = encode_checkpoints(view / 'monitor/data/diagnosis-actions')
+            exports = [('observation', observation, config['observation_uri'], config.get('observation_generation', 0)),
+                       ('checkpoints', checkpoints, config['checkpoint_uri'], config.get('checkpoint_generation', 0))]
+        result = upload(raw, config['state_uri'].rstrip('/') + '/current.tar.gz', config.get('expected_generation', 0))
+        result.update(status='seeded', files=count)
+        result['exports'] = {name: upload(body, uri, generation) for name, body, uri, generation in exports}
+        print(json.dumps(result))
         return 0
     except Exception:
         print(json.dumps({'status': 'unavailable', 'reason': 'source_capture_or_upload_failed'}))

@@ -45,8 +45,9 @@ jobs:
             DeployScriptTests.test_staging_pip_and_backend_environment_ignore_shared_mirror
       - name: Validate read-only cloud monitor and portable delivery state
         run: |
-          python -m ruff check ops/quant-monitor/scripts/cloud_run_health_job.py ops/quant-monitor/scripts/monitor_cloud_state.py ops/quant-monitor/scripts/export_local_monitor_state.py ops/quant-monitor/tests/test_cloud_run_health_job.py
+          python -m ruff check ops/quant-monitor/scripts/cloud_run_health_job.py ops/quant-monitor/scripts/monitor_cloud_state.py ops/quant-monitor/scripts/monitor_diagnosis_state.py ops/quant-monitor/scripts/export_local_monitor_state.py ops/quant-monitor/tests/test_cloud_run_health_job.py ops/quant-monitor/tests/test_monitor_diagnosis_state.py
           python -m unittest discover -s ops/quant-monitor/tests -p test_cloud_run_health_job.py -v
+          python -m unittest discover -s ops/quant-monitor/tests -p test_monitor_diagnosis_state.py -v
       - name: Validate SDK packages without monitor readiness in a temporary venv
         run: |
           pin=$(cat ops/quant-monitor/qpk-runtime.sha)

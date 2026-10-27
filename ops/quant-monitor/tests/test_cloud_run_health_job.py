@@ -220,7 +220,7 @@ class HealthPreviewTests(unittest.TestCase):
 class LocalAdapterTests(unittest.TestCase):
     def bindings(self, root):
         monitor = root / 'monitor'
-        projects = {name: root / 'projects' / name / 'data' for name in state.PROJECTS}
+        projects = {name: root / 'projects' / name / 'data' for name in state.DATA_PROJECTS}
         for path in [monitor / 'data', *projects.values()]:
             path.mkdir(parents=True)
         return monitor, projects
@@ -251,6 +251,24 @@ class LocalAdapterTests(unittest.TestCase):
             (health / 'result.json').symlink_to(outside)
             with self.assertRaisesRegex(state.StateUnavailable, 'outside_data'):
                 local_adapter.capture(monitor, projects, source_revision='a' * 40, qpk_revision='b' * 40)
+
+    def test_external_actions_checkpoint_is_preserved_without_its_local_lock(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            monitor, projects = self.bindings(root)
+            actions = root / 'diagnosis-actions'
+            actions.mkdir()
+            record = {'job_id': None, 'request_sha256': 'c' * 64, 'service_sha256': 'd' * 64,
+                      'observed_at': '2026-10-26T00:00:00Z', 'deadline': 1792973460}
+            (actions / '2026-10-26.json').write_text(json.dumps(record))
+            (actions / 'lock').touch()
+            raw, _ = local_adapter.capture(monitor, projects, source_revision='a' * 40,
+                                            qpk_revision='b' * 40, diagnosis_actions=actions)
+            target = root / 'restored'
+            target.mkdir()
+            state.restore(raw, target)
+            self.assertEqual(json.loads((target / 'monitor/data/diagnosis-actions/2026-10-26.json').read_text()), record)
+            self.assertFalse((target / 'monitor/data/diagnosis-actions/lock').exists())
 
 
 class CloudStateTests(unittest.TestCase):
@@ -291,9 +309,23 @@ class CloudStateTests(unittest.TestCase):
         self.active.delete.assert_called_once_with(if_generation_match=7, timeout=20, retry=None)
         self.active.delete.reset_mock()
         self.current.upload_from_string.side_effect = TimeoutError('must-not-leak-private-details')
-        with self.assertRaisesRegex(state.StateUnavailable, '^commit_outcome_unknown$'):
+        with self.assertRaisesRegex(state.StateUnavailable, '^checkpoint_outcome_unknown$'):
             self.store.commit(b'synthetic', state_generation=3, claim_generation=7)
         self.active.delete.assert_not_called()
+
+    def test_intermediate_checkpoint_keeps_the_same_claim_until_explicit_release(self):
+        self.current.generation = 4
+        generation = self.store.checkpoint(b'intent', state_generation=3, claim_generation=7)
+        self.assertEqual(generation, 4)
+        self.active.reload.assert_called_once_with(if_generation_match=7, timeout=20, retry=None)
+        self.active.delete.assert_not_called()
+        self.current.generation = 5
+        generation = self.store.checkpoint(b'accepted', state_generation=generation, claim_generation=7)
+        self.assertEqual(generation, 5)
+        self.assertEqual(self.current.upload_from_string.call_args.kwargs['if_generation_match'], 4)
+        self.active.delete.assert_not_called()
+        self.store.release(claim_generation=7)
+        self.active.delete.assert_called_once_with(if_generation_match=7, timeout=20, retry=None)
 
     def test_unreadable_state_is_never_converted_to_an_empty_success(self):
         self.current.reload.side_effect = OSError('private')
