@@ -55,6 +55,12 @@ class MemoryStore:
         self.raw, self.owner = raw, None
         self.generation += 1
 
+    def release(self, *, claim_generation):
+        if claim_generation != 5:
+            raise state.StateUnavailable('claim_conflict')
+        self.calls.append('release')
+        self.owner = None
+
 
 class CloudJobTests(unittest.TestCase):
     def setUp(self):
@@ -104,6 +110,17 @@ class CloudJobTests(unittest.TestCase):
         result = job.run_once(self.store, uncertain, mode='run', execution_id='second')
         self.assertEqual(calls, ['effect'])
         self.assertEqual(result['status'], 'blocked')
+
+    def test_definite_input_failure_before_effects_releases_only_its_claim(self):
+        before = self.store.raw
+        evaluate = Mock()
+        with self.assertRaises(state.StateUnavailable):
+            job.run_once(self.store, evaluate, mode='run', execution_id='first',
+                         refresh=Mock(side_effect=state.StateUnavailable('stale_input')))
+        evaluate.assert_not_called()
+        self.assertIsNone(self.store.owner)
+        self.assertEqual(self.store.raw, before)
+        self.assertEqual(self.store.calls, ['claim', 'read', 'release'])
 
     def test_concurrent_cycles_cannot_read_old_state_before_claim(self):
         entered, release = threading.Event(), threading.Event()

@@ -31,28 +31,37 @@ def run_once(store, evaluate, *, mode='preview', execution_id='', refresh=None, 
                                         'started_at': datetime.now(timezone.utc).isoformat()})
         if claim_generation is None:
             return {'status': 'blocked', 'reason': 'previous_cycle_active_or_uncertain', 'mode': mode}
-    raw, generation = store.read('current.tar.gz')
-    with tempfile.TemporaryDirectory(prefix='qsl-health-') as directory:
-        root = Path(directory)
-        manifest = restore(raw, root)
-        # Preview has no claim, refresh, publication, notification, Issue or AI call.
-        if mode == 'run' and refresh is not None:
-            refresh(root)
-        def checkpoint():
-            nonlocal generation
-            generation = store.checkpoint(pack(root, image_code_present=True), state_generation=generation,
-                                          claim_generation=claim_generation)
-        import health_cycle
-        with health_cycle.cloud_alert_checkpoint(checkpoint if mode == 'run' else None):
-            result = evaluate(root, effects_enabled=mode == 'run')
-        if mode == 'run':
-            if publish is not None:
-                publish(root, claim_generation=claim_generation)
-            store.commit(pack(root), state_generation=generation, claim_generation=claim_generation)
-        return {'status': 'evaluated', 'mode': mode, 'healthy': result['healthy'],
-                'snapshot_count': result['snapshot_count'], 'data_status': result['data_status'],
-                'source_matches_runtime': manifest['source_revision'] == os.environ.get('MONITOR_SOURCE_REVISION'),
-                'qpk_matches_runtime': manifest['qpk_revision'] == os.environ.get('MONITOR_QPK_REVISION')}
+    effects_started = False
+    try:
+        raw, generation = store.read('current.tar.gz')
+        with tempfile.TemporaryDirectory(prefix='qsl-health-') as directory:
+            root = Path(directory)
+            manifest = restore(raw, root)
+            # Preview has no claim, refresh, publication, notification, Issue or AI call.
+            if mode == 'run' and refresh is not None:
+                refresh(root)
+            def checkpoint():
+                nonlocal generation
+                generation = store.checkpoint(pack(root, image_code_present=True), state_generation=generation,
+                                              claim_generation=claim_generation)
+            import health_cycle
+            effects_started = mode == 'run'
+            with health_cycle.cloud_alert_checkpoint(checkpoint if mode == 'run' else None):
+                result = evaluate(root, effects_enabled=mode == 'run')
+            if mode == 'run':
+                if publish is not None:
+                    publish(root, claim_generation=claim_generation)
+                store.commit(pack(root), state_generation=generation, claim_generation=claim_generation)
+            return {'status': 'evaluated', 'mode': mode, 'healthy': result['healthy'],
+                    'snapshot_count': result['snapshot_count'], 'data_status': result['data_status'],
+                    'source_matches_runtime': manifest['source_revision'] == os.environ.get('MONITOR_SOURCE_REVISION'),
+                    'qpk_matches_runtime': manifest['qpk_revision'] == os.environ.get('MONITOR_QPK_REVISION')}
+    except Exception:
+        # Input/read failures before evaluation have no external effect to
+        # replay. Release the exact claim so the next fresh input can recover.
+        if claim_generation is not None and not effects_started:
+            store.release(claim_generation=claim_generation)
+        raise
 
 
 def evaluate_workspace(root: Path, *, effects_enabled: bool):
