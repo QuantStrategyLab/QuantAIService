@@ -84,6 +84,18 @@ stop the caller and retain ownership, never proceed to POST or polling.
 
 ## Adoption order
 
+During the rolling migration, `run_health_with_projection.sh` wraps only the
+original self-hosted health entry point, preserving its exit code and all
+existing settings. After an existing saved cycle, the lightweight
+`publish_saved_monitor_observation.py` adapter publishes the bounded observation
+with an exact generation precondition. It never runs an extra health cycle,
+model or notification. The object metadata `monitor-producer=self_hosted_transition`
+identifies this temporary owner. It refuses to overwrite a newer observation
+or a different producer. Once the cloud Job takes over and changes that
+producer marker, the source adapter stops writing. Remove the adapter-owned
+drop-in when retiring the original monitor timer; do not alter the Binance
+execution service or its fixed IP.
+
 1. Qualify the read-only image and captured inputs. Compare the original source,
    dependencies, original state, coverage and missing-data reasons separately.
    A successful execution can still correctly report unavailable data.
