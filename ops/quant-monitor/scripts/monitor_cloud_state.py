@@ -78,7 +78,7 @@ def restore(raw: bytes, root: Path) -> dict:
     return manifest
 
 
-def pack(root: Path) -> bytes:
+def pack(root: Path, *, image_code_present: bool = False) -> bytes:
     """Only data goes to storage; immutable code and credentials stay outside."""
     output, total, count = io.BytesIO(), 0, 0
     with tarfile.open(fileobj=output, mode='w:gz') as archive:
@@ -88,6 +88,10 @@ def pack(root: Path) -> bytes:
             if not path.is_file():
                 continue
             name = path.relative_to(root).as_posix()
+            parts = path.relative_to(root).parts
+            if (image_code_present and len(parts) >= 3 and parts[0] == 'projects'
+                    and parts[1] in PROJECTS and parts[2] != 'data'):
+                continue
             if path.name == 'health_cycle.json.lock' or (
                     path.name == 'lock' and path.parent.name == 'diagnosis-actions'):
                 # A local advisory lock is not portable state. The cloud claim
@@ -116,7 +120,7 @@ class CloudState:
         match = re.fullmatch(r'gs://([a-z0-9][a-z0-9._-]+)/([A-Za-z0-9/_-]+)', uri)
         if not match:
             raise ValueError('monitor_state_uri_invalid')
-        if state_name not in {'current.tar.gz', 'checkpoints.json', 'diagnosis-observation.json'}:
+        if state_name not in {'current.tar.gz', 'checkpoints.json', 'diagnosis-observation.json', 'strategy-findings.json'}:
             raise ValueError('monitor_state_name_invalid')
         self.bucket = client.bucket(match[1])
         self.prefix = match[2].rstrip('/')

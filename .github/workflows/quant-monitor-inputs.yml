@@ -1,0 +1,88 @@
+name: Quant monitor input adapter
+on:
+  schedule:
+    - cron: '20,50 * * * *'
+  workflow_dispatch:
+    inputs:
+      verify_state_only:
+        description: Validate saved inputs without refresh or Issue delivery
+        type: boolean
+        default: true
+permissions:
+  contents: read
+concurrency:
+  group: quant-monitor-inputs
+  cancel-in-progress: false
+jobs:
+  inputs:
+    if: github.repository == 'QuantStrategyLab/QuantAIService' && github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' || vars.QUANT_MONITOR_INPUT_REFRESH_ENABLED == 'true')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      PYTHONPATH: ops/quant-monitor/scripts:ops/quant-monitor
+      MONITOR_INPUT_GCS_URI: ${{ vars.QUANT_MONITOR_INPUT_GCS_URI }}
+      MONITOR_CORE_GCS_URI: ${{ vars.QUANT_MONITOR_CORE_GCS_URI }}
+      VERIFY_STATE_ONLY: ${{ github.event_name == 'workflow_dispatch' && inputs.verify_state_only }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+      - name: Install existing pinned monitor dependencies
+        run: |
+          set -euo pipefail
+          python -m pip --isolated install --require-hashes --only-binary=:all: -r ops/quant-monitor/requirements-linux-py312.lock
+          pin=$(cat ops/quant-monitor/qpk-runtime.sha)
+          [[ "$pin" =~ ^[0-9a-f]{40}$ ]]
+          git init "$RUNNER_TEMP/qpk"
+          git -C "$RUNNER_TEMP/qpk" fetch --depth=1 https://github.com/QuantStrategyLab/QuantPlatformKit.git "$pin"
+          git -C "$RUNNER_TEMP/qpk" checkout --detach FETCH_HEAD
+          test "$(git -C "$RUNNER_TEMP/qpk" rev-parse HEAD)" = "$pin"
+          python -m pip --isolated install --no-deps --no-build-isolation "$RUNNER_TEMP/qpk"
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
+        with:
+          project_id: longbridgequant
+          workload_identity_provider: ${{ vars.QUANT_MONITOR_INPUTS_GCP_WIF_PROVIDER }}
+          create_credentials_file: true
+          export_environment_variables: true
+      - name: Mint bounded source read token
+        if: env.VERIFY_STATE_ONLY != 'true'
+        id: reader
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
+        with:
+          app-id: ${{ vars.CROSS_REPO_GITHUB_APP_ID }}
+          private-key: ${{ secrets.CROSS_REPO_GITHUB_APP_PRIVATE_KEY }}
+          owner: QuantStrategyLab
+          repositories: CnEquityStrategies,HkEquityStrategies,UsEquityStrategies,CryptoStrategies,BinancePlatform
+          permission-actions: read
+          permission-contents: read
+      - name: Refresh or verify saved input data
+        env:
+          GH_TOKEN: ${{ steps.reader.outputs.token }}
+          BINANCE_LIVE_RUNS_SYNC_ENABLED: ${{ vars.QUANT_MONITOR_BINANCE_SYNC_ENABLED }}
+          BINANCE_LIVE_RUNS_START_AT: ${{ vars.QUANT_MONITOR_BINANCE_START_AT }}
+          BINANCE_LIVE_RUNS_STREAM_ID: ${{ vars.QUANT_MONITOR_BINANCE_STREAM_ID }}
+        run: python -B ops/quant-monitor/scripts/monitor_inputs.py
+      - name: Mint issue-only token for the four registered repositories
+        if: env.VERIFY_STATE_ONLY != 'true' && vars.QUANT_MONITOR_ISSUE_DELIVERY_ENABLED == 'true'
+        id: writer
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
+        with:
+          app-id: ${{ vars.CROSS_REPO_GITHUB_APP_ID }}
+          private-key: ${{ secrets.CROSS_REPO_GITHUB_APP_PRIVATE_KEY }}
+          owner: QuantStrategyLab
+          repositories: CnEquityStrategies,HkEquityStrategies,UsEquityStrategies,CryptoStrategies
+          permission-issues: write
+      - name: Consume fresh issue-only monitoring findings
+        if: env.VERIFY_STATE_ONLY != 'true' && vars.QUANT_MONITOR_ISSUE_DELIVERY_ENABLED == 'true'
+        env:
+          GH_TOKEN: ${{ steps.writer.outputs.token }}
+          ISSUE_DELIVERY_ENABLED: 'true'
+        run: python -B ops/quant-monitor/scripts/monitor_findings.py

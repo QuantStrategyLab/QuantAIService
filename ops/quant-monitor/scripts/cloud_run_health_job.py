@@ -14,7 +14,7 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
-from monitor_cloud_state import CloudState, PROJECTS, pack, restore
+from monitor_cloud_state import CloudState, PROJECTS, StateUnavailable, pack, restore
 
 
 def run_once(store, evaluate, *, mode='preview', execution_id='', refresh=None, publish=None):
@@ -31,22 +31,37 @@ def run_once(store, evaluate, *, mode='preview', execution_id='', refresh=None, 
                                         'started_at': datetime.now(timezone.utc).isoformat()})
         if claim_generation is None:
             return {'status': 'blocked', 'reason': 'previous_cycle_active_or_uncertain', 'mode': mode}
-    raw, generation = store.read('current.tar.gz')
-    with tempfile.TemporaryDirectory(prefix='qsl-health-') as directory:
-        root = Path(directory)
-        manifest = restore(raw, root)
-        # Preview has no claim, refresh, publication, notification, Issue or AI call.
-        if mode == 'run' and refresh is not None:
-            refresh(root)
-        result = evaluate(root, effects_enabled=mode == 'run')
-        if mode == 'run':
-            if publish is not None:
-                publish(root)
-            store.commit(pack(root), state_generation=generation, claim_generation=claim_generation)
-        return {'status': 'evaluated', 'mode': mode, 'healthy': result['healthy'],
-                'snapshot_count': result['snapshot_count'], 'data_status': result['data_status'],
-                'source_matches_runtime': manifest['source_revision'] == os.environ.get('MONITOR_SOURCE_REVISION'),
-                'qpk_matches_runtime': manifest['qpk_revision'] == os.environ.get('MONITOR_QPK_REVISION')}
+    effects_started = False
+    try:
+        raw, generation = store.read('current.tar.gz')
+        with tempfile.TemporaryDirectory(prefix='qsl-health-') as directory:
+            root = Path(directory)
+            manifest = restore(raw, root)
+            # Preview has no claim, refresh, publication, notification, Issue or AI call.
+            if mode == 'run' and refresh is not None:
+                refresh(root)
+            def checkpoint():
+                nonlocal generation
+                generation = store.checkpoint(pack(root, image_code_present=True), state_generation=generation,
+                                              claim_generation=claim_generation)
+            import health_cycle
+            effects_started = mode == 'run'
+            with health_cycle.cloud_alert_checkpoint(checkpoint if mode == 'run' else None):
+                result = evaluate(root, effects_enabled=mode == 'run')
+            if mode == 'run':
+                if publish is not None:
+                    publish(root, claim_generation=claim_generation)
+                store.commit(pack(root), state_generation=generation, claim_generation=claim_generation)
+            return {'status': 'evaluated', 'mode': mode, 'healthy': result['healthy'],
+                    'snapshot_count': result['snapshot_count'], 'data_status': result['data_status'],
+                    'source_matches_runtime': manifest['source_revision'] == os.environ.get('MONITOR_SOURCE_REVISION'),
+                    'qpk_matches_runtime': manifest['qpk_revision'] == os.environ.get('MONITOR_QPK_REVISION')}
+    except Exception:
+        # Input/read failures before evaluation have no external effect to
+        # replay. Release the exact claim so the next fresh input can recover.
+        if claim_generation is not None and not effects_started:
+            store.release(claim_generation=claim_generation)
+        raise
 
 
 def evaluate_workspace(root: Path, *, effects_enabled: bool):
@@ -70,7 +85,14 @@ def evaluate_workspace(root: Path, *, effects_enabled: bool):
         # below reaches Cloud Logging; the full cycle remains protected data.
         result = {}
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-            health_cycle.main(effects_enabled=effects_enabled, emit_summary=False, on_summary=result.update)
+            def record_findings(findings, **_kwargs):
+                from monitor_findings import encode_findings
+                path = root / 'monitor/data/strategy-reviews/cloud-findings.json'
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(encode_findings(findings))
+                return {'issues': [], 'errors': 0}
+            health_cycle.main(effects_enabled=effects_enabled, emit_summary=False, on_summary=result.update,
+                              findings_dispatch=record_findings, diagnosis_enabled=False)
         status = result.get('snapshot_data_status')
         return {'healthy': result.get('ok') is True,
                 'snapshot_count': int(result['snapshot_count']),
@@ -93,21 +115,56 @@ def evaluate_workspace(root: Path, *, effects_enabled: bool):
                     child.unlink()
 
 
+def publish_projections(client, uri, root, *, claim_generation):
+    from google.api_core.exceptions import NotFound
+    from monitor_diagnosis_state import observation_from_workspace
+
+    payloads = {'diagnosis-observation.json': observation_from_workspace(root / 'monitor'),
+                'strategy-findings.json': (root / 'monitor/data/strategy-reviews/cloud-findings.json').read_bytes()}
+    for name, raw in payloads.items():
+        state = CloudState(client, uri, state_name=name)
+        blob = state.bucket.blob(state.prefix + '/' + name)
+        try:
+            blob.reload(timeout=20, retry=None)
+            generation = int(blob.generation)
+        except NotFound:
+            generation = 0
+        # The common core claim owns both bounded projections.
+        blob.metadata = {'monitor-producer': 'cloud_run'}
+        state.bucket.blob(state.prefix + '/active.json').reload(
+            if_generation_match=claim_generation, timeout=20, retry=None)
+        blob.upload_from_string(raw, content_type='application/json', if_generation_match=generation,
+                                timeout=30, retry=None)
+
+
 def main():
     mode = os.environ.get('MONITOR_MODE', 'preview')
-    # Production adoption is deliberately separate from image preparation.
-    if mode != 'preview':
-        raise ValueError('monitor_production_adoption_not_configured')
     from google.cloud import storage
 
     try:
-        store = CloudState(storage.Client(), os.environ['MONITOR_STATE_GCS_URI'])
-        result = run_once(store, evaluate_workspace, mode=mode)
+        client = storage.Client()
+        uri = os.environ['MONITOR_STATE_GCS_URI']
+        store = CloudState(client, uri)
+        def refresh(root):
+            from monitor_inputs import apply_inputs
+            raw, _ = CloudState(client, os.environ['MONITOR_INPUT_GCS_URI']).read()
+            apply_inputs(root, raw)
+        def evaluate(root, *, effects_enabled):
+            if not effects_enabled:
+                refresh(root)
+            return evaluate_workspace(root, effects_enabled=effects_enabled)
+        if mode == 'run' and (not os.environ.get('TELEGRAM_TOKEN') or not os.environ.get('GLOBAL_TELEGRAM_CHAT_ID')):
+            raise StateUnavailable('monitor_notification_binding_missing')
+        result = run_once(store, evaluate, mode=mode, execution_id=os.environ.get('CLOUD_RUN_EXECUTION', ''),
+                          refresh=refresh, publish=lambda root, **kwargs: publish_projections(client, uri, root, **kwargs))
+        if result['status'] == 'blocked':
+            print(json.dumps({'component': 'strategy_health', 'severity': 'ERROR', **result}))
+            return 1
         print(json.dumps({'component': 'strategy_health', 'severity': 'INFO' if result['healthy'] else 'WARNING', **result}))
         return 0
     except Exception:
         print(json.dumps({'component': 'strategy_health', 'severity': 'ERROR',
-                          'status': 'unavailable', 'reason': 'monitor_preview_failed', 'mode': mode}))
+                          'status': 'unavailable', 'reason': 'monitor_cycle_failed', 'mode': mode}))
         return 1
 
 

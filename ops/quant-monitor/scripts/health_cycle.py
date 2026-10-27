@@ -29,6 +29,7 @@ _DELIVERY_ATTEMPT_LIMIT = 2
 _EVENT_ID_RE = re.compile(r"^[0-9a-f]{64}$")
 _ALERT_STATE_THREAD_LOCK = threading.RLock()
 _ALERT_STATE_LOCK_DEPTH = threading.local()
+_CLOUD_CHECKPOINT = threading.local()
 _ARTIFACT_STATUS_RELATIVE_PATH = Path("data/lifecycle-artifacts/status.json")
 _ARTIFACT_STATUS_SCHEMA = "quant_monitor_lifecycle_artifact_status.v1"
 _SAFE_TOKEN = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,99}$")
@@ -560,6 +561,20 @@ def _write_alert_state(root: Path, payload: dict[str, Any]) -> None:
         except OSError:
             pass
         raise
+    callback = getattr(_CLOUD_CHECKPOINT, 'callback', None)
+    if callback is not None:
+        callback()
+
+
+@contextmanager
+def cloud_alert_checkpoint(callback):
+    """Persist each delivery intent/receipt before the next external operation."""
+    previous = getattr(_CLOUD_CHECKPOINT, 'callback', None)
+    _CLOUD_CHECKPOINT.callback = callback
+    try:
+        yield
+    finally:
+        _CLOUD_CHECKPOINT.callback = previous
 
 
 def _is_duplicate_alert(root: Path, fingerprint: str) -> bool:
@@ -1802,7 +1817,8 @@ def _send_health_telegram_target(text: str, token: str, chat_id: str) -> str:
 
 
 def main(*, effects_enabled: bool = True, emit_summary: bool = True,
-         on_summary: Callable[[dict[str, Any]], None] | None = None) -> int:
+         on_summary: Callable[[dict[str, Any]], None] | None = None,
+         findings_dispatch=None, diagnosis_enabled: bool = True) -> int:
     root = Path(os.environ.get("QUANT_MONITOR_ROOT") or Path(__file__).resolve().parents[1])
     out_dir = root / "data" / "health"
     dash_dir = out_dir / "dashboard"
@@ -1989,7 +2005,7 @@ def main(*, effects_enabled: bool = True, emit_summary: bool = True,
         row for row in strategies
         if (row.get("domain"), row.get("strategy_profile")) in current_drift_identities
     ], drift_results)
-    optimization_watch = dispatch_strategy_watch_findings(
+    optimization_watch = (findings_dispatch or dispatch_strategy_watch_findings)(
         monitoring_findings,
         dry_run=False,
         comment_existing=False,
@@ -2036,7 +2052,7 @@ def main(*, effects_enabled: bool = True, emit_summary: bool = True,
         root,
         data_errors,
         _operational_diagnosis_fingerprint(data_errors),
-    ) if effects_enabled else {"status": "skipped", "reason": "read_only_preview"}
+    ) if effects_enabled and diagnosis_enabled else {"status": "skipped", "reason": "independent_consumer_or_preview"}
 
     summary = {
         "as_of": datetime.now(timezone.utc).isoformat(),
