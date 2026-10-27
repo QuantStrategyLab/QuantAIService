@@ -1,6 +1,8 @@
 import importlib.util
 import io
 import json
+import sys
+import types
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
@@ -281,6 +283,328 @@ def test_skipped_diagnosis_does_not_create_or_persist_an_attempt(tmp_path):
         "status": "skipped", "reason": "no_data_errors"}
     checkpoint.assert_not_called()
     assert not (tmp_path / "actions-state").exists()
+
+
+class StorageFailure(Exception):
+    def __init__(self, code):
+        self.code = code
+
+
+def test_storage_boundary_requires_both_forbidden_responses_without_body_reads():
+    client = mock.Mock()
+    client.bucket.return_value.blob.return_value.reload.side_effect = StorageFailure(403)
+    client.list_blobs.side_effect = StorageFailure(403)
+    assert caller.verify_storage_bounds(client) == {
+        "archive_metadata_denied": True, "object_listing_denied": True}
+    client.bucket.assert_called_once_with(caller.CLOUD_BUCKET)
+    blob = client.bucket.return_value.blob
+    blob.assert_called_once_with("monitor-state/core/current.tar.gz")
+    blob.return_value.download_as_bytes.assert_not_called()
+    client.list_blobs.assert_called_once_with(
+        caller.CLOUD_BUCKET, max_results=1, fields="kind", timeout=20, retry=None)
+
+
+@pytest.mark.parametrize("code", [401, 404, 429, 500, None])
+def test_storage_boundary_does_not_treat_other_failures_as_denial(code):
+    client = mock.Mock()
+    client.bucket.return_value.blob.return_value.reload.side_effect = StorageFailure(code)
+    with pytest.raises(caller.Rejected, match="storage_boundary_unverified"):
+        caller.verify_storage_bounds(client)
+    client.list_blobs.assert_not_called()
+
+
+@pytest.mark.parametrize("allowed", ["archive", "listing"])
+def test_storage_boundary_rejects_unexpected_access_without_reading_data(allowed):
+    client = mock.Mock()
+    if allowed == "listing":
+        client.bucket.return_value.blob.return_value.reload.side_effect = StorageFailure(403)
+        client.list_blobs.return_value = iter(())
+    with pytest.raises(caller.Rejected, match="storage_access_too_broad"):
+        caller.verify_storage_bounds(client)
+    client.bucket.return_value.blob.return_value.download_as_bytes.assert_not_called()
+
+
+def test_storage_boundary_forces_lazy_listing_request():
+    client = mock.Mock()
+    client.bucket.return_value.blob.return_value.reload.side_effect = StorageFailure(403)
+
+    def forbidden_page():
+        raise StorageFailure(403)
+        yield
+
+    client.list_blobs.return_value = forbidden_page()
+    assert caller.verify_storage_bounds(client)["object_listing_denied"] is True
+
+
+class SavedCloudState:
+    """Offline shared-adapter fixture; only the caller protocol is exercised."""
+
+    def __init__(self, files=None):
+        self.files = {} if files is None else dict(files)
+        self.generation = 10
+        self.active = None
+        self.events = []
+        self.saved = []
+        self.fail_checkpoint = None
+        self.fail_observation = False
+        self.cycle = {"domains": list(caller._read_diagnosis_cycle.__globals__["DOMAINS"]),
+                      "as_of": NOW.isoformat(), "data_errors": [ERROR]}
+
+    def observation(self, *, now):
+        self.events.append("observation")
+        if self.fail_observation:
+            raise RuntimeError("synthetic unavailable projection")
+        return self.cycle
+
+    def claim(self, execution_id):
+        self.events.append(("claim", execution_id))
+        if self.active is not None:
+            return None
+        self.active = 20
+        return self.active
+
+    def read(self):
+        self.events.append(("read", self.generation))
+        return json.dumps(self.files, sort_keys=True).encode(), self.generation
+
+    def restore(self, raw, directory):
+        self.events.append("restore")
+        directory.mkdir()
+        for name, text in json.loads(raw).items():
+            (directory / name).write_text(text)
+
+    def checkpoint(self, directory, *, state_generation, claim_generation):
+        assert state_generation == self.generation and claim_generation == self.active
+        self.events.append(("checkpoint", state_generation, claim_generation))
+        self.saved.append({path.name: path.read_text() for path in directory.glob("*.json")})
+        if len(self.saved) == self.fail_checkpoint:
+            raise RuntimeError("synthetic uncertain checkpoint")
+        self.files = self.saved[-1]
+        self.generation += 1
+        return self.generation
+
+    def release(self, *, claim_generation):
+        assert claim_generation == self.active
+        self.events.append(("release", claim_generation))
+        self.active = None
+
+
+def cloud_environment():
+    return {**environment(), "GITHUB_RUN_ID": "123456", "GITHUB_RUN_ATTEMPT": "1"}
+
+
+def cloud_run(store, opener, **kwargs):
+    return caller.diagnose_cloud(store=store, client=mock.Mock(), env=cloud_environment(),
+                                 opener=opener, now=NOW, sleep=lambda _: None, **kwargs)
+
+
+def test_cloud_success_advances_each_generation_under_one_independent_claim():
+    store = SavedCloudState()
+    opener = Opener([{"value": "synthetic-oidc"}, job(), {"value": "synthetic-oidc"},
+                     job("succeeded", output="private advice")])
+    result = cloud_run(store, opener)
+    assert result["status"] == "succeeded" and store.active is None
+    assert store.events == ["observation", ("claim", "actions/123456/1"), ("read", 10), "restore",
+                            ("checkpoint", 10, 20), ("checkpoint", 11, 20),
+                            ("checkpoint", 12, 20), ("release", 20)]
+    states = [json.loads(item["2026-10-22.json"]) for item in store.saved]
+    assert states[0]["job_id"] is None
+    assert states[1]["job_id"] == ID and "receipt" not in states[1]
+    assert states[2]["receipt"] == result
+
+
+@pytest.mark.parametrize("fail_at,requests", [(1, 1), (2, 2), (3, 4)])
+def test_cloud_uncertain_write_retains_claim_and_stops_later_requests(fail_at, requests):
+    store = SavedCloudState()
+    store.fail_checkpoint = fail_at
+    opener = Opener([{"value": "synthetic-oidc"}, job(), {"value": "synthetic-oidc"},
+                     job("succeeded", output="advice")])
+    with pytest.raises(RuntimeError, match="synthetic uncertain checkpoint"):
+        cloud_run(store, opener)
+    assert store.active == 20 and len(opener.calls) == requests
+    second = Opener([])
+    with pytest.raises(caller.Rejected, match="diagnosis_state_busy"):
+        cloud_run(store, second)
+    assert second.calls == []
+
+
+def test_cloud_lost_submission_remains_unknown_after_operator_releases_claim():
+    store = SavedCloudState()
+    with pytest.raises(error.URLError):
+        cloud_run(store, Opener([{"value": "synthetic-oidc"}, error.URLError("lost response")]))
+    assert store.active == 20 and json.loads(store.files["2026-10-22.json"])["job_id"] is None
+    # Explicit operator recovery of the claim does not erase the unknown ledger.
+    store.release(claim_generation=20)
+    opener = Opener([])
+    with pytest.raises(caller.Rejected, match="submit_outcome_unknown"):
+        cloud_run(store, opener)
+    assert opener.calls == [] and store.active == 20
+
+
+def test_cloud_pending_job_resumes_with_get_only_after_operator_recovery():
+    store = SavedCloudState()
+    with pytest.raises(error.URLError):
+        cloud_run(store, Opener([{"value": "synthetic-oidc"}, job(), {"value": "synthetic-oidc"},
+                                error.URLError("lost poll")]))
+    original_deadline = json.loads(store.files["2026-10-22.json"])["deadline"]
+    store.release(claim_generation=20)
+    resumed = Opener([{"value": "synthetic-oidc"}, job("succeeded", output="advice")])
+    assert cloud_run(store, resumed)["status"] == "succeeded"
+    assert all(req.method == "GET" for req in resumed.calls)
+    assert json.loads(store.files["2026-10-22.json"])["deadline"] == original_deadline
+
+
+def test_cloud_source_unavailable_does_not_reserve_state_or_request_audit():
+    store = SavedCloudState()
+    store.fail_observation = True
+    opener = Opener([])
+    with pytest.raises(RuntimeError, match="synthetic unavailable projection"):
+        cloud_run(store, opener)
+    assert store.events == ["observation"] and store.active is None and opener.calls == []
+
+
+def test_cloud_preserves_cross_day_unknown_records_without_submission():
+    original = '{ "job_id": null, "private_extension": {"unknown": true} }\n'
+    store = SavedCloudState({"2026-10-21.json": original})
+    opener = Opener([])
+    with pytest.raises(caller.Rejected, match="previous_outcome_unresolved"):
+        cloud_run(store, opener)
+    assert store.files == {"2026-10-21.json": original} and opener.calls == []
+
+
+def test_cloud_healthy_schedule_releases_claim_without_writing_an_attempt():
+    store = SavedCloudState()
+    store.cycle["data_errors"] = []
+    opener = Opener([])
+    assert cloud_run(store, opener) == {"status": "skipped", "reason": "no_data_errors"}
+    assert store.saved == [] and store.active is None and opener.calls == []
+
+
+@pytest.mark.parametrize("key,value", [("GITHUB_RUN_ID", "../bad"),
+                                       ("GITHUB_RUN_ATTEMPT", ""),
+                                       ("GITHUB_WORKFLOW_REF", "other/workflow")])
+def test_cloud_bad_execution_identity_has_zero_cloud_or_audit_io(key, value):
+    store, client = SavedCloudState(), mock.Mock()
+    env = {**cloud_environment(), key: value}
+    with pytest.raises(caller.Rejected):
+        caller.diagnose_cloud(store=store, client=client, env=env)
+    assert store.events == [] and client.mock_calls == []
+
+
+def test_cloud_verification_refreshes_adc_and_cas_writes_unchanged_ledger_without_audit():
+    original = '{ "job_id": null, "extra": 1 }\n'
+    store = SavedCloudState({"2026-10-21.json": original})
+    client = mock.Mock()
+    client.bucket.return_value.blob.return_value.reload.side_effect = StorageFailure(403)
+    client.list_blobs.side_effect = StorageFailure(403)
+    refresh = mock.Mock(side_effect=lambda: store.events.append("refresh"))
+    opener = Opener([])
+    receipt = caller.diagnose_cloud(store=store, client=client, refresh=refresh, verify_state_only=True,
+                                    env=cloud_environment(), now=NOW, opener=opener)
+    assert receipt == {"status": "verified", "mode": "cloud_state_only", "audit_requests": 0,
+                       "archive_metadata_denied": True, "object_listing_denied": True,
+                       "adc_refresh_verified": True, "checkpoint_unchanged": True}
+    assert store.events[-4:] == ["refresh", ("checkpoint", 10, 20), ("read", 11), ("release", 20)]
+    assert store.files == {"2026-10-21.json": original} and opener.calls == []
+    refresh.assert_called_once_with()
+
+
+def test_cloud_verification_uncertain_checkpoint_retains_claim_without_audit():
+    store, client = SavedCloudState(), mock.Mock()
+    store.fail_checkpoint = 1
+    client.bucket.return_value.blob.return_value.reload.side_effect = StorageFailure(403)
+    client.list_blobs.side_effect = StorageFailure(403)
+    opener = Opener([])
+    with pytest.raises(RuntimeError, match="synthetic uncertain checkpoint"):
+        caller.diagnose_cloud(store=store, client=client, refresh=mock.Mock(), verify_state_only=True,
+                              env=cloud_environment(), now=NOW, opener=opener)
+    assert store.active == 20 and opener.calls == []
+
+
+def test_cloud_cli_sanitizes_shared_state_errors(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(caller, "diagnose_cloud", mock.Mock(side_effect=RuntimeError("private-object-body")))
+    path = tmp_path / "receipt.json"
+    assert caller.main(["--cloud", "--verify-state-only", "--receipt", str(path)]) == 1
+    assert json.loads(path.read_text()) == {"status": "unavailable", "reason": "diagnosis_unavailable"}
+    assert "private-object-body" not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("reason", ["diagnosis_observation_unavailable", "diagnosis_observation_stale",
+                                    "state_read_failed", "checkpoint_outcome_unknown", "private-object-body"])
+def test_cloud_cli_preserves_fixed_state_classifications_only(tmp_path, monkeypatch, reason):
+    class StateUnavailable(RuntimeError):
+        pass
+
+    module = types.SimpleNamespace(StateUnavailable=StateUnavailable)
+    monkeypatch.setitem(sys.modules, "monitor_cloud_state", module)
+    monkeypatch.setattr(caller, "diagnose_cloud", mock.Mock(side_effect=StateUnavailable(reason)))
+    path = tmp_path / "receipt.json"
+    assert caller.main(["--cloud", "--receipt", str(path)]) == 1
+    expected = reason if reason in caller.CLOUD_FAILURE_REASONS else "diagnosis_unavailable"
+    assert json.loads(path.read_text()) == {"status": "unavailable", "reason": expected}
+
+
+def test_state_verification_requires_manual_dispatch_before_cloud_io():
+    store, client = SavedCloudState(), mock.Mock()
+    env = {**cloud_environment(), "GITHUB_EVENT_NAME": "schedule"}
+    with pytest.raises(caller.Rejected, match="state_verification_requires_manual_dispatch"):
+        caller.diagnose_cloud(store=store, client=client, env=env, verify_state_only=True)
+    assert store.events == [] and client.mock_calls == []
+
+
+def test_cloud_caller_uses_real_shared_json_contract_and_preserves_original_bytes(tmp_path):
+    shared = importlib.import_module("monitor_diagnosis_state")
+    original = tmp_path / "original"
+    original.mkdir()
+    (original / "2026-10-21.json").write_bytes(b'{ "job_id": null, "extra": {"unknown":true} }\n')
+    raw = shared.encode_checkpoints(original)
+    state = shared.DiagnosisState(
+        mock.Mock(), checkpoint_uri=f"gs://{caller.CLOUD_BUCKET}/{caller.CLOUD_LEDGER_PREFIX}/checkpoints.json",
+        observation_uri=f"gs://{caller.CLOUD_BUCKET}/{caller.CLOUD_OBSERVATION}")
+    backend = mock.Mock()
+    backend.claim.return_value = 20
+    backend.read.side_effect = [(raw, 10), (raw, 11)]
+    backend.checkpoint.return_value = 11
+    state.store = backend
+    state.observations = mock.Mock()
+    cycle = SavedCloudState().cycle
+    observation = {"schema_version": shared.OBSERVATION_SCHEMA, "status": "available", "cycle": cycle}
+    state.observations.read.return_value = (json.dumps(observation).encode(), 5)
+    client = mock.Mock()
+    client.bucket.return_value.blob.return_value.reload.side_effect = StorageFailure(403)
+    client.list_blobs.side_effect = StorageFailure(403)
+    opener = Opener([])
+    result = caller.diagnose_cloud(store=state, client=client, refresh=mock.Mock(), verify_state_only=True,
+                                  env=cloud_environment(), now=NOW, opener=opener)
+    assert result["status"] == "verified" and opener.calls == []
+    backend.claim.assert_called_once_with({
+        "schema_version": "quant.monitor-diagnosis-claim.v1", "execution_id": "actions/123456/1"})
+    backend.checkpoint.assert_called_once_with(raw, state_generation=10, claim_generation=20)
+    backend.release.assert_called_once_with(claim_generation=20)
+
+
+@pytest.mark.parametrize("failure", ["unavailable", "stale", "old_time", "invalid_classification"])
+def test_cloud_real_projection_rejects_bad_source_before_claim_or_audit(failure):
+    shared = importlib.import_module("monitor_diagnosis_state")
+    state = shared.DiagnosisState(
+        mock.Mock(), checkpoint_uri=f"gs://{caller.CLOUD_BUCKET}/{caller.CLOUD_LEDGER_PREFIX}/checkpoints.json",
+        observation_uri=f"gs://{caller.CLOUD_BUCKET}/{caller.CLOUD_OBSERVATION}")
+    state.store = mock.Mock()
+    state.observations = mock.Mock()
+    cycle = SavedCloudState().cycle
+    observation = {"schema_version": shared.OBSERVATION_SCHEMA, "status": "available", "cycle": cycle}
+    if failure in {"unavailable", "stale"}:
+        observation.update(status=failure, cycle=None)
+    elif failure == "old_time":
+        cycle["as_of"] = (NOW - timedelta(hours=3)).isoformat()
+    else:
+        cycle["data_errors"] = [{**ERROR, "code": "invented"}]
+    state.observations.read.return_value = (json.dumps(observation).encode(), 5)
+    opener = Opener([])
+    with pytest.raises(shared.StateUnavailable):
+        caller.diagnose_cloud(store=state, client=mock.Mock(), env=cloud_environment(), now=NOW, opener=opener)
+    state.store.claim.assert_not_called()
+    assert opener.calls == []
 
 
 @pytest.mark.parametrize("url", ["http://audit.invalid", "https://user:password@audit.invalid",

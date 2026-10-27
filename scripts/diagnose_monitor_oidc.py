@@ -30,6 +30,17 @@ WORKFLOW_REF = REPOSITORY + "/.github/workflows/quant-monitor-operational-diagno
 JOBS = "/v1/ai/execute/jobs"
 TASK = "operational_data_diagnosis"
 LIMIT = 2 * 1024 * 1024
+CLOUD_PROJECT = "longbridgequant"
+CLOUD_BUCKET = "qsl-runtime-logs-shared"
+CLOUD_OBSERVATION = "monitor-state/core/diagnosis-observation.json"
+CLOUD_LEDGER_PREFIX = "monitor-state/diagnosis-actions"
+CLOUD_FAILURE_REASONS = frozenset({
+    "diagnosis_observation_unavailable", "diagnosis_observation_stale", "diagnosis_observation_invalid",
+    "diagnosis_observation_invalid_or_stale", "diagnosis_state_invalid", "diagnosis_checkpoint_invalid",
+    "diagnosis_checkpoint_name_invalid", "diagnosis_checkpoint_too_large", "diagnosis_checkpoint_source_missing",
+    "diagnosis_checkpoint_destination_not_empty", "state_read_failed", "workspace_too_large",
+    "claim_outcome_unknown", "checkpoint_outcome_unknown", "release_outcome_unknown",
+})
 
 
 class Rejected(ValueError):
@@ -115,6 +126,42 @@ def check_job(job, job_id=None, route=None):
     return actual
 
 
+def identity_available(env, *, include_healthy=False):
+    """Check the original Actions identity before accessing mutable state."""
+    if not all(env.get(k, "").strip() for k in (
+            "ACTIONS_ID_TOKEN_REQUEST_URL", "ACTIONS_ID_TOKEN_REQUEST_TOKEN")):
+        return False
+    if (env.get("GITHUB_ACTIONS") != "true" or env.get("GITHUB_REPOSITORY") != REPOSITORY
+            or env.get("GITHUB_REF") != "refs/heads/main"
+            or env.get("GITHUB_WORKFLOW_REF") != WORKFLOW_REF
+            or env.get("GITHUB_EVENT_NAME") not in {"schedule", "workflow_dispatch"}):
+        raise Rejected("invalid_workflow_identity")
+    if include_healthy and env["GITHUB_EVENT_NAME"] != "workflow_dispatch":
+        raise Rejected("healthy_observation_requires_manual_dispatch")
+    return True
+
+
+def verify_storage_bounds(client):
+    """Require actual 403s without downloading the protected archive or names."""
+    operations = (
+        lambda: client.bucket(CLOUD_BUCKET).blob("monitor-state/core/current.tar.gz").reload(
+            timeout=20, retry=None),
+        # Iteration makes the request; the field mask excludes object names and
+        # contents even if the identity unexpectedly has listing permission.
+        lambda: list(client.list_blobs(CLOUD_BUCKET, max_results=1, fields="kind",
+                                      timeout=20, retry=None)),
+    )
+    for operation in operations:
+        try:
+            operation()
+        except Exception as exc:
+            if getattr(exc, "code", None) != 403:
+                raise Rejected("storage_boundary_unverified") from exc
+        else:
+            raise Rejected("storage_access_too_broad")
+    return {"archive_metadata_denied": True, "object_listing_denied": True}
+
+
 def diagnose(root, state_dir, *, include_healthy=False, env=None, opener=None,
              now=None, monotonic=time.monotonic, sleep=time.sleep, checkpoint=None):
     """Diagnose a saved observation, optionally persisting each state transition.
@@ -132,16 +179,8 @@ def diagnose(root, state_dir, *, include_healthy=False, env=None, opener=None,
             checkpoint()
 
     env = os.environ if env is None else env
-    if not all(env.get(k, "").strip() for k in (
-            "ACTIONS_ID_TOKEN_REQUEST_URL", "ACTIONS_ID_TOKEN_REQUEST_TOKEN")):
+    if not identity_available(env, include_healthy=include_healthy):
         return {"status": "skipped", "reason": "no_oidc"}
-    if (env.get("GITHUB_ACTIONS") != "true" or env.get("GITHUB_REPOSITORY") != REPOSITORY
-            or env.get("GITHUB_REF") != "refs/heads/main"
-            or env.get("GITHUB_WORKFLOW_REF") != WORKFLOW_REF
-            or env.get("GITHUB_EVENT_NAME") not in {"schedule", "workflow_dispatch"}):
-        raise Rejected("invalid_workflow_identity")
-    if include_healthy and env["GITHUB_EVENT_NAME"] != "workflow_dispatch":
-        raise Rejected("healthy_observation_requires_manual_dispatch")
     service = env.get("CODEX_AUDIT_SERVICE_URL", "").rstrip("/")
     https_url(service, base=True)
     now = now or datetime.now(timezone.utc)
@@ -217,25 +256,111 @@ def diagnose(root, state_dir, *, include_healthy=False, env=None, opener=None,
         raise Rejected("audit_job_timeout")
 
 
+def diagnose_cloud(*, include_healthy=False, verify_state_only=False, env=None,
+                   client=None, store=None, refresh=None, now=None, opener=None,
+                   monotonic=time.monotonic, sleep=time.sleep):
+    """Use the shared minimal JSON adapter and this consumer's independent claim."""
+    env = os.environ if env is None else env
+    if not identity_available(env, include_healthy=include_healthy):
+        return {"status": "skipped", "reason": "no_oidc"}
+    if not verify_state_only:
+        https_url(env.get("CODEX_AUDIT_SERVICE_URL", "").rstrip("/"), base=True)
+    elif env["GITHUB_EVENT_NAME"] != "workflow_dispatch":
+        raise Rejected("state_verification_requires_manual_dispatch")
+    if (not re.fullmatch(r"[0-9]{1,24}", env.get("GITHUB_RUN_ID", ""))
+            or not re.fullmatch(r"[0-9]{1,6}", env.get("GITHUB_RUN_ATTEMPT", ""))):
+        raise Rejected("invalid_execution_identity")
+    if client is None:
+        import google.auth
+        from google.auth.transport.requests import Request
+        from google.cloud import storage
+
+        credentials, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/devstorage.read_write"])
+        client = storage.Client(project=CLOUD_PROJECT, credentials=credentials)
+
+        def refresh():
+            credentials.refresh(Request())
+    if store is None:
+        from monitor_diagnosis_state import DiagnosisState
+
+        store = DiagnosisState(
+            client, checkpoint_uri=f"gs://{CLOUD_BUCKET}/{CLOUD_LEDGER_PREFIX}/checkpoints.json",
+            observation_uri=f"gs://{CLOUD_BUCKET}/{CLOUD_OBSERVATION}")
+    now = now or datetime.now(timezone.utc)
+    # This producer-owned, generation-pinned projection is independent of the
+    # consumer ledger. Reject an unavailable/stale source before reserving it.
+    cycle = store.observation(now=now)
+    bounds = verify_storage_bounds(client) if verify_state_only else {}
+    claim = store.claim("actions/" + env["GITHUB_RUN_ID"] + "/" + env["GITHUB_RUN_ATTEMPT"])
+    if claim is None:
+        raise Rejected("diagnosis_state_busy")
+    # There is deliberately no unconditional finally-release: an unreadable
+    # ledger or uncertain submission/checkpoint retains the claim for review.
+    with tempfile.TemporaryDirectory(prefix="actions-diagnosis-") as directory:
+        root = Path(directory)
+        state_dir = root / "actions-state"
+        raw, generation = store.read()
+        store.restore(raw, state_dir)
+        cycle_path = root / "data/health/cycle_observation.json"
+        cycle_path.parent.mkdir(parents=True)
+        save(cycle_path, cycle)
+
+        def checkpoint():
+            nonlocal generation
+            generation = store.checkpoint(state_dir, state_generation=generation, claim_generation=claim)
+
+        if verify_state_only:
+            if refresh is None:
+                raise Rejected("credential_refresh_unavailable")
+            refresh()
+            # Exercise the real guarded write with the unchanged original daily
+            # ledger. No audit token is requested and no diagnostic is submitted.
+            checkpoint()
+            restored_raw, restored_generation = store.read()
+            if restored_raw != raw or restored_generation != generation:
+                raise Rejected("checkpoint_verification_failed")
+            result = {"status": "verified", "mode": "cloud_state_only", **bounds,
+                      "adc_refresh_verified": True, "checkpoint_unchanged": True,
+                      "audit_requests": 0}
+        else:
+            result = diagnose(root, state_dir, include_healthy=include_healthy, env=env, now=now,
+                              opener=opener, monotonic=monotonic, sleep=sleep, checkpoint=checkpoint)
+        store.release(claim_generation=claim)
+        return result
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--root", type=Path, required=True)
-    parser.add_argument("--state-dir", type=Path, required=True)
+    parser.add_argument("--root", type=Path)
+    parser.add_argument("--state-dir", type=Path)
+    parser.add_argument("--cloud", action="store_true")
+    parser.add_argument("--verify-state-only", action="store_true")
     parser.add_argument("--receipt", type=Path, required=True)
     parser.add_argument("--include-healthy", action="store_true")
     args = parser.parse_args(argv)
+    if args.cloud:
+        if args.root is not None or args.state_dir is not None:
+            parser.error("--cloud cannot be combined with local paths")
+    elif args.root is None or args.state_dir is None or args.verify_state_only:
+        parser.error("provide --root and --state-dir, or use --cloud")
     try:
-        result = diagnose(args.root, args.state_dir, include_healthy=args.include_healthy)
+        if args.cloud:
+            result = diagnose_cloud(include_healthy=args.include_healthy, verify_state_only=args.verify_state_only)
+        else:
+            result = diagnose(args.root, args.state_dir, include_healthy=args.include_healthy)
     except error.HTTPError as exc:
         result = {"status": "unavailable", "reason": "http_error", "http_status": exc.code}
     except Rejected as exc:
         result = {"status": "unavailable", "reason": str(exc)}
-    except Exception:
-        result = {"status": "unavailable", "reason": "diagnosis_unavailable"}
+    except Exception as exc:
+        state_error = getattr(sys.modules.get("monitor_cloud_state"), "StateUnavailable", ())
+        reason = (str(exc) if args.cloud and isinstance(exc, state_error)
+                  and str(exc) in CLOUD_FAILURE_REASONS else "diagnosis_unavailable")
+        result = {"status": "unavailable", "reason": reason}
     # No response body, exception details, prompt, URL, token or model text is logged.
     save(args.receipt, result)
     print(json.dumps(result, sort_keys=True))
-    return 0 if result["status"] in {"succeeded", "skipped"} else 1
+    return 0 if result["status"] in {"succeeded", "skipped", "verified"} else 1
 
 
 if __name__ == "__main__":
