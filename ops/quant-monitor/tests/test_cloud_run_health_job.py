@@ -123,8 +123,12 @@ class CloudJobTests(unittest.TestCase):
     def test_production_cli_requires_notification_binding_before_any_claim(self):
         storage = types.ModuleType('google.cloud.storage')
         storage.Client = Mock()
+        google = types.ModuleType('google')
+        cloud = types.ModuleType('google.cloud')
+        google.cloud, cloud.storage = cloud, storage
         with patch.dict(os.environ, {'MONITOR_MODE': 'run', 'MONITOR_STATE_GCS_URI': 'gs://synthetic/state'}, clear=True), \
-                patch.dict(sys.modules, {'google.cloud.storage': storage}), patch.object(job, 'CloudState') as store:
+                patch.dict(sys.modules, {'google': google, 'google.cloud': cloud, 'google.cloud.storage': storage}), \
+                patch.object(job, 'CloudState') as store:
             self.assertEqual(job.main(), 1)
             store.return_value.claim.assert_not_called()
 
