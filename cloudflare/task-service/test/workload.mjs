@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import {generateKeyPairSync, sign, createHash} from 'node:crypto';
 import {resolve} from 'node:path';
+import {spawnSync} from 'node:child_process';
 import {build} from 'esbuild';
 import {Miniflare} from 'miniflare';
 
@@ -9,7 +10,7 @@ const jwksURL = issuer + '/.well-known/jwks';
 const {privateKey, publicKey} = generateKeyPairSync('rsa', {modulusLength: 2048});
 const otherKey = generateKeyPairSync('rsa', {modulusLength: 2048}).privateKey;
 const jwk = {...publicKey.export({format: 'jwk'}), kid: 'synthetic-key', alg: 'RS256', use: 'sig'};
-const fixture = (await build({entryPoints: ['test/fixture.mjs'], bundle: true, format: 'esm',
+const fixture = (await build({entryPoints: ['test/workload-fixture.mjs'], bundle: true, format: 'esm',
   platform: 'browser', write: false, external: ['cloudflare:*'], plugins: [{name: 'browser', setup(b) {
     b.onResolve({filter: /^@hyperjump\/browser$/}, () => ({path: resolve('node_modules/@hyperjump/browser/lib/index.browser.js')}));
   }}]})).outputFiles[0].text;
@@ -92,6 +93,69 @@ try {
       assert.equal((await f.request('/v1/tasks', {method: 'POST', body: {...task, objective: 'Different frozen intent'},
         headers: {'Idempotency-Key': 'synthetic-workload-1'}})).status, 409);
     });
+    await test(organization + ': original message operation preserves task, revision and idempotency', async () => {
+      const before = await (await f.request('/v1/tasks/' + id)).json();
+      const body = {text: 'Synthetic follow-up', materials: [{type: 'text', text: 'Fixed fixture'}]};
+      const send = () => f.request('/v1/tasks/' + id + '/messages', {method: 'POST', body,
+        headers: {'Idempotency-Key': 'synthetic-follow-up'}});
+      const first = await send();
+      assert.equal(first.status, 200);
+      const updated = await first.json();
+      assert.equal(updated.id, id); assert.equal(updated.revision, before.revision + 1);
+      const replay = await send();
+      assert.equal(replay.status, 200); assert.equal((await replay.json()).revision, updated.revision);
+      const read = await (await f.request('/v1/tasks/' + id)).json();
+      assert.equal(read.messages.length, 1); assert.equal(read.messages[0].text, body.text);
+      assert.equal((await f.request('/v1/tasks/' + id + '/messages', {method: 'POST',
+        body: {...body, text: 'Different intent'}, headers: {'Idempotency-Key': 'synthetic-follow-up'}})).status, 409);
+      assert.equal((await f.request('/v1/tasks/' + id + '/messages', {method: 'POST', body})).status, 400);
+      assert.equal((await f.request('/v1/tasks/' + id + '/messages', {method: 'POST',
+        body: {text: 'Invalid', provider: 'grok'}, headers: {'Idempotency-Key': 'invalid-message'}})).status, 400);
+    });
+    await test(organization + ': unchanged Python SDK message and event requests cross the workload boundary', async () => {
+      const child = spawnSync('python3', ['test/sdk-workload.py'], {encoding: 'utf8', timeout: 10000, maxBuffer: 262144,
+        input: JSON.stringify({origin: f.origin, task_id: id, token: f.token()})});
+      assert.equal(child.status, 0, 'offline SDK capture failed');
+      const calls = JSON.parse(child.stdout);
+      assert.equal(calls.length, 2);
+      for (const call of calls) {
+        assert.equal(call.headers['User-Agent'], 'ai-service-task-client/2.0');
+        const reply = await f.worker.fetch(call.url, {method: call.method,
+          headers: call.headers, ...(call.body === null ? {} : {body: call.body})});
+        assert.equal(reply.status, 200);
+        const result = await reply.json();
+        if (call.method === 'POST') assert.equal(result.id, id);
+        else assert.ok(result.events.some(event => event.status === 'message'));
+      }
+    });
+    await test(organization + ': original event operation preserves ordered cursors and validation', async () => {
+      const reply = await f.request('/v1/tasks/' + id + '/events');
+      assert.equal(reply.status, 200);
+      const {events} = await reply.json();
+      assert.ok(events.length >= 2); assert.ok(events.some(event => event.status === 'message'));
+      assert.ok(events.every((event, i) => Number.isSafeInteger(event.seq) && (i === 0 || events[i - 1].seq < event.seq)));
+      const after = events.at(-1).seq;
+      const next = await f.request('/v1/tasks/' + id + '/events?after=' + after);
+      assert.equal(next.status, 200); assert.deepEqual(await next.json(), {events: []});
+      for (const cursor of ['-1', '1e2', '9007199254740992']) {
+        assert.equal((await f.request('/v1/tasks/' + id + '/events?after=' + cursor)).status, 400);
+      }
+      assert.equal((await f.request('/v1/tasks/absent/events')).status, 404);
+    });
+    await test(organization + ': message and event access retain read/submit scope separation', async () => {
+      const path = '/v1/tasks/' + id;
+      const before = await (await f.request(path)).json();
+      assert.equal((await f.request(path + '/events', {bearer: f.token({scope: 'tasks:read'})})).status, 200);
+      assert.equal((await f.request(path + '/messages', {method: 'POST', bearer: f.token({scope: 'tasks:read'}),
+        body: {text: 'Must not be written'}, headers: {'Idempotency-Key': 'denied-follow-up'}})).status, 403);
+      assert.equal((await (await f.request(path)).json()).revision, before.revision);
+      assert.equal((await f.request(path + '/events', {bearer: f.token({scope: 'tasks:submit'})})).status, 403);
+      assert.equal((await f.request(path + '/messages', {method: 'POST', bearer: f.token({scope: 'tasks:submit'}),
+        body: {text: 'Submit scope follow-up'}, headers: {'Idempotency-Key': 'submit-follow-up'}})).status, 200);
+      assert.equal((await f.request(path + '/events?project=OtherOwner%2FPrivate')).status, 403);
+      assert.equal((await f.request(path + '/messages?project=OtherOwner%2FPrivate', {method: 'POST',
+        body: {text: 'Wrong project'}, headers: {'Idempotency-Key': 'wrong-project-follow-up'}})).status, 403);
+    });
     await test(organization + ': forged identity headers cannot change context or provider', async () => {
       const r = await f.request('/v1/tasks/' + id, {headers: {'X-Owner-ID': 'OtherOwner',
         'X-Project-ID': 'other-project', 'X-Project': 'OtherOwner/Private', 'X-Provider': 'grok',
@@ -141,10 +205,12 @@ try {
         assert.equal(r.status, 401, name + ': ' + await r.clone().text());
       });
     }
-    await test(organization + ': workload cannot reach MCP, mutation extras or management', async () => {
-      for (const [path, method] of [['/mcp', 'POST'], ['/v1/tasks/' + id + '/messages', 'POST'],
+    await test(organization + ': workload cannot reach worker methods, wrong HTTP methods or management', async () => {
+      for (const [path, method] of [['/mcp', 'POST'], ['/v1/tasks/' + id + '/messages', 'GET'],
         ['/v1/tasks/' + id + '/claim', 'POST'],
-        ['/v1/tasks/' + id + '/report', 'POST'], ['/v1/tasks/' + id + '/events', 'GET'], ['/v1/tasks', 'DELETE']]) {
+        ['/v1/tasks/' + id + '/report', 'POST'], ['/v1/tasks/' + id + '/events', 'POST'],
+        ['/v1/tasks/' + id + '/messages/extra', 'POST'], ['/v1/tasks/' + id + '/events/extra', 'GET'],
+        ['/v1/tasks', 'DELETE']]) {
         const r = await f.request(path, {method, ...(method === 'GET' ? {} : {body: {}})});
         assert.ok([401, 403, 405].includes(r.status), path + ': ' + r.status);
       }
@@ -166,6 +232,9 @@ try {
       assert.equal((await f.request('/v1/tasks/' + id)).status, 200);
       assert.equal((await f.request('/v1/tasks', {method: 'POST', body: task,
         headers: {'Idempotency-Key': 'read-only-rejected'}})).status, 403);
+      assert.equal((await f.request('/v1/tasks/' + id + '/events')).status, 200);
+      assert.equal((await f.request('/v1/tasks/' + id + '/messages', {method: 'POST',
+        body: {text: 'Read-only grant follow-up'}, headers: {'Idempotency-Key': 'grant-read-only-message'}})).status, 403);
       await f.worker.policy({GITHUB_WORKLOAD_GRANTS_JSON: JSON.stringify([f.grant])});
       assert.equal((await f.request('/v1/tasks/' + id, {bearer: f.token({scope: 'tasks:submit'})})).status, 403);
     });
@@ -207,8 +276,9 @@ try {
       await f.worker.policy({GITHUB_WORKLOAD_GRANTS_JSON: JSON.stringify([{...f.grant, scopes: ['tasks:read']}])});
       assert.equal((await f.request(path, {method: 'POST', body: {}})).status, 403);
       await f.worker.policy({GITHUB_WORKLOAD_GRANTS_JSON: JSON.stringify([f.grant])});
-      // This fixture has no active Dot subscription: its existing alarm makes the task failed.
+      // No active Dot subscription: explicitly advance the production alarm to failure.
       // Cancelling a terminal task must retain that fact rather than relabel it cancelled.
+      await f.worker.alarmProbe('tick');
       let original;
       for (let attempt = 0; attempt < 40; attempt++) {
         original = await (await f.request('/v1/tasks/' + id)).json();
@@ -222,6 +292,9 @@ try {
       assert.equal(record.status, original.status);
       const second = await f.request(path, {method: 'POST', body: {}});
       assert.equal(second.status, 200); assert.equal((await second.json()).status, record.status);
+      assert.equal((await f.request('/v1/tasks/' + id + '/messages', {method: 'POST',
+        body: {text: 'Terminal follow-up'}, headers: {'Idempotency-Key': 'terminal-message'}})).status, 409);
+      assert.equal((await f.request('/v1/tasks/' + id + '/events')).status, 200);
     });
     assert.ok(f.outbound.length >= 1);
     assert.ok(f.outbound.every(url => url === jwksURL));
@@ -235,6 +308,12 @@ try {
     assert.equal((await a.request('/v1/tasks/' + b.taskId)).status, 404);
     assert.equal((await b.request('/v1/tasks/' + a.taskId + '/cancel', {method: 'POST', body: {}})).status, 404);
     assert.equal((await a.request('/v1/tasks/' + b.taskId + '/cancel', {method: 'POST', body: {}})).status, 404);
+    for (const [own, other] of [[a, b], [b, a]]) {
+      assert.equal((await own.request('/v1/tasks/' + other.taskId + '/events')).status, 404);
+      assert.equal((await own.request('/v1/tasks/' + other.taskId + '/messages', {method: 'POST',
+        body: {text: 'Cross-organization follow-up'}, headers: {'Idempotency-Key': 'cross-org'}})).status, 404);
+      assert.equal((await own.request('/v1/tasks/' + own.taskId + '/events', {bearer: other.token()})).status, 401);
+    }
   });
   await test('authentication strips all trust headers before the service binding', async () => {
     const f = organizations[0];

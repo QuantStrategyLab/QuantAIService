@@ -47,9 +47,11 @@ REST 机器调用方可使用 GitHub Actions OIDC JWT。`TaskClient` 分别配�
 
 GitHub 通常不提供 OAuth scope；权限取自有限 grant，如 token 显式带 scope 则只取交集。GitHub 签名的 `repository_owner` 必须等于准确仓库 `project` 的所属组织；`PROJECT_CONTEXTS.ownerId` 是既有内部身份名，可以与 GitHub 组织名不同，进入 RPC 时原样保留，不为迁移改名。内部 RPC 的 `githubUserId` 对机器调用方沿用 GitHub 签名 `actor_id` 的数字形状，仅作身份记录，不能据此授予权限；`provider` 固定为 null。外部提供的身份、项目、组织和 provider 头在进入服务绑定前删除。业务 `mode` 仍由既有项目策略选择 Dot 或已明确启用的 API，本鉴权不会启用任何 provider。
 
-本包开放 `POST /v1/tasks`、`GET /v1/tasks/lookup`、`GET /v1/tasks/{id}`，并保留已存在的 `POST /v1/tasks/{id}/cancel`（JSON body 必须为 `{}`，权限仍为 `tasks:submit`）。保留原幂等键、请求 SHA256、任务 ID、未知任务404与冲突409；取消沿用既有幂等及终态语义，不能把已失败任务改称已取消。
+REST 机器入口中，`tasks:read` 允许 `GET /v1/tasks/lookup`、`GET /v1/tasks/{id}` 和 `GET /v1/tasks/{id}/events?after={seq}`；`tasks:submit` 允许 `POST /v1/tasks`、`POST /v1/tasks/{id}/messages` 和 `POST /v1/tasks/{id}/cancel`。
 
-隔离单位沿用原合同的仓库 project：task owner 是仓库，只有当前精确 grant 准入的项目可访问/取消该项目任务，不能跨项目或组织；不声称已提供同一项目内逐人或逐 client 的提交者隔离。SDK 的 message、任务事件读取等其他操作尚未迁入此机器入口，不能据此宣称整个 SDK 已兼容。
+消息沿用原 SDK 的 JSON `text`、可选 `materials` 与稳定幂等键，同键同正文不重复增加 revision，同键异文返回409；终态和已请求取消的任务不接受新消息。事件沿用原递增 seq 游标，无新事件返回成功空数组；游标无效返回400，未知任务404。取消 body 必须为 `{}`，保留既有幂等及终态语义，不能把已失败任务改称已取消。
+
+隔离单位沿用原合同的仓库 project：task owner 是仓库，只有当前精确 grant 准入的项目可读取任务和事件、追加消息或取消该项目任务，不能跨项目或组织；不声称已提供同一项目内逐人或逐 client 的提交者隔离。机器入口不授予 MCP、claim/report、订阅或管理操作；新增 REST 路由不会创建或扩大线上 grant，真实调用仍须核验现用客户端、准确 audience 与项目映射。
 
 生产验收还需核定一个实际原调用程序、其有效原 grant/audience、准确服务端映射及受限配置。由原程序请求真实 GitHub token，提交有限任务后用同一幂等键和任务 ID 完成查询及原客户端消费；单独的 events 合成提交脚本不等于业务调用闭环。离线测试不替代该闭环。
 
@@ -57,7 +59,9 @@ GitHub 通常不提供 OAuth scope；权限取自有限 grant，如 token 显式
 
 运行 `npm ci`、`npm test`、`npm run build`。测试在本地 workerd 中分别验证 Quant、Pigbibi，以及跨组织、错误 owner 拒绝；GitHub、webhook 与 Gemini HTTP 使用合成替身，包含真实 SQLite 状态、输出验证、跨组织、未知回执与不重发回归；不证明线上 Dot 或生产 API 完成。
 
-机器入口另运行 `node test/workload.mjs`：本地生成临时 RSA 密钥、模拟固定 JWKS，验证两组织本地 SQLite 提交/读取/lookup、错误身份和越权拒绝；不请求外网 JWT、不调用模型，也不把测试签发能力放进生产 bundle。
+机器入口另运行 `node test/workload.mjs`：本地生成临时 RSA 密钥、模拟固定 JWKS，验证两组织本地 SQLite 提交/读取/lookup、消息幂等与 revision、事件游标、read/submit 分权、错误身份和越权拒绝；不请求外网 JWT、不调用模型，也不把测试签发能力放进生产 bundle。
+
+这项回归还使用 Python 3 加载同仓未修改的 `TaskClient`，捕获其消息和事件请求后交给本地 Worker；捕获进程禁止 socket 网络访问。鉴权夹具显式推进 alarm，确保消息测试在任务仍可接收后续材料时执行；终态取消仍调用生产 alarm，真实定时投递由 `native.mjs` 验证。
 
 将 wrangler.example.jsonc 复制到受保护配置目录并填入已有资源与批准的项目策略；真实账号、客户端和授权名单不进入仓库。GitHub client secret 通过批准的凭据存储配置。部署由统筹执行 `wrangler deploy --config /absolute/private/wrangler.jsonc`，不依赖默认目录。占位示例不可直接上线。
 
