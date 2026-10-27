@@ -100,6 +100,16 @@ class InputBoundaryTests(unittest.TestCase):
                 inputs.run_adapter(store)
             store.release.assert_not_called()
 
+    def test_read_failure_releases_known_claim_without_writing_empty_inputs(self):
+        store = Mock()
+        store.claim.return_value = 7
+        store.read.side_effect = state.StateUnavailable('read_failed')
+        with patch.dict(os.environ, {'GITHUB_RUN_ID': '1', 'GITHUB_RUN_ATTEMPT': '1'}), \
+                self.assertRaises(state.StateUnavailable):
+            inputs.run_adapter(store)
+        store.release.assert_called_once_with(claim_generation=7)
+        store.commit.assert_not_called()
+
 
 if __name__ == '__main__':
     unittest.main()

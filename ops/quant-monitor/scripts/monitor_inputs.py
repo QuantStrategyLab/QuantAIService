@@ -119,12 +119,21 @@ def run_adapter(store, *, verify_only=False):
                          'execution_id': os.environ['GITHUB_RUN_ID'] + ':' + os.environ['GITHUB_RUN_ATTEMPT']})
     if claim is None:
         raise StateUnavailable('monitor_inputs_active_or_uncertain')
-    raw, generation = store.read()
-    with tempfile.TemporaryDirectory(prefix='monitor-input-refresh-') as directory:
-        root = Path(directory)
-        restore(raw, root)
-        refresh_inputs(root)
-        store.commit(input_archive(root, refreshed=True), state_generation=generation, claim_generation=claim)
+    try:
+        raw, generation = store.read()
+        with tempfile.TemporaryDirectory(prefix='monitor-input-refresh-') as directory:
+            root = Path(directory)
+            restore(raw, root)
+            refresh_inputs(root)
+            prepared = input_archive(root, refreshed=True)
+    except Exception:
+        # Source reads and local preparation have no external write to replay.
+        # A known claim can be released so fresh inputs can recover next time.
+        store.release(claim_generation=claim)
+        raise
+    # Once a conditional write is attempted its outcome may be unknown. Keep
+    # the claim on failure, as in the computing/diagnosis state adapters.
+    store.commit(prepared, state_generation=generation, claim_generation=claim)
     return {'status': 'refreshed', 'audit_requests': 0}
 
 
