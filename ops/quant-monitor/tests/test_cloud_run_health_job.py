@@ -55,6 +55,12 @@ class MemoryStore:
         self.raw, self.owner = raw, None
         self.generation += 1
 
+    def release(self, *, claim_generation):
+        if claim_generation != 5:
+            raise state.StateUnavailable('claim_conflict')
+        self.calls.append('release')
+        self.owner = None
+
 
 class CloudJobTests(unittest.TestCase):
     def setUp(self):
@@ -105,6 +111,17 @@ class CloudJobTests(unittest.TestCase):
         self.assertEqual(calls, ['effect'])
         self.assertEqual(result['status'], 'blocked')
 
+    def test_definite_input_failure_before_effects_releases_only_its_claim(self):
+        before = self.store.raw
+        evaluate = Mock()
+        with self.assertRaises(state.StateUnavailable):
+            job.run_once(self.store, evaluate, mode='run', execution_id='first',
+                         refresh=Mock(side_effect=state.StateUnavailable('stale_input')))
+        evaluate.assert_not_called()
+        self.assertIsNone(self.store.owner)
+        self.assertEqual(self.store.raw, before)
+        self.assertEqual(self.store.calls, ['claim', 'read', 'release'])
+
     def test_concurrent_cycles_cannot_read_old_state_before_claim(self):
         entered, release = threading.Event(), threading.Event()
         def evaluate(root, **kwargs):
@@ -120,9 +137,46 @@ class CloudJobTests(unittest.TestCase):
         self.assertEqual(second['status'], 'blocked')
         self.assertEqual(self.store.calls.count('read'), 1)
 
-    def test_production_cli_cannot_be_enabled_by_an_environment_flag(self):
-        with patch.dict(os.environ, {'MONITOR_MODE': 'run'}), self.assertRaisesRegex(ValueError, 'not_configured'):
-            job.main()
+    def test_production_cli_requires_notification_binding_before_any_claim(self):
+        storage = types.ModuleType('google.cloud.storage')
+        storage.Client = Mock()
+        google = types.ModuleType('google')
+        cloud = types.ModuleType('google.cloud')
+        google.cloud, cloud.storage = cloud, storage
+        with patch.dict(os.environ, {'MONITOR_MODE': 'run', 'MONITOR_STATE_GCS_URI': 'gs://synthetic/state'}, clear=True), \
+                patch.dict(sys.modules, {'google': google, 'google.cloud': cloud, 'google.cloud.storage': storage}), \
+                patch.object(job, 'CloudState') as store:
+            self.assertEqual(job.main(), 1)
+            store.return_value.claim.assert_not_called()
+
+    def test_checkpoint_failure_stops_before_telegram_and_retains_claim(self):
+        send = Mock()
+        self.store.checkpoint = Mock(side_effect=state.StateUnavailable('unknown_write'))
+        def evaluate(root, **kwargs):
+            health_cycle._write_alert_state(root / 'monitor', LEDGER)
+            send()
+        with self.assertRaises(state.StateUnavailable):
+            job.run_once(self.store, evaluate, mode='run', execution_id='first')
+        send.assert_not_called()
+        self.assertIsNotNone(self.store.owner)
+        self.assertEqual(job.run_once(self.store, evaluate, mode='run', execution_id='second')['status'], 'blocked')
+
+    def test_intermediate_checkpoint_keeps_image_code_out_of_state(self):
+        def save(raw, **kwargs):
+            self.store.raw = raw
+            self.store.generation += 1
+            return self.store.generation
+        self.store.checkpoint = Mock(side_effect=save)
+        def evaluate(root, **kwargs):
+            code = root / 'projects/CryptoStrategies/script.py'
+            code.parent.mkdir(parents=True)
+            code.write_text('image code')
+            health_cycle._write_alert_state(root / 'monitor', LEDGER)
+            code.unlink()
+            return {'healthy': False, 'snapshot_count': 0, 'data_status': 'unavailable'}
+        job.run_once(self.store, evaluate, mode='run', execution_id='first')
+        self.store.checkpoint.assert_called_once()
+        self.assertNotIn(b'image code', self.store.raw)
 
 
 class PortableStateTests(unittest.TestCase):

@@ -32,6 +32,8 @@ COPY ops/quant-monitor/quant_monitor_domain /app/monitor/quant_monitor_domain
 COPY ops/quant-monitor/scripts/health_cycle.py ops/quant-monitor/scripts/build_dashboard_snapshot.py \
      ops/quant-monitor/scripts/monitor_cloud_state.py ops/quant-monitor/scripts/monitor_diagnosis_state.py \
      ops/quant-monitor/scripts/cloud_run_health_job.py /app/monitor/scripts/
+COPY ops/quant-monitor/scripts/monitor_inputs.py ops/quant-monitor/scripts/monitor_findings.py /app/monitor/scripts/
+COPY ops/quant-monitor/scripts/monitor_website_publish.py /app/monitor/scripts/
 RUN PYTHONPATH=/app/monitor:/app/monitor/scripts python -c \
     "import cloud_run_health_job, health_cycle; from quant_platform_kit.strategy_lifecycle.performance_monitor import run_monitor; from quant_platform_kit.strategy_lifecycle.drift_detector import run_drift_detection; from quant_platform_kit.strategy_lifecycle.health_dashboard import build_dashboard"
 

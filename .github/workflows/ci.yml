@@ -51,6 +51,10 @@ jobs:
           python -m ruff check ops/quant-monitor/scripts/publish_saved_monitor_observation.py ops/quant-monitor/tests/test_observation_publisher.py
           PYTHONPATH=ops/quant-monitor/tests python -m unittest discover -s ops/quant-monitor/tests -p test_observation_publisher.py -v
           bash -n ops/quant-monitor/scripts/run_health_with_projection.sh
+          python -m ruff check ops/quant-monitor/scripts/monitor_inputs.py ops/quant-monitor/scripts/monitor_findings.py ops/quant-monitor/tests/test_monitor_inputs.py ops/quant-monitor/tests/test_monitor_findings.py
+          python -m unittest discover -s ops/quant-monitor/tests -p test_monitor_inputs.py -v
+          python -m ruff check ops/quant-monitor/scripts/monitor_website_publish.py ops/quant-monitor/tests/test_monitor_website_publish.py
+          python -m unittest discover -s ops/quant-monitor/tests -p test_monitor_website_publish.py -v
       - name: Validate SDK packages without monitor readiness in a temporary venv
         run: |
           pin=$(cat ops/quant-monitor/qpk-runtime.sha)
@@ -109,6 +113,7 @@ jobs:
           PY
           version=$(python -I -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
           env -u PYTHONPATH "$sdk_venv/bin/python" -I scripts/verify_release_install.py --version "$version"
+          env -u PYTHONPATH "$sdk_venv/bin/python" -I -m unittest discover -s ops/quant-monitor/tests -p test_monitor_findings.py -v
           echo 'SDK package checks complete; full monitor readiness is not qualified.'
       - name: Validate monitor tests with explicit optional-dependency skips
         env:
