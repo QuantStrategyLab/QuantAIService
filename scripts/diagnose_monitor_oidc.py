@@ -3,6 +3,7 @@
 
 Consumes saved observations, never runs the monitor, publishes, or repairs.
 The V2 native task client remains separate from this deliberately narrow caller.
+See ../AGENTS.md for operating and authorization boundaries.
 """
 from __future__ import annotations
 
@@ -115,7 +116,21 @@ def check_job(job, job_id=None, route=None):
 
 
 def diagnose(root, state_dir, *, include_healthy=False, env=None, opener=None,
-             now=None, monotonic=time.monotonic, sleep=time.sleep):
+             now=None, monotonic=time.monotonic, sleep=time.sleep, checkpoint=None):
+    """Diagnose a saved observation, optionally persisting each state transition.
+
+    A portable-state adapter must acquire its shared claim before restoring the
+    observation and state_dir. Its zero-argument checkpoint callback persists
+    the updated directory durably while retaining that claim, and raises if the
+    write is uncertain. It runs before submission, before polling an accepted
+    job and before returning success. The adapter owns final claim release;
+    this hook neither grants storage access nor makes the CLI portable itself.
+    """
+    def persist(path, value):
+        save(path, value)
+        if checkpoint is not None:
+            checkpoint()
+
     env = os.environ if env is None else env
     if not all(env.get(k, "").strip() for k in (
             "ACTIONS_ID_TOKEN_REQUEST_URL", "ACTIONS_ID_TOKEN_REQUEST_TOKEN")):
@@ -174,11 +189,11 @@ def diagnose(root, state_dir, *, include_healthy=False, env=None, opener=None,
                      "deadline": now.timestamp() + 660}
             # Fetch identity before spending the attempt, but persist before POST.
             token = oidc_token(env, opener)
-            save(path, state)
+            persist(path, state)
             job = json_request(opener, service + JOBS, token, payload)
             route = check_job(job)
             state.update(job_id=job["job_id"], route=route)
-            save(path, state)
+            persist(path, state)
         deadline = monotonic() + max(0, min(660, state["deadline"] - now.timestamp()))
         while monotonic() < deadline:
             job = json_request(opener, service + JOBS + "/" + state["job_id"], oidc_token(env, opener))
@@ -196,7 +211,7 @@ def diagnose(root, state_dir, *, include_healthy=False, env=None, opener=None,
                            "output_sha256": hashlib.sha256(output.encode()).hexdigest(),
                            "output_length": len(output), "advisory_only": True,
                            "execution_authority_granted": False}
-                save(path, {**state, "receipt": receipt})
+                persist(path, {**state, "receipt": receipt})
                 return receipt
             sleep(5)
         raise Rejected("audit_job_timeout")
