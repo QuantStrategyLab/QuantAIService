@@ -1801,7 +1801,8 @@ def _send_health_telegram_target(text: str, token: str, chat_id: str) -> str:
     return telegram_target_outcome(text=text, token=token, chat_id=chat_id)
 
 
-def main() -> int:
+def main(*, effects_enabled: bool = True, emit_summary: bool = True,
+         on_summary: Callable[[dict[str, Any]], None] | None = None) -> int:
     root = Path(os.environ.get("QUANT_MONITOR_ROOT") or Path(__file__).resolve().parents[1])
     out_dir = root / "data" / "health"
     dash_dir = out_dir / "dashboard"
@@ -1992,7 +1993,7 @@ def main() -> int:
         monitoring_findings,
         dry_run=False,
         comment_existing=False,
-    )
+    ) if effects_enabled else {"issues": [], "errors": 0}
 
     if collector_payload_invalid:
         data_error_lines.append("[collector] dashboard_data_unavailable")
@@ -2010,7 +2011,7 @@ def main() -> int:
     telegram_sent = False
     duplicate_alert_suppressed = False
     telegram_delivery_errors: list[str] = []
-    if notify_lines:
+    if effects_enabled and notify_lines:
         body = _build_alert_body(notify_lines)
         fingerprint = _alert_fingerprint(alert_identities)
         token = (os.environ.get("TELEGRAM_TOKEN") or os.environ.get("TG_TOKEN") or "").strip()
@@ -2028,14 +2029,14 @@ def main() -> int:
             telegram_delivery_errors = list(delivery["errors"])
         else:
             telegram_delivery_errors = ["telegram_missing_env"]
-    else:
+    elif effects_enabled:
         _clear_alert(root)
 
     operational_diagnosis = _run_operational_diagnosis(
         root,
         data_errors,
         _operational_diagnosis_fingerprint(data_errors),
-    )
+    ) if effects_enabled else {"status": "skipped", "reason": "read_only_preview"}
 
     summary = {
         "as_of": datetime.now(timezone.utc).isoformat(),
@@ -2062,7 +2063,10 @@ def main() -> int:
         json.dumps(summary, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
-    print(json.dumps(summary, ensure_ascii=False))
+    if on_summary is not None:
+        on_summary(summary)
+    if emit_summary:
+        print(json.dumps(summary, ensure_ascii=False))
     return 0 if summary["ok"] else 2
 
 

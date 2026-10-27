@@ -1,5 +1,14 @@
 # VPS Quant Monitor
 
+The approved cloud migration separates provider-native infrastructure monitoring
+from shared strategy/data checks. Binance execution and fixed egress stay on
+Oracle; only monitoring is moving. The independent Cloud Run Job is initially
+read-only, and the VPS half-hour timer remains its active owner until qualified
+cutover. See [cloud migration](cloud-migration.md) for state preservation,
+source-adapter boundaries and the staged adoption order. The old daily briefing
+timer is retired in the unified-notification deployment; its sections below
+describe historical/optional tooling, not a second production daily sender.
+
 ## Reading by task
 
 [Service documentation index](../../docs/README.md)
