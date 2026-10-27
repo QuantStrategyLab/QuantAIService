@@ -13,6 +13,16 @@
 
 - [Quant Monitor by task](../ops/quant-monitor/README.md#reading-by-task): operation, notification and deployment sections. Monitoring is evidence-only; deployment has separate qualification requirements.
 
+The Actions-only [saved-observation diagnosis caller](../scripts/diagnose_monitor_oidc.py)
+keeps its existing protected-main workflow identity and local CLI. Its optional
+`diagnose(..., checkpoint=...)` callback lets a shared-state adapter durably save
+the submission intent, accepted job and final receipt under one retained claim.
+The callback must raise on an uncertain write; the caller then stops before the
+next request or success response. This hook alone does not migrate the workflow:
+the adapter must restore the original observations and all daily checkpoints
+(including unknown outcomes), hold the common state claim, and have approved
+storage access before a hosted runner can replace the source host.
+
 ## Historical architecture
 
 - [V1 AI Gateway architecture](architecture.md): former Analyze/Execute/Review interfaces and components, preserved for historical interpretation; not the V2 connection/API guide.

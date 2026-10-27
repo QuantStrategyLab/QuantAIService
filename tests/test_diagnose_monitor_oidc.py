@@ -183,6 +183,106 @@ def test_pending_read_resumes_original_job_without_another_submit(tmp_path):
     assert all(req.method == "GET" for req in resumed.calls)
 
 
+def test_checkpoint_persists_each_transition_before_further_requests(tmp_path):
+    snapshot(tmp_path)
+    opener = Opener([{"value": "synthetic-oidc"}, job(), {"value": "synthetic-oidc"},
+                     job("succeeded", output="private advice")])
+    transitions = []
+
+    def checkpoint():
+        state = json.loads(next((tmp_path / "actions-state").glob("*.json")).read_text())
+        transitions.append((len(opener.calls), state))
+
+    receipt = run(tmp_path, opener, checkpoint=checkpoint)
+    assert [count for count, _ in transitions] == [1, 2, 4]
+    assert transitions[0][1]["job_id"] is None
+    assert transitions[1][1]["job_id"] == ID and "receipt" not in transitions[1][1]
+    assert transitions[2][1]["receipt"] == receipt
+    assert len({state["deadline"] for _, state in transitions}) == 1
+    assert len({state["request_sha256"] for _, state in transitions}) == 1
+    assert "private advice" not in json.dumps(transitions)
+
+
+@pytest.mark.parametrize("fail_at,requests", [(1, 1), (2, 2), (3, 4)])
+def test_uncertain_checkpoint_stops_requests_and_never_reports_success(tmp_path, fail_at, requests):
+    snapshot(tmp_path)
+    opener = Opener([{"value": "synthetic-oidc"}, job(), {"value": "synthetic-oidc"},
+                     job("succeeded", output="advice")])
+    calls = 0
+
+    def checkpoint():
+        nonlocal calls
+        calls += 1
+        if calls == fail_at:
+            raise OSError("synthetic uncertain persistence")
+
+    with pytest.raises(OSError, match="synthetic uncertain persistence"):
+        run(tmp_path, opener, checkpoint=checkpoint)
+    assert calls == fail_at and len(opener.calls) == requests
+    state = json.loads(next((tmp_path / "actions-state").glob("*.json")).read_text())
+    assert state["job_id"] == (None if fail_at == 1 else ID)
+
+
+def test_restored_unknown_checkpoint_cannot_submit_on_a_new_runner(tmp_path):
+    first = tmp_path / "first"
+    snapshot(first)
+    durable = {}
+
+    def checkpoint():
+        for path in (first / "actions-state").glob("*.json"):
+            durable[path.name] = path.read_bytes()
+
+    opener = Opener([{"value": "synthetic-oidc"}, error.URLError("lost submit response")])
+    with pytest.raises(error.URLError):
+        run(first, opener, checkpoint=checkpoint)
+    restored = tmp_path / "restored"
+    snapshot(restored)
+    state_dir = restored / "actions-state"
+    state_dir.mkdir()
+    for name, raw in durable.items():
+        (state_dir / name).write_bytes(raw)
+    second = Opener([])
+    with pytest.raises(caller.Rejected, match="submit_outcome_unknown"):
+        run(restored, second)
+    assert second.calls == []
+
+
+def test_restored_accepted_job_resumes_with_gets_and_persists_receipt(tmp_path):
+    first = tmp_path / "first"
+    snapshot(first)
+    durable = {}
+
+    def checkpoint():
+        for path in (first / "actions-state").glob("*.json"):
+            durable[path.name] = path.read_bytes()
+
+    opener = Opener([{"value": "synthetic-oidc"}, job(), {"value": "synthetic-oidc"},
+                     error.URLError("lost poll response")])
+    with pytest.raises(error.URLError):
+        run(first, opener, checkpoint=checkpoint)
+    restored = tmp_path / "restored"
+    snapshot(restored)
+    state_dir = restored / "actions-state"
+    state_dir.mkdir()
+    for name, raw in durable.items():
+        (state_dir / name).write_bytes(raw)
+    resumed = Opener([{"value": "synthetic-oidc"}, job("succeeded", output="advice")])
+    receipts = []
+    receipt = run(restored, resumed, checkpoint=lambda: receipts.append(
+        json.loads(next(state_dir.glob("*.json")).read_text())["receipt"]))
+    assert receipts == [receipt] and receipt["job_id"] == ID
+    assert all(req.method == "GET" for req in resumed.calls)
+
+
+def test_skipped_diagnosis_does_not_create_or_persist_an_attempt(tmp_path):
+    snapshot(tmp_path, [])
+    checkpoint = mock.Mock(side_effect=AssertionError("no state to persist"))
+    assert run(tmp_path, Opener([]), checkpoint=checkpoint) == {
+        "status": "skipped", "reason": "no_data_errors"}
+    checkpoint.assert_not_called()
+    assert not (tmp_path / "actions-state").exists()
+
+
 @pytest.mark.parametrize("url", ["http://audit.invalid", "https://user:password@audit.invalid",
                                  "https://audit.invalid/deploy", "https://audit.invalid?query=1"])
 def test_invalid_service_target_makes_zero_requests(tmp_path, url):
