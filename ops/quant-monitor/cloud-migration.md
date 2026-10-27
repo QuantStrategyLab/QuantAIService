@@ -116,7 +116,17 @@ ownership. Notification delivery and unknown-effect ledgers keep their existing
 protection. Preview mode cannot invoke either publication path or read the Secret.
 
 The hosted `quant-monitor-inputs.yml` adapter uses separate, short-lived App
-tokens for source Actions/contents reads and four-repository issue-only writes.
+identities for source Actions reads and four-repository issue-only writes.
+Bind them with `QUANT_MONITOR_READER_APP_ID` /
+`QUANT_MONITOR_READER_APP_PRIVATE_KEY` and `QUANT_MONITOR_ISSUES_APP_ID` /
+`QUANT_MONITOR_ISSUES_APP_PRIVATE_KEY` in protected deployment configuration.
+The reader needs only Actions read and implicit metadata read on the four
+strategy repositories and BinancePlatform; the synchronizers call only Actions
+run/job/artifact APIs. The writer needs only Issues write and metadata read on
+the four strategy repositories. Do not extend a broad code/workflow-writing App
+to Binance merely because a minted token can be narrowed. Missing installations
+or credential bindings require a concrete access decision; do not fall back to
+the source host's personal token. Preview/state verification skips both Apps.
 Its direct WIF identity can mutate only its input archive and claim, and read
 the bounded strategy-findings projection. It cannot read the computing state.
 Input refresh is enabled with an explicit deployment variable; manual checks

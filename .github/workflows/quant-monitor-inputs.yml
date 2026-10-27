@@ -57,12 +57,11 @@ jobs:
         id: reader
         uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
         with:
-          app-id: ${{ vars.CROSS_REPO_GITHUB_APP_ID }}
-          private-key: ${{ secrets.CROSS_REPO_GITHUB_APP_PRIVATE_KEY }}
+          app-id: ${{ vars.QUANT_MONITOR_READER_APP_ID }}
+          private-key: ${{ secrets.QUANT_MONITOR_READER_APP_PRIVATE_KEY }}
           owner: QuantStrategyLab
           repositories: CnEquityStrategies,HkEquityStrategies,UsEquityStrategies,CryptoStrategies,BinancePlatform
           permission-actions: read
-          permission-contents: read
       - name: Refresh or verify saved input data
         env:
           GH_TOKEN: ${{ steps.reader.outputs.token }}
@@ -75,8 +74,8 @@ jobs:
         id: writer
         uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
         with:
-          app-id: ${{ vars.CROSS_REPO_GITHUB_APP_ID }}
-          private-key: ${{ secrets.CROSS_REPO_GITHUB_APP_PRIVATE_KEY }}
+          app-id: ${{ vars.QUANT_MONITOR_ISSUES_APP_ID }}
+          private-key: ${{ secrets.QUANT_MONITOR_ISSUES_APP_PRIVATE_KEY }}
           owner: QuantStrategyLab
           repositories: CnEquityStrategies,HkEquityStrategies,UsEquityStrategies,CryptoStrategies
           permission-issues: write
