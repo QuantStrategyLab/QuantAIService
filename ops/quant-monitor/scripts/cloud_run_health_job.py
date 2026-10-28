@@ -175,6 +175,29 @@ def publish_projections(client, uri, root, *, claim_generation):
                                 timeout=30, retry=None)
 
 
+FAILURE_CODES = frozenset({
+    'monitor_notification_binding_missing', 'monitor_inputs_stale_or_invalid', 'monitor_inputs_scope_invalid',
+    'state_read_failed', 'claim_outcome_unknown', 'checkpoint_outcome_unknown', 'release_outcome_unknown',
+    'state_write_too_large', 'workspace_invalid', 'workspace_link_not_portable', 'workspace_manifest_invalid',
+    'workspace_member_not_allowed', 'workspace_too_large',
+})
+
+
+def safe_failure(exc):
+    if isinstance(exc, StateUnavailable):
+        code = str(exc)
+        return {'failure_type': 'state_unavailable', 'failure_code': code if code in FAILURE_CODES else 'unknown'}
+    if isinstance(exc, TimeoutError):
+        kind = 'timeout'
+    elif isinstance(exc, OSError):
+        kind = 'os_error'
+    elif isinstance(exc, ValueError):
+        kind = 'value_error'
+    else:
+        kind = 'other'
+    return {'failure_type': kind, 'failure_code': 'unknown'}
+
+
 def main():
     mode = os.environ.get('MONITOR_MODE', 'preview')
     from google.cloud import storage
@@ -210,9 +233,10 @@ def main():
         healthy = result['healthy'] and result['website_publication'] != 'unconfirmed'
         print(json.dumps({'component': 'strategy_health', 'severity': 'INFO' if healthy else 'WARNING', **result}))
         return 0
-    except Exception:
+    except Exception as exc:
         print(json.dumps({'component': 'strategy_health', 'severity': 'ERROR',
-                          'status': 'unavailable', 'reason': 'monitor_cycle_failed', 'mode': mode}))
+                          'status': 'unavailable', 'reason': 'monitor_cycle_failed', 'mode': mode,
+                          **safe_failure(exc)}))
         return 1
 
 
