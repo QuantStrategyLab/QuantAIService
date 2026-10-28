@@ -61,10 +61,14 @@ def run_once(store, evaluate, *, mode='preview', execution_id='', refresh=None, 
                     website_status = website_publish(root, checkpoint=checkpoint)
                 store.commit(pack(root), state_generation=generation, claim_generation=claim_generation)
             website_reason = 'not_requested'
+            website_http_status = None
             if mode == 'run' and website_publish is not None:
                 try:
                     receipt = json.loads((root / 'monitor/data/health/website-publication.json').read_text())
                     reason = receipt.get('reason')
+                    status = receipt.get('http_status')
+                    if type(status) is int and 100 <= status <= 599:
+                        website_http_status = status
                     if isinstance(reason, str) and reason in {'accepted', 'credential_unavailable', 'binding_invalid', 'snapshot_invalid',
                                   'http_rejected', 'transport_unknown', 'response_invalid', 'ack_mismatch'}:
                         website_reason = reason
@@ -75,6 +79,7 @@ def run_once(store, evaluate, *, mode='preview', execution_id='', refresh=None, 
             return {'status': 'evaluated', 'mode': mode, 'healthy': result['healthy'],
                     'snapshot_count': result['snapshot_count'], 'data_status': result['data_status'],
                     'website_publication': website_status, 'website_publication_reason': website_reason,
+                    'website_publication_http_status': website_http_status,
                     'source_matches_runtime': manifest['source_revision'] == os.environ.get('MONITOR_SOURCE_REVISION'),
                     'qpk_matches_runtime': manifest['qpk_revision'] == os.environ.get('MONITOR_QPK_REVISION')}
     except Exception:

@@ -13,8 +13,14 @@ import urllib.request
 from monitor_cloud_state import StateUnavailable
 
 
+def bounded_http_status(value):
+    return value if type(value) is int and 100 <= value <= 599 else None
+
+
 class PublicationError(StateUnavailable):
-    pass
+    def __init__(self, reason, http_status=None):
+        super().__init__(reason)
+        self.http_status = bounded_http_status(http_status)
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -58,7 +64,7 @@ def publish_saved_snapshot(root, *, checkpoint, url, secret_version, session=Non
     path = root / 'monitor/data/health/website-publication.json'
     path.parent.mkdir(parents=True, exist_ok=True)
     receipt = {'schema_version': 'quant.monitor-website-publication.v1', 'status': 'unconfirmed',
-               'snapshot_sha256': None, 'recorded_at': datetime.now(timezone.utc).isoformat()}
+               'snapshot_sha256': None, 'http_status': None, 'recorded_at': datetime.now(timezone.utc).isoformat()}
     try:
         receipt['snapshot_sha256'] = hashlib.sha256(snapshot.read_bytes()).hexdigest()
     except OSError:
@@ -72,8 +78,9 @@ def publish_saved_snapshot(root, *, checkpoint, url, secret_version, session=Non
         receipt['reason'] = 'credential_unavailable'
     else:
         try:
-            publish_snapshot(snapshot, url=url, token=token, opener=opener)
+            receipt['http_status'] = bounded_http_status(publish_snapshot(snapshot, url=url, token=token, opener=opener))
         except PublicationError as exc:
+            receipt['http_status'] = bounded_http_status(exc.http_status)
             reason = str(exc)
             receipt['reason'] = reason if reason in {'binding_invalid', 'snapshot_invalid', 'http_rejected',
                                                       'transport_unknown', 'response_invalid', 'ack_mismatch'} else 'transport_unknown'
@@ -104,22 +111,25 @@ def publish_snapshot(path, *, url, token, opener=None):
     request = urllib.request.Request(url, data=raw, method='POST',
                                       headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token})
     opener = opener or urllib.request.build_opener(NoRedirect())
+    http_status = None
     try:
         with opener.open(request, timeout=20) as response:
+            http_status = bounded_http_status(response.status)
             if response.status != 200:
-                raise PublicationError('http_rejected')
+                raise PublicationError('http_rejected', response.status)
             body = response.read(65537)
-    except urllib.error.HTTPError:
-        raise PublicationError('http_rejected') from None
+    except urllib.error.HTTPError as exc:
+        raise PublicationError('http_rejected', exc.code) from None
     except PublicationError:
         raise
     except Exception:
-        raise PublicationError('transport_unknown') from None
+        raise PublicationError('transport_unknown', http_status) from None
     try:
         if len(body) > 65536:
             raise ValueError()
         value = json.loads(body)
     except (ValueError, TypeError):
-        raise PublicationError('response_invalid') from None
+        raise PublicationError('response_invalid', 200) from None
     if not isinstance(value, dict) or value.get('ok') is not True:
-        raise PublicationError('ack_mismatch')
+        raise PublicationError('ack_mismatch', 200)
+    return 200

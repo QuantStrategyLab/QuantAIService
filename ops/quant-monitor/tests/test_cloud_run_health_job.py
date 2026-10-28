@@ -142,6 +142,7 @@ class CloudJobTests(unittest.TestCase):
             result = job.run_once(self.store, self.evaluate, mode='run', execution_id='first', website_publish=website)
             self.assertEqual(result['website_publication'], 'unconfirmed')
             self.assertEqual(result['website_publication_reason'], 'credential_unavailable')
+            self.assertIsNone(result['website_publication_http_status'])
             self.assertIsNone(self.store.owner)
             with tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
@@ -164,10 +165,11 @@ class CloudJobTests(unittest.TestCase):
                 def website(root, *, checkpoint):
                     receipt = root / 'monitor/data/health/website-publication.json'
                     receipt.parent.mkdir(parents=True, exist_ok=True)
-                    receipt.write_text(json.dumps({'reason': reason}))
+                    receipt.write_text(json.dumps({'reason': reason, 'http_status': 'SENTINEL_PRIVATE'}))
                     return 'unconfirmed'
                 result = job.run_once(store, self.evaluate, mode='run', execution_id='first', website_publish=website)
                 self.assertEqual(result['website_publication_reason'], 'unknown')
+                self.assertIsNone(result['website_publication_http_status'])
                 self.assertNotIn('SENTINEL_PRIVATE', json.dumps(result))
 
     def test_uncertain_computation_save_stops_before_any_publication(self):
