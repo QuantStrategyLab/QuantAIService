@@ -52,6 +52,8 @@ _GITHUB_UPSTREAM_CODES = frozenset({
 _SAFE_RESET_AT = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:+.\-Z]{8,32}$")
 _LIVE_STREAM_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 _BINANCE_LIVE_PROFILE = "crypto_live_pool_rotation"
+_LIVE_MAX_LAG = timedelta(hours=2)
+_LIVE_FUTURE_TOLERANCE = timedelta(minutes=5)
 _OPERATIONAL_ERROR_TYPES = frozenset({
     "FileNotFoundError",
     "JSONDecodeError",
@@ -106,7 +108,7 @@ def _qualified_profile_rows(rows, domain, expected_profiles):
     return qualified, {row.strategy_profile for row in qualified}, unexpected
 
 
-def _binance_live_window(env: Mapping[str, str] | None = None) -> tuple[dict[str, str] | None, str | None]:
+def _binance_live_window(env: Mapping[str, str] | None = None, *, now: datetime | None = None) -> tuple[dict[str, str] | None, str | None]:
     """Resolve an explicit live monitor target and checkpoint window."""
     env = os.environ if env is None else env
     stream_id = str(env.get("BINANCE_LIVE_MONITOR_STREAM_ID") or "").strip()
@@ -128,6 +130,14 @@ def _binance_live_window(env: Mapping[str, str] | None = None) -> tuple[dict[str
             raise ValueError("window is reversed")
     except (TypeError, ValueError, OverflowError):
         return None, "live_coverage_configuration_invalid"
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None or current.utcoffset() is None:
+        return None, "live_coverage_configuration_invalid"
+    age = current.astimezone(timezone.utc) - end
+    if age > _LIVE_MAX_LAG:
+        return None, "live_coverage_stale"
+    if age < -_LIVE_FUTURE_TOLERANCE:
+        return None, "live_coverage_future"
     return {
         "stream_id": stream_id,
         "required_start_at": start.isoformat(),
@@ -135,9 +145,9 @@ def _binance_live_window(env: Mapping[str, str] | None = None) -> tuple[dict[str
     }, None
 
 
-def _run_binance_live_profile_monitor(run_monitor, *, source_revision: str, env=None):
+def _run_binance_live_profile_monitor(run_monitor, *, source_revision: str, env=None, now=None):
     """Run only the configured Binance live profile against an exact window."""
-    request, error = _binance_live_window(env)
+    request, error = _binance_live_window(env, now=now)
     if error:
         return [], error
     try:

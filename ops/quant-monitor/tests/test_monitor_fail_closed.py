@@ -1760,6 +1760,7 @@ class TrustedProfileCoverageTests(unittest.TestCase):
 
         snapshots, error = HEALTH_CYCLE._run_binance_live_profile_monitor(
             invoke_pinned_qpk, source_revision="d" * 40, env=env,
+            now=HEALTH_CYCLE.datetime(2026, 10, 13, tzinfo=HEALTH_CYCLE.timezone.utc),
         )
         self.assertFalse(qpk_errors, qpk_errors)
         self.assertIsNone(error)
@@ -1815,6 +1816,7 @@ class TrustedProfileCoverageTests(unittest.TestCase):
 
         snapshots, error = HEALTH_CYCLE._run_binance_live_profile_monitor(
             run_monitor, source_revision="a" * 40, env=env,
+            now=HEALTH_CYCLE.datetime(2026, 10, 8, tzinfo=HEALTH_CYCLE.timezone.utc),
         )
         self.assertIsNone(error)
         self.assertEqual(len(snapshots), 1)
@@ -1832,6 +1834,7 @@ class TrustedProfileCoverageTests(unittest.TestCase):
         incomplete["BINANCE_LIVE_MONITOR_REQUIRED_END_AT"] = "2026-10-07T00:00:00Z"
         snapshots, error = HEALTH_CYCLE._run_binance_live_profile_monitor(
             run_monitor, source_revision="a" * 40, env=incomplete,
+            now=HEALTH_CYCLE.datetime(2026, 10, 7, tzinfo=HEALTH_CYCLE.timezone.utc),
         )
         self.assertEqual(snapshots, [])
         self.assertEqual(error, "live_coverage_incomplete")
@@ -1840,9 +1843,39 @@ class TrustedProfileCoverageTests(unittest.TestCase):
         wrong_stream["BINANCE_LIVE_MONITOR_STREAM_ID"] = "another-stream"
         snapshots, error = HEALTH_CYCLE._run_binance_live_profile_monitor(
             run_monitor, source_revision="a" * 40, env=wrong_stream,
+            now=HEALTH_CYCLE.datetime(2026, 10, 8, tzinfo=HEALTH_CYCLE.timezone.utc),
         )
         self.assertEqual(snapshots, [])
         self.assertEqual(error, "live_coverage_incomplete")
+
+    def test_live_window_freshness_boundaries_and_profile_isolation(self) -> None:
+        now = HEALTH_CYCLE.datetime(2026, 10, 13, 12, tzinfo=HEALTH_CYCLE.timezone.utc)
+        base = {"BINANCE_LIVE_MONITOR_STREAM_ID": "synthetic",
+                "BINANCE_LIVE_MONITOR_REQUIRED_START_AT": "2026-10-01T00:00:00Z"}
+        for delta, error in ((HEALTH_CYCLE.timedelta(hours=2), None),
+                             (HEALTH_CYCLE.timedelta(hours=2, seconds=1), "live_coverage_stale"),
+                             (-HEALTH_CYCLE.timedelta(minutes=5), None),
+                             (-HEALTH_CYCLE.timedelta(minutes=5, seconds=1), "live_coverage_future")):
+            with self.subTest(delta=delta):
+                env = dict(base, BINANCE_LIVE_MONITOR_REQUIRED_END_AT=(now - delta).isoformat())
+                _, actual = HEALTH_CYCLE._binance_live_window(env, now=now)
+                self.assertEqual(actual, error)
+        stale = dict(base, BINANCE_LIVE_MONITOR_REQUIRED_END_AT=(now - HEALTH_CYCLE.timedelta(hours=3)).isoformat())
+        research = types.SimpleNamespace(domain="crypto", strategy_profile="crypto_research")
+        run_monitor = mock.Mock(return_value=[research])
+        original = HEALTH_CYCLE._binance_live_window
+        with mock.patch.object(HEALTH_CYCLE, "_binance_live_window", side_effect=lambda env, **kwargs: original(env, now=now)):
+            rows, error = HEALTH_CYCLE._run_expected_monitor_profiles(
+                run_monitor, "crypto", ["crypto_live_pool_rotation", "crypto_research"], "a" * 40, env=stale,
+            )
+        self.assertEqual(error, "live_coverage_stale")
+        self.assertEqual(rows, [research])
+        self.assertEqual(run_monitor.call_count, 1)
+        self.assertEqual(run_monitor.call_args.kwargs["strategy_profile"], "crypto_research")
+        us = types.SimpleNamespace(domain="us_equity", strategy_profile="us_profile")
+        run_monitor = mock.Mock(return_value=[us])
+        rows, error = HEALTH_CYCLE._run_expected_monitor_profiles(run_monitor, "us_equity", ["us_profile"], "a" * 40, env=stale)
+        self.assertEqual((rows, error), ([us], None))
 
     def test_binance_live_monitor_missing_or_invalid_window_never_calls_qpk(self) -> None:
         run_monitor = mock.Mock(side_effect=AssertionError("must not call without trusted request"))
@@ -2043,7 +2076,12 @@ class TrustedProfileCoverageTests(unittest.TestCase):
                 )
 
             health_dashboard.build_dashboard = write_dashboard
+            original_live_window = HEALTH_CYCLE._binance_live_window
             with (
+                mock.patch.object(DAILY_BRIEFING, "_health_cycle_module", return_value=HEALTH_CYCLE),
+                mock.patch.object(HEALTH_CYCLE, "_binance_live_window", side_effect=lambda env, **kwargs: original_live_window(
+                    env, now=HEALTH_CYCLE.datetime(2026, 10, 13, tzinfo=HEALTH_CYCLE.timezone.utc),
+                )),
                 mock.patch.dict(os.environ, {
                     "QUANT_MONITOR_ROOT": str(root), "DAY": "2026-10-08",
                     "BINANCE_LIVE_MONITOR_STREAM_ID": "trusted-stream",

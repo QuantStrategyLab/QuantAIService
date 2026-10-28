@@ -183,6 +183,11 @@ is marked unavailable; other research profiles and domains continue on their
 original paths. Health and daily use the same downstream window configuration and
 require the QPK `complete_requested_window` API. Without configuration the window
 is never guessed and no live-ready result is produced.
+The requested end must be no more than two hours behind the current UTC time and
+no more than five minutes ahead. Two hours allows one delayed cycle for the
+intended hourly producer; stale or future windows make only the live profile's
+performance and drift unavailable. This freshness check does not replace the
+ten valid daily returns requirement.
 
 ### GCS runtime digest input
 
