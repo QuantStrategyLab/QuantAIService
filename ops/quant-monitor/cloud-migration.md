@@ -17,6 +17,9 @@ the broker. Self-hosted path/process differences stay in the source adapter;
 ordinary producer-authored run records remain inputs to the existing Binance
 live-run consumer. The adapter never calls Binance's trading API. Missing live
 stream/window bindings remain unavailable, not inferred from a report date.
+The common monitor migration does not require a qualified Binance financial
+return window or resumption of trading; missing or paused sources remain
+explicitly unavailable in monitor results.
 
 ## Read-only qualification
 
@@ -41,9 +44,10 @@ the protected runtime; Cloud Logging receives only bounded status, data-status
 and count fields. Source/QPK differences from the original capture are reported
 explicitly and are not qualified as equivalent merely because imports succeed.
 
-The CLI rejects production mode in this preparation release. Its portable state
-and cycle primitives have offline tests, but that is not production adoption.
-The existing VPS cycle remains the active owner until cutover is qualified.
+The CLI also supports `MONITOR_MODE=run` for the stateful cycle. The deployed
+candidate currently runs in preview; code support and offline tests do not
+constitute production adoption. The existing VPS cycle remains the active owner
+until cutover is qualified.
 
 ## Source adapter and state
 
