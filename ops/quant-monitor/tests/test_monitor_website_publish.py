@@ -16,6 +16,25 @@ VERSION = 'projects/123456/secrets/synthetic-sync/versions/1'
 
 
 class WebsitePublishTests(unittest.TestCase):
+    def test_publication_identifies_application_without_changing_request(self):
+        with tempfile.TemporaryDirectory() as directory:
+            snapshot = Path(directory) / 'snapshot.json'
+            snapshot.write_text('{"schema_version":"strategy_health_dashboard.v1"}')
+            opener = MagicMock()
+            response = opener.open.return_value.__enter__.return_value
+            response.status = 200
+            response.read.return_value = b'{"ok":true}'
+            url = 'https://synthetic.invalid/api/internal/sync-strategy-health'
+            self.assertEqual(publish_snapshot(snapshot, url=url, token='synthetic-token', opener=opener), 200)
+            opener.open.assert_called_once()
+            request = opener.open.call_args.args[0]
+            self.assertEqual(request.full_url, url)
+            self.assertEqual(request.get_method(), 'POST')
+            self.assertEqual(request.get_header('User-agent'), 'QuantStrategyLab-Monitor/1.0')
+            self.assertEqual(request.get_header('Authorization'), 'Bearer synthetic-token')
+            self.assertEqual(request.get_header('Content-type'), 'application/json')
+            self.assertEqual(request.data, snapshot.read_bytes())
+
     def test_adc_reads_only_the_exact_version_without_redirecting(self):
         session = MagicMock()
         response = session.get.return_value.__enter__.return_value

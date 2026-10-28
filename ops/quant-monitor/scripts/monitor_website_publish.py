@@ -155,7 +155,8 @@ def publish_snapshot(path, *, url, token, opener=None):
     except (OSError, ValueError, TypeError):
         raise PublicationError('snapshot_invalid') from None
     request = urllib.request.Request(url, data=raw, method='POST',
-                                      headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token})
+                                      headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token,
+                                               'User-Agent': 'QuantStrategyLab-Monitor/1.0'})
     opener = opener or urllib.request.build_opener(NoRedirect())
     http_status = None
     try:
