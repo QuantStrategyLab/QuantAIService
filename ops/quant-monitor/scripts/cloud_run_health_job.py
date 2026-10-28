@@ -72,7 +72,8 @@ def run_once(store, evaluate, *, mode='preview', execution_id='', refresh=None, 
                                    'challenge': {'challenge', 'absent_or_other', 'unknown'},
                                    'cf_ray': {'present', 'absent', 'unknown'},
                                    'body_read': {'complete', 'truncated', 'unknown'},
-                                   'body_marker': {'cf_1020_marker', 'token_invalid', 'token_unconfigured',
+                                   'body_marker': {'cf_1020_marker', 'plain_error_1010', 'plain_error_1020',
+                                                   'token_invalid', 'token_unconfigured',
                                                    'kv_unconfigured', 'other', 'unknown'}}
                         website_evidence = {k: v for k, v in evidence.items()
                                             if k in allowed and isinstance(v, str) and v in allowed[k]}

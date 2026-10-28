@@ -175,6 +175,19 @@ class CloudJobTests(unittest.TestCase):
                 self.assertEqual(result['website_publication_response_evidence'], {})
                 self.assertNotIn('SENTINEL_PRIVATE', json.dumps(result))
 
+    def test_plain_error_markers_reach_cycle_summary(self):
+        for marker in ('plain_error_1010', 'plain_error_1020'):
+            with self.subTest(marker=marker):
+                store = MemoryStore(self.store.raw)
+                def website(root, *, checkpoint):
+                    receipt = root / 'monitor/data/health/website-publication.json'
+                    receipt.parent.mkdir(parents=True, exist_ok=True)
+                    receipt.write_text(json.dumps({'reason': 'http_rejected', 'http_status': 403,
+                                                   'response_evidence': {'body_marker': marker}}))
+                    return 'unconfirmed'
+                result = job.run_once(store, self.evaluate, mode='run', execution_id='first', website_publish=website)
+                self.assertEqual(result['website_publication_response_evidence'], {'body_marker': marker})
+
     def test_uncertain_computation_save_stops_before_any_publication(self):
         publish, website = Mock(), Mock()
         self.store.checkpoint = Mock(side_effect=state.StateUnavailable('unknown_write'))

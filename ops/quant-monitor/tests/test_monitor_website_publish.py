@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 from monitor_cloud_state import StateUnavailable
-from monitor_website_publish import NoRedirect, publish_snapshot, publish_saved_snapshot, read_sync_token
+from monitor_website_publish import NoRedirect, classify_rejection, publish_snapshot, publish_saved_snapshot, read_sync_token
 
 VERSION = 'projects/123456/secrets/synthetic-sync/versions/1'
 
@@ -166,6 +166,25 @@ class WebsitePublishTests(unittest.TestCase):
                              ('unconfirmed', 'transport_unknown', 200))
             self.assertNotIn('SENTINEL', raw)
             opener.open.assert_called_once()
+
+    def test_plain_error_signatures_are_strict_bounded_and_redacted(self):
+        cases = [
+            (b'  Error code: 1010\n', 'plain_error_1010', 'complete'),
+            (b'error code: 1020', 'plain_error_1020', 'complete'),
+            (b'error code: 1099', 'other', 'complete'),
+            (b'error code: 1010 SENTINEL_PRIVATE', 'other', 'complete'),
+            (b'SENTINEL_PRIVATE error code: 1020', 'other', 'complete'),
+            (b'error code: 1020' + b' ' * 4097, 'unknown', 'truncated'),
+        ]
+        for body, marker, read_status in cases:
+            with self.subTest(marker=marker, read_status=read_status):
+                response = Mock(headers={'Content-Type': 'text/plain'})
+                response.read.return_value = body[:4097]
+                evidence = classify_rejection(response)
+                self.assertEqual(evidence['body_marker'], marker)
+                self.assertEqual(evidence['body_read'], read_status)
+                self.assertNotIn('SENTINEL', json.dumps(evidence))
+                response.read.assert_called_once_with(4097)
 
     def test_rejected_response_evidence_is_bounded_and_redacted(self):
         import io
