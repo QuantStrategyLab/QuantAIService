@@ -8,10 +8,12 @@ import contextlib
 import io
 import json
 import os
+import re
 import shutil
 import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from monitor_cloud_state import DATA_PROJECTS, StateUnavailable, pack, restore
 
@@ -76,6 +78,56 @@ def apply_inputs(root, raw, *, now=None):
         (root / 'manifest.json').write_text(json.dumps(current))
 
 
+def refresh_binance_report_archive(root, *, client, uri, stream_id, account_scope_sha256, write=True):
+    """Read the bound archive into the claimed temporary local input store."""
+    from binance_report_input import prepare_archive_records, valid_stream_id
+    from quant_platform_kit.strategy_lifecycle.performance_store import PerformanceStore
+    from sync_binance_live_runs import BinanceLiveRunsError, DOMAIN, STRATEGY_PROFILE
+
+    parsed = urlsplit(uri)
+    if (parsed.scheme != 'gs' or not parsed.netloc or not parsed.path.strip('/')
+            or parsed.query or parsed.fragment or parsed.username or parsed.password
+            or not valid_stream_id(stream_id)
+            or not re.fullmatch(r'[0-9a-f]{64}', account_scope_sha256)):
+        raise BinanceLiveRunsError('archive_binding_invalid')
+    prefix = parsed.path.strip('/') + '/'
+    bucket = client.bucket(parsed.netloc)
+    local_root = root / 'monitor/data/lifecycle-store'
+    stream_root = local_root / 'live_runs' / DOMAIN / STRATEGY_PROFILE / 'streams' / stream_id
+    existing = []
+    if stream_root.exists():
+        for path in sorted(stream_root.rglob('*.json')):
+            try:
+                value = json.loads(path.read_text(encoding='utf-8'))
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise BinanceLiveRunsError('existing_record_read_failed') from exc
+            if not isinstance(value, dict):
+                raise BinanceLiveRunsError('existing_record_invalid')
+            existing.append(value)
+
+    def list_page(token):
+        iterator = client.list_blobs(bucket, prefix=prefix, page_token=token, page_size=1000)
+        page = next(iterator.pages, None)
+        objects = [] if page is None else [
+            {'name': blob.name, 'generation': str(blob.generation)} for blob in page
+            if blob.name.endswith('.json')
+        ]
+        return objects, iterator.next_page_token
+
+    def read_object(name, generation):
+        return bucket.blob(name, generation=int(generation)).download_as_bytes(
+            if_generation_match=int(generation), timeout=60, retry=None,
+        )
+
+    additions = prepare_archive_records(list_page, read_object, prefix=prefix, stream_id=stream_id,
+                                       account_scope_sha256=account_scope_sha256, existing_records=existing)
+    if write:
+        store = PerformanceStore(local_root=local_root)
+        for record in additions:
+            store.save_live_run_record(STRATEGY_PROFILE, DOMAIN, record, stream_id=stream_id)
+    return len(additions)
+
+
 def refresh_inputs(root):
     import sync_binance_live_runs
     import sync_lifecycle_artifacts
@@ -95,9 +147,33 @@ def refresh_inputs(root):
                     path.unlink()
                 elif path.exists():
                     shutil.rmtree(path)
+        uri = os.environ.get('BINANCE_REPORT_ARCHIVE_URI', '').strip()
+        stream = os.environ.get('BINANCE_REPORT_ARCHIVE_STREAM_ID', '').strip()
+        scope = os.environ.get('BINANCE_REPORT_ARCHIVE_ACCOUNT_SCOPE_SHA256', '').strip()
+        configured = bool(uri or stream or scope)
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             sync_lifecycle_artifacts.main([])
-            sync_binance_live_runs.run_from_environment()
+            if not configured:
+                sync_binance_live_runs.run_from_environment()
+        status_path = root / 'monitor/data/lifecycle-artifacts/binance-report-source.json'
+        if uri or stream or scope:
+            from google.cloud import storage
+            try:
+                try:
+                    client = storage.Client()
+                except Exception as exc:
+                    raise sync_binance_live_runs.BinanceLiveRunsError('archive_client_unavailable') from exc
+                refresh_binance_report_archive(root, client=client, uri=uri,
+                                               stream_id=stream, account_scope_sha256=scope)
+            except sync_binance_live_runs.BinanceLiveRunsError as exc:
+                source_status = {'status': 'error', 'reason': exc.reason}
+            else:
+                source_status = {'status': 'ready'}
+            source_status.update(schema_version='quant_monitor_binance_report_source.v1',
+                                 stream_id=stream, as_of=datetime.now(timezone.utc).isoformat())
+            sync_binance_live_runs._write_json(status_path, source_status)
+        elif status_path.exists():
+            status_path.unlink()
     finally:
         for key, value in previous.items():
             if value is None:
@@ -141,6 +217,26 @@ def main():
     from google.cloud import storage
     from monitor_cloud_state import CloudState
 
+    if os.environ.get('VERIFY_BINANCE_REPORT_ARCHIVE_ONLY') == 'true':
+        from sync_binance_live_runs import BinanceLiveRunsError
+        try:
+            with tempfile.TemporaryDirectory(prefix='binance-report-verify-') as directory:
+                count = refresh_binance_report_archive(
+                    Path(directory), client=storage.Client(),
+                    uri=os.environ.get('BINANCE_REPORT_ARCHIVE_URI', ''),
+                    stream_id=os.environ.get('BINANCE_REPORT_ARCHIVE_STREAM_ID', ''),
+                    account_scope_sha256=os.environ.get('BINANCE_REPORT_ARCHIVE_ACCOUNT_SCOPE_SHA256', ''),
+                    write=False,
+                )
+            print(json.dumps({'status': 'verified', 'records': count}))
+            return 0
+        except BinanceLiveRunsError as exc:
+            reason = exc.reason if re.fullmatch(r'[a-z_]{1,64}', exc.reason) else 'archive_verification_failed'
+            print(json.dumps({'status': 'unavailable', 'reason': reason}))
+            return 1
+        except Exception:
+            print(json.dumps({'status': 'unavailable', 'reason': 'archive_verification_failed'}))
+            return 1
     try:
         result = run_adapter(CloudState(storage.Client(), os.environ['MONITOR_INPUT_GCS_URI']),
                              verify_only=os.environ.get('VERIFY_STATE_ONLY') == 'true')

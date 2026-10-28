@@ -172,6 +172,24 @@ GitHub list/API failures mark only the `crypto` domain unavailable and leave the
 other domains unchanged. Without these variables the synchronizer does not
 access the network.
 
+The hosted input adapter can also read a protected execution-report archive.
+Set `BINANCE_REPORT_ARCHIVE_URI` to the exact approved `gs://` profile prefix,
+`BINANCE_REPORT_ARCHIVE_STREAM_ID` to its lifecycle stream, and
+`BINANCE_REPORT_ARCHIVE_ACCOUNT_SCOPE_SHA256` to the verified account scope.
+All three are required together; leaving all unset preserves the existing path.
+The input identity needs read-only list and generation-specific object access.
+Archive read failures mark the Binance live profile unavailable; unrelated profiles
+and paper runs are skipped. Reports and account values remain in the protected input bundle.
+Archive import does not establish current coverage or enable trading.
+Set `VERIFY_BINANCE_REPORT_ARCHIVE_ONLY=true` to check the archive with the
+current identity in an isolated temporary directory, without reading or writing
+the input bundle. The result contains only a status, count or fixed error code.
+This mode does not run the existing input-bundle verification or refresh.
+In the hosted workflow, select `verify_binance_report_archive_only`; neither GitHub
+App token nor Issue delivery is used. Supply the corresponding repository variables
+`QUANT_MONITOR_BINANCE_REPORT_ARCHIVE_URI`, `QUANT_MONITOR_BINANCE_STREAM_ID`,
+and `QUANT_MONITOR_BINANCE_REPORT_SCOPE_SHA256`.
+
 Health and daily additionally need `BINANCE_LIVE_MONITOR_STREAM_ID`,
 `BINANCE_LIVE_MONITOR_REQUIRED_START_AT`, and
 `BINANCE_LIVE_MONITOR_REQUIRED_END_AT` to consume a Binance live profile range.

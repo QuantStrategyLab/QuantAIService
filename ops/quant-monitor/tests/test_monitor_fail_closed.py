@@ -1899,6 +1899,59 @@ class TrustedProfileCoverageTests(unittest.TestCase):
                 self.assertEqual(error, reason)
         run_monitor.assert_not_called()
 
+    def test_archive_source_failure_does_not_reuse_live_or_block_research(self) -> None:
+        now = HEALTH_CYCLE.datetime(2026, 10, 13, tzinfo=HEALTH_CYCLE.timezone.utc)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            status = root / "data/lifecycle-artifacts/binance-report-source.json"
+            status.parent.mkdir(parents=True)
+            env = {"QUANT_MONITOR_ROOT": str(root), "BINANCE_LIVE_MONITOR_STREAM_ID": "synthetic",
+                   "BINANCE_LIVE_MONITOR_REQUIRED_START_AT": "2026-10-01T00:00:00Z",
+                   "BINANCE_LIVE_MONITOR_REQUIRED_END_AT": "2026-10-13T00:00:00Z"}
+            research = types.SimpleNamespace(domain="crypto", strategy_profile="research")
+            run_monitor = mock.Mock(return_value=[research])
+            for source_status in ("error", "stale", "wrong_stream", "invalid"):
+                data = {"schema_version": "quant_monitor_binance_report_source.v1", "status": "ready",
+                        "stream_id": "synthetic", "as_of": now.isoformat()}
+                if source_status == "error":
+                    data["status"] = "error"
+                if source_status == "stale":
+                    data["as_of"] = (now - HEALTH_CYCLE.timedelta(hours=3)).isoformat()
+                if source_status == "wrong_stream":
+                    data["stream_id"] = "other"
+                status.write_text("{" if source_status == "invalid" else json.dumps(data))
+                with self.subTest(source_status=source_status):
+                    rows, error = HEALTH_CYCLE._run_binance_live_profile_monitor(
+                        run_monitor, source_revision="a" * 40, env=env, now=now,
+                    )
+                    self.assertEqual((rows, error), ([], "live_archive_source_unavailable"))
+                    run_monitor.assert_not_called()
+            original = HEALTH_CYCLE._run_binance_live_profile_monitor
+            with mock.patch.object(HEALTH_CYCLE, "_run_binance_live_profile_monitor", side_effect=lambda fn, **kwargs: original(fn, now=now, **kwargs)):
+                rows, error = HEALTH_CYCLE._run_expected_monitor_profiles(
+                    run_monitor, "crypto", ["crypto_live_pool_rotation", "research"], "a" * 40, env=env,
+                )
+            self.assertEqual(error, "live_archive_source_unavailable")
+            self.assertEqual(rows, [research])
+
+    def test_fresh_archive_source_does_not_qualify_stale_financial_window(self) -> None:
+        now = HEALTH_CYCLE.datetime(2026, 10, 13, tzinfo=HEALTH_CYCLE.timezone.utc)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            status = root / "data/lifecycle-artifacts/binance-report-source.json"
+            status.parent.mkdir(parents=True)
+            status.write_text(json.dumps({"schema_version": "quant_monitor_binance_report_source.v1",
+                                         "status": "ready", "stream_id": "synthetic", "as_of": now.isoformat()}))
+            env = {"QUANT_MONITOR_ROOT": str(root), "BINANCE_LIVE_MONITOR_STREAM_ID": "synthetic",
+                   "BINANCE_LIVE_MONITOR_REQUIRED_START_AT": "2026-10-01T00:00:00Z",
+                   "BINANCE_LIVE_MONITOR_REQUIRED_END_AT": "2026-10-12T00:00:00Z"}
+            run_monitor = mock.Mock()
+            rows, error = HEALTH_CYCLE._run_binance_live_profile_monitor(
+                run_monitor, source_revision="a" * 40, env=env, now=now,
+            )
+            self.assertEqual((rows, error), ([], "live_coverage_stale"))
+            run_monitor.assert_not_called()
+
     def test_live_profile_failure_does_not_block_crypto_research_profile(self) -> None:
         research = types.SimpleNamespace(domain="crypto", strategy_profile="crypto_research")
         calls = []
