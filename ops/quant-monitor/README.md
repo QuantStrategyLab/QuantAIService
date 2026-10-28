@@ -162,6 +162,9 @@ A protected production source can instead set
 approved 40-character `BINANCE_LIVE_RUNS_WORKFLOW_SHA`. A selected run with a
 different revision blocks the sync; a window spanning multiple revisions must be
 qualified separately. Neither variable enables a strategy or grants authority.
+For the hosted input adapter, supply these as the repository variables
+`QUANT_MONITOR_BINANCE_WORKFLOW_BRANCH` and `QUANT_MONITOR_BINANCE_WORKFLOW_SHA`;
+unset variables retain the existing default and do not enable synchronization.
 The producer's redacted health-only export has no financial interval: it remains
 an unknown gap (`redacted_interval_unavailable`), not a return or ready result.
 A missing or failed run records an unknown barrier for the corresponding UTC day;

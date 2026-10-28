@@ -68,6 +68,8 @@ jobs:
           BINANCE_LIVE_RUNS_SYNC_ENABLED: ${{ vars.QUANT_MONITOR_BINANCE_SYNC_ENABLED }}
           BINANCE_LIVE_RUNS_START_AT: ${{ vars.QUANT_MONITOR_BINANCE_START_AT }}
           BINANCE_LIVE_RUNS_STREAM_ID: ${{ vars.QUANT_MONITOR_BINANCE_STREAM_ID }}
+          BINANCE_LIVE_RUNS_WORKFLOW_BRANCH: ${{ vars.QUANT_MONITOR_BINANCE_WORKFLOW_BRANCH }}
+          BINANCE_LIVE_RUNS_WORKFLOW_SHA: ${{ vars.QUANT_MONITOR_BINANCE_WORKFLOW_SHA }}
         run: python -B ops/quant-monitor/scripts/monitor_inputs.py
       - name: Mint issue-only token for the four registered repositories
         if: env.VERIFY_STATE_ONLY != 'true' && vars.QUANT_MONITOR_ISSUE_DELIVERY_ENABLED == 'true'
