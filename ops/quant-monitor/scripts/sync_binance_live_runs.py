@@ -41,6 +41,7 @@ MAX_RECORD_KEYS = 32
 UTC = timezone.utc
 _SAFE_STREAM = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
 _INTERVAL_KEYS = frozenset({
     "account_scope_sha256",
     "start_at",
@@ -178,11 +179,17 @@ def _trusted_strategy_runs(
     *,
     start_at: datetime,
     end_at: datetime,
+    workflow_branch: str = "main",
+    workflow_sha: str = "",
 ) -> list[dict[str, Any]]:
+    workflow_branch, workflow_sha = _workflow_source({
+        "BINANCE_LIVE_RUNS_WORKFLOW_BRANCH": workflow_branch,
+        "BINANCE_LIVE_RUNS_WORKFLOW_SHA": workflow_sha,
+    })
     path = (
         f"/repos/{REPOSITORY}/actions/workflows/main.yml/runs?"
         + urlencode({
-            "branch": "main",
+            "branch": workflow_branch,
             "event": "workflow_dispatch",
             "created": f">={start_at.strftime('%Y-%m-%dT%H:%M:%SZ')}",
             "per_page": 100,
@@ -192,7 +199,7 @@ def _trusted_strategy_runs(
     for raw in _run_pages(gh_json, path, "workflow_runs"):
         if (
             raw.get("event") != "workflow_dispatch"
-            or raw.get("head_branch") != "main"
+            or raw.get("head_branch") != workflow_branch
             or raw.get("path") != WORKFLOW_PATH
             or raw.get("display_title") != WORKFLOW_DISPLAY_TITLE
         ):
@@ -203,6 +210,8 @@ def _trusted_strategy_runs(
         created_at = _parse_utc(raw.get("created_at"))
         if created_at < start_at or created_at > end_at:
             continue
+        if workflow_sha and raw.get("head_sha") != workflow_sha:
+            raise BinanceLiveRunsError("workflow_revision_mismatch", unknown_days={created_at.date().isoformat()})
         try:
             run_id = int(raw.get("id"))
             run_attempt = int(raw.get("run_attempt"))
@@ -324,6 +333,11 @@ def _validate_record(raw: bytes, *, run_start: datetime, run_end: datetime) -> d
         raise BinanceLiveRunsError("execution_result_invalid", unknown_days={recorded_at.date().isoformat()})
     if set(result) - _ALLOWED_RESULT_KEYS:
         raise BinanceLiveRunsError("execution_result_contains_unknown_fields", unknown_days={recorded_at.date().isoformat()})
+    redacted_keys = {"platform", "status", "external_cash_flow"}
+    if (set(result) in (redacted_keys, redacted_keys | {"error_code"})
+            and result.get("status") in {"ok", "aborted", "error", "unknown"}
+            and result.get("external_cash_flow") is None):
+        raise BinanceLiveRunsError("redacted_interval_unavailable", unknown_days={recorded_at.date().isoformat()})
     required_result_keys = {
         "platform",
         "status",
@@ -432,6 +446,8 @@ def sync_live_runs(
     store: Any,
     lifecycle_status_path: Path,
     stream_id: str = "binance",
+    workflow_branch: str = "main",
+    workflow_sha: str = "",
 ) -> dict[str, Any]:
     start_at = start_at.astimezone(UTC)
     now = now.astimezone(UTC)
@@ -440,7 +456,10 @@ def sync_live_runs(
     effective_start = max(start_at, now - timedelta(days=MAX_RECENT_DAYS))
     if not _SAFE_STREAM.fullmatch(stream_id):
         raise BinanceLiveRunsError("stream_id_invalid")
-    runs = _trusted_strategy_runs(gh_json, start_at=effective_start, end_at=now)
+    runs = _trusted_strategy_runs(
+        gh_json, start_at=effective_start, end_at=now,
+        workflow_branch=workflow_branch, workflow_sha=workflow_sha,
+    )
     pending: list[dict[str, Any]] = []
     seen: dict[tuple[str, str], dict[str, Any]] = {}
     gap_days: set[str] = set()
@@ -575,6 +594,16 @@ def _env_datetime(env: Mapping[str, str], key: str) -> datetime:
     return _parse_utc(raw)
 
 
+def _workflow_source(env: Mapping[str, str]) -> tuple[str, str]:
+    branch = str(env.get("BINANCE_LIVE_RUNS_WORKFLOW_BRANCH") or "main").strip()
+    revision = str(env.get("BINANCE_LIVE_RUNS_WORKFLOW_SHA") or "").strip()
+    if (branch not in {"main", "runtime-production"}
+            or (revision and not _GIT_SHA.fullmatch(revision))
+            or (branch == "runtime-production" and not revision)):
+        raise BinanceLiveRunsError("workflow_source_invalid")
+    return branch, revision
+
+
 def run_from_environment(
     *,
     env: Mapping[str, str] | None = None,
@@ -589,6 +618,7 @@ def run_from_environment(
     lifecycle_status_path = root / "data" / "lifecycle-artifacts" / "status.json"
     try:
         start_at = _env_datetime(env, "BINANCE_LIVE_RUNS_START_AT")
+        workflow_branch, workflow_sha = _workflow_source(env)
         current = (now or datetime.now(UTC)).astimezone(UTC)
         from quant_platform_kit.strategy_lifecycle.performance_store import PerformanceStore
 
@@ -600,6 +630,8 @@ def run_from_environment(
             store=PerformanceStore.from_env(),
             lifecycle_status_path=lifecycle_status_path,
             stream_id=str(env.get("BINANCE_LIVE_RUNS_STREAM_ID") or "binance"),
+            workflow_branch=workflow_branch,
+            workflow_sha=workflow_sha,
         )
     except BinanceLiveRunsError as exc:
         current = (now or datetime.now(UTC)).astimezone(UTC)

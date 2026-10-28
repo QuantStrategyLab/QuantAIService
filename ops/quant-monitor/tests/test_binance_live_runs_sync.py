@@ -133,6 +133,76 @@ class BinanceLiveRunsSyncTests(unittest.TestCase):
         )
         return path
 
+    def test_production_runs_require_exact_approved_workflow_revision(self):
+        revision = "a" * 40
+        run = {**self.run, "head_branch": "runtime-production", "head_sha": revision}
+        queries = []
+
+        def gh(path):
+            queries.append(path)
+            return {"workflow_runs": [run]}
+
+        selected = SYNC._trusted_strategy_runs(
+            gh, start_at=self.start, end_at=self.now,
+            workflow_branch="runtime-production", workflow_sha=revision,
+        )
+        self.assertEqual([item["id"] for item in selected], [123])
+        self.assertIn("branch=runtime-production", queries[0])
+        run["head_sha"] = "b" * 40
+        with self.assertRaisesRegex(SYNC.BinanceLiveRunsError, "workflow_revision_mismatch"):
+            SYNC._trusted_strategy_runs(
+                gh, start_at=self.start, end_at=self.now,
+                workflow_branch="runtime-production", workflow_sha=revision,
+            )
+
+    def test_production_ref_requires_a_full_approved_revision(self):
+        for env in (
+            {"BINANCE_LIVE_RUNS_WORKFLOW_BRANCH": "runtime-production"},
+            {"BINANCE_LIVE_RUNS_WORKFLOW_BRANCH": "runtime-production", "BINANCE_LIVE_RUNS_WORKFLOW_SHA": "abc"},
+            {"BINANCE_LIVE_RUNS_WORKFLOW_BRANCH": "untrusted", "BINANCE_LIVE_RUNS_WORKFLOW_SHA": "a" * 40},
+        ):
+            with self.subTest(env=env), self.assertRaises(SYNC.BinanceLiveRunsError):
+                SYNC._workflow_source(env)
+
+    def test_redacted_export_remains_an_explicit_unknown_gap(self):
+        record = _record()
+        record["execution_result"] = {
+            "platform": "binance", "status": "ok", "external_cash_flow": None,
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            store = FakeStore()
+            self.run["run_attempt"] = 1
+            self.run["head_branch"] = "runtime-production"
+            self.run["head_sha"] = "a" * 40
+            api = self._gh(_archive(record))
+            result = SYNC.sync_live_runs(
+                start_at=self.start, now=self.now, gh_json=api,
+                gh_bytes=lambda path: api(path, binary=True), store=store,
+                lifecycle_status_path=self._status_path(Path(tmp)),
+                workflow_branch="runtime-production", workflow_sha="a" * 40,
+            )
+            self.assertEqual(result["status"], "ready_with_gaps")
+            saved = next(iter(store.records.values()))
+            self.assertEqual(saved["execution_result"]["status"], "unknown")
+            self.assertEqual(saved["_source"]["entries"][0]["reason"], "redacted_interval_unavailable")
+            self.assertIsNone(saved["execution_result"]["external_cash_flow_interval"])
+
+    def test_revision_mismatch_does_not_write_or_fetch_artifacts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = FakeStore()
+            self.run.update(head_branch="runtime-production", head_sha="b" * 40)
+            def gh(path):
+                self.assertIn("/actions/workflows/main.yml/runs?", path)
+                return {"workflow_runs": [self.run]}
+            with self.assertRaisesRegex(SYNC.BinanceLiveRunsError, "workflow_revision_mismatch"):
+                SYNC.sync_live_runs(
+                    start_at=self.start, now=self.now, gh_json=gh,
+                    gh_bytes=lambda path: self.fail("unexpected artifact read"),
+                    store=store, lifecycle_status_path=self._status_path(Path(tmp)),
+                    workflow_branch="runtime-production", workflow_sha="a" * 40,
+                )
+            self.assertEqual(store.records, {})
+
     def test_imports_each_run_attempt_and_preserves_recorded_at(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

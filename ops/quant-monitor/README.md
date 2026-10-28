@@ -155,8 +155,15 @@ Alert routing:
 Disabled unless configured. With `BINANCE_LIVE_RUNS_SYNC_ENABLED=1` and a
 producer-published `BINANCE_LIVE_RUNS_START_AT` (a UTC ISO timestamp), the
 synchronizer reads ordinary `workflow_dispatch` strategy runs from the
-`main.yml` workflow on the `main` branch and accepts the exact
+`main.yml` workflow on the `main` branch by default and accepts the exact
 `binance-live-run-<run_id>-<run_attempt>` artifact containing `lifecycle-run.json`.
+A protected production source can instead set
+`BINANCE_LIVE_RUNS_WORKFLOW_BRANCH=runtime-production` together with the exact
+approved 40-character `BINANCE_LIVE_RUNS_WORKFLOW_SHA`. A selected run with a
+different revision blocks the sync; a window spanning multiple revisions must be
+qualified separately. Neither variable enables a strategy or grants authority.
+The producer's redacted health-only export has no financial interval: it remains
+an unknown gap (`redacted_interval_unavailable`), not a return or ready result.
 A missing or failed run records an unknown barrier for the corresponding UTC day;
 GitHub list/API failures mark only the `crypto` domain unavailable and leave the
 other domains unchanged. Without these variables the synchronizer does not
