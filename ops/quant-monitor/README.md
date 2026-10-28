@@ -186,7 +186,7 @@ current identity in an isolated temporary directory, without reading or writing
 the input bundle. The result contains only a status, count or fixed error code.
 This mode does not run the existing input-bundle verification or refresh.
 In the hosted workflow, select `verify_binance_report_archive_only`; neither GitHub
-App token nor Issue delivery is used. Supply the corresponding repository variables
+App token nor Issue delivery is used. Supply the corresponding protected repository secrets
 `QUANT_MONITOR_BINANCE_REPORT_ARCHIVE_URI`, `QUANT_MONITOR_BINANCE_STREAM_ID`,
 and `QUANT_MONITOR_BINANCE_REPORT_SCOPE_SHA256`.
 

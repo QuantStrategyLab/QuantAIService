@@ -213,6 +213,20 @@ def run_adapter(store, *, verify_only=False):
     return {'status': 'refreshed', 'audit_requests': 0}
 
 
+def _archive_error_details(exc):
+    cause = exc.__cause__
+    if cause is None:
+        return {}
+    known_types = {'Forbidden', 'Unauthorized', 'NotFound', 'BadRequest', 'TooManyRequests',
+                   'ServiceUnavailable', 'GoogleAPICallError', 'RetryError', 'TimeoutError', 'OSError'}
+    error_type = type(cause).__name__
+    result = {'error_type': error_type if error_type in known_types else 'Other'}
+    code = getattr(cause, 'code', None)
+    if isinstance(code, int) and not isinstance(code, bool) and 400 <= code <= 599:
+        result['http_status'] = int(code)
+    return result
+
+
 def main():
     from google.cloud import storage
     from monitor_cloud_state import CloudState
@@ -232,7 +246,7 @@ def main():
             return 0
         except BinanceLiveRunsError as exc:
             reason = exc.reason if re.fullmatch(r'[a-z_]{1,64}', exc.reason) else 'archive_verification_failed'
-            print(json.dumps({'status': 'unavailable', 'reason': reason}))
+            print(json.dumps({'status': 'unavailable', 'reason': reason, **_archive_error_details(exc)}))
             return 1
         except Exception:
             print(json.dumps({'status': 'unavailable', 'reason': 'archive_verification_failed'}))

@@ -216,3 +216,39 @@ def test_stream_key_alias_cannot_overwrite_existing_record(tmp_path):
         inputs.refresh_binance_report_archive(tmp_path, client=client, uri='gs://safe/reports',
                                              stream_id='a-b', account_scope_sha256='a' * 64)
     assert path.read_bytes() == before
+
+
+def test_archive_readonly_error_exposes_only_safe_cause_metadata(capsys):
+    from google.api_core.exceptions import Forbidden
+    from google.cloud import storage
+    from sync_binance_live_runs import BinanceLiveRunsError
+
+    try:
+        try:
+            raise Forbidden('private-uri private-principal financial-body')
+        except Forbidden as cause:
+            raise BinanceLiveRunsError('archive_list_failed') from cause
+    except BinanceLiveRunsError as error:
+        failure = error
+    with patch.dict(os.environ, {'VERIFY_BINANCE_REPORT_ARCHIVE_ONLY': 'true'}, clear=True), \
+         patch.object(storage, 'Client'), \
+         patch.object(inputs, 'refresh_binance_report_archive', side_effect=failure):
+        assert inputs.main() == 1
+    output = capsys.readouterr().out
+    assert json.loads(output) == {'status': 'unavailable', 'reason': 'archive_list_failed',
+                                  'error_type': 'Forbidden', 'http_status': 403}
+    assert 'private' not in output
+
+
+def test_archive_unknown_cause_is_not_exposed():
+    from sync_binance_live_runs import BinanceLiveRunsError
+
+    class PrivateSecret(Exception):
+        code = '403 private'
+    try:
+        try:
+            raise PrivateSecret('secret')
+        except PrivateSecret as cause:
+            raise BinanceLiveRunsError('archive_list_failed') from cause
+    except BinanceLiveRunsError as error:
+        assert inputs._archive_error_details(error) == {'error_type': 'Other'}
