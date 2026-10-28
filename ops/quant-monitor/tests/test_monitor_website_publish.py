@@ -93,6 +93,90 @@ class WebsitePublishTests(unittest.TestCase):
             self.assertNotIn('synthetic-token', receipt)
             self.assertIsNone(json.loads(receipt)['snapshot_sha256'])
 
+    def test_fixed_failure_reasons_never_include_private_detail_and_send_at_most_once(self):
+        from urllib.error import HTTPError
+        url = 'https://synthetic.invalid/api/internal/sync-strategy-health'
+        cases = [
+            ('http_rejected', HTTPError(url, 403, 'SENTINEL_PRIVATE', {}, None), None),
+            ('transport_unknown', TimeoutError('SENTINEL_PRIVATE'), None),
+            ('response_invalid', None, b'SENTINEL_PRIVATE'),
+            ('ack_mismatch', None, b'{"ok":false,"message":"SENTINEL_PRIVATE"}'),
+            ('accepted', None, b'{"ok":true}'),
+        ]
+        for reason, error, body in cases:
+            with self.subTest(reason=reason), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                snapshot = root / 'monitor/data/health/strategy_health_dashboard.v1.json'
+                snapshot.parent.mkdir(parents=True)
+                snapshot.write_text('{"schema_version":"strategy_health_dashboard.v1"}')
+                opener = MagicMock()
+                if error:
+                    opener.open.side_effect = error
+                else:
+                    response = opener.open.return_value.__enter__.return_value
+                    response.status = 200
+                    response.read.return_value = body
+                with patch('monitor_website_publish.read_sync_token', return_value='SENTINEL_TOKEN'):
+                    status = publish_saved_snapshot(root, checkpoint=Mock(), url=url, secret_version=VERSION, opener=opener)
+                receipt = (snapshot.parent / 'website-publication.json').read_text()
+                self.assertEqual(json.loads(receipt)['reason'], reason)
+                self.assertEqual(json.loads(receipt)['http_status'], {'http_rejected': 403, 'transport_unknown': None}.get(reason, 200))
+                self.assertEqual(status, 'accepted' if reason == 'accepted' else 'unconfirmed')
+                self.assertNotIn('SENTINEL', receipt)
+                opener.open.assert_called_once()
+
+    def test_http_status_is_bounded_and_never_contains_private_details(self):
+        from urllib.error import HTTPError
+        url = 'https://synthetic.invalid/api/internal/sync-strategy-health'
+        cases = [(HTTPError(url, code, 'SENTINEL', {}, None), expected)
+                 for code, expected in ((401, 401), (403, 403), (404, 404), (500, 500), (599, 599),
+                                        (99, None), (600, None), (True, None))]
+        cases.append((TimeoutError('SENTINEL'), None))
+        for error, expected in cases:
+            with self.subTest(expected=expected), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                snapshot = root / 'monitor/data/health/strategy_health_dashboard.v1.json'
+                snapshot.parent.mkdir(parents=True)
+                snapshot.write_text('{"schema_version":"strategy_health_dashboard.v1"}')
+                opener = Mock()
+                opener.open.side_effect = error
+                with patch('monitor_website_publish.read_sync_token', return_value='SENTINEL_TOKEN'):
+                    publish_saved_snapshot(root, checkpoint=Mock(), url=url, secret_version=VERSION, opener=opener)
+                raw = (snapshot.parent / 'website-publication.json').read_text()
+                self.assertEqual(json.loads(raw)['http_status'], expected)
+                self.assertNotIn('SENTINEL', raw)
+                opener.open.assert_called_once()
+
+    def test_response_read_failure_preserves_observed_status_without_replay(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            snapshot = root / 'monitor/data/health/strategy_health_dashboard.v1.json'
+            snapshot.parent.mkdir(parents=True)
+            snapshot.write_text('{"schema_version":"strategy_health_dashboard.v1"}')
+            opener = MagicMock()
+            response = opener.open.return_value.__enter__.return_value
+            response.status = 200
+            response.read.side_effect = TimeoutError('SENTINEL')
+            with patch('monitor_website_publish.read_sync_token', return_value='SENTINEL_TOKEN'):
+                status = publish_saved_snapshot(root, checkpoint=Mock(),
+                                                url='https://synthetic.invalid/api/internal/sync-strategy-health',
+                                                secret_version=VERSION, opener=opener)
+            raw = (snapshot.parent / 'website-publication.json').read_text()
+            self.assertEqual((status, json.loads(raw)['reason'], json.loads(raw)['http_status']),
+                             ('unconfirmed', 'transport_unknown', 200))
+            self.assertNotIn('SENTINEL', raw)
+            opener.open.assert_called_once()
+
+    def test_pre_send_failures_do_not_send(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            opener = Mock()
+            with patch('monitor_website_publish.read_sync_token', side_effect=RuntimeError('SENTINEL')):
+                status = publish_saved_snapshot(root, checkpoint=Mock(), url='bad', secret_version=VERSION, opener=opener)
+            receipt = json.loads((root / 'monitor/data/health/website-publication.json').read_text())
+            self.assertEqual((status, receipt['reason'], receipt['http_status']), ('unconfirmed', 'credential_unavailable', None))
+            opener.open.assert_not_called()
+
     def test_original_snapshot_and_dedicated_token_are_sent_once_in_memory(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'snapshot.json'
@@ -119,7 +203,7 @@ class WebsitePublishTests(unittest.TestCase):
                 publish_snapshot(path, url='https://synthetic.invalid/other', token='synthetic', opener=opener)
             opener.open.assert_not_called()
             opener.open.side_effect = TimeoutError()
-            with self.assertRaisesRegex(StateUnavailable, 'unconfirmed'):
+            with self.assertRaisesRegex(StateUnavailable, 'transport_unknown'):
                 publish_snapshot(path, url='https://synthetic.invalid/api/internal/sync-strategy-health',
                                  token='synthetic', opener=opener)
             opener.open.assert_called_once()

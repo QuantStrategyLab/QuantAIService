@@ -6,10 +6,21 @@ import hashlib
 import json
 import re
 from datetime import datetime, timezone
+import urllib.error
 import urllib.parse
 import urllib.request
 
 from monitor_cloud_state import StateUnavailable
+
+
+def bounded_http_status(value):
+    return value if type(value) is int and 100 <= value <= 599 else None
+
+
+class PublicationError(StateUnavailable):
+    def __init__(self, reason, http_status=None):
+        super().__init__(reason)
+        self.http_status = bounded_http_status(http_status)
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -53,7 +64,7 @@ def publish_saved_snapshot(root, *, checkpoint, url, secret_version, session=Non
     path = root / 'monitor/data/health/website-publication.json'
     path.parent.mkdir(parents=True, exist_ok=True)
     receipt = {'schema_version': 'quant.monitor-website-publication.v1', 'status': 'unconfirmed',
-               'snapshot_sha256': None, 'recorded_at': datetime.now(timezone.utc).isoformat()}
+               'snapshot_sha256': None, 'http_status': None, 'recorded_at': datetime.now(timezone.utc).isoformat()}
     try:
         receipt['snapshot_sha256'] = hashlib.sha256(snapshot.read_bytes()).hexdigest()
     except OSError:
@@ -63,32 +74,62 @@ def publish_saved_snapshot(root, *, checkpoint, url, secret_version, session=Non
     checkpoint()
     try:
         token = read_sync_token(secret_version, session=session)
-        publish_snapshot(snapshot, url=url, token=token, opener=opener)
     except Exception:
-        # Preserve unconfirmed; no replay, raw exception or secret in the receipt.
-        pass
+        receipt['reason'] = 'credential_unavailable'
     else:
-        receipt['status'] = 'accepted'
-        path.write_text(json.dumps(receipt, sort_keys=True))
+        try:
+            receipt['http_status'] = bounded_http_status(publish_snapshot(snapshot, url=url, token=token, opener=opener))
+        except PublicationError as exc:
+            receipt['http_status'] = bounded_http_status(exc.http_status)
+            reason = str(exc)
+            receipt['reason'] = reason if reason in {'binding_invalid', 'snapshot_invalid', 'http_rejected',
+                                                      'transport_unknown', 'response_invalid', 'ack_mismatch'} else 'transport_unknown'
+        except Exception:
+            receipt['reason'] = 'transport_unknown'
+        else:
+            receipt['status'] = 'accepted'
+            receipt['reason'] = 'accepted'
+    path.write_text(json.dumps(receipt, sort_keys=True))
     return receipt['status']
 
 
 def publish_snapshot(path, *, url, token, opener=None):
-    target = urllib.parse.urlsplit(url)
+    try:
+        target = urllib.parse.urlsplit(url)
+    except ValueError:
+        raise PublicationError('binding_invalid') from None
     if (target.scheme != 'https' or not target.hostname or target.username or target.password
             or target.query or target.fragment or target.path != '/api/internal/sync-strategy-health' or not token):
-        raise StateUnavailable('monitor_website_binding_invalid')
-    raw = path.read_bytes()
-    if len(raw) > 2 * 1024 * 1024 or json.loads(raw).get('schema_version') != 'strategy_health_dashboard.v1':
-        raise StateUnavailable('monitor_website_snapshot_invalid')
+        raise PublicationError('binding_invalid')
+    try:
+        raw = path.read_bytes()
+        value = json.loads(raw)
+        if len(raw) > 2 * 1024 * 1024 or not isinstance(value, dict) or value.get('schema_version') != 'strategy_health_dashboard.v1':
+            raise ValueError()
+    except (OSError, ValueError, TypeError):
+        raise PublicationError('snapshot_invalid') from None
     request = urllib.request.Request(url, data=raw, method='POST',
                                       headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token})
     opener = opener or urllib.request.build_opener(NoRedirect())
+    http_status = None
     try:
         with opener.open(request, timeout=20) as response:
+            http_status = bounded_http_status(response.status)
+            if response.status != 200:
+                raise PublicationError('http_rejected', response.status)
             body = response.read(65537)
-            if response.status != 200 or len(body) > 65536 or json.loads(body).get('ok') is not True:
-                raise ValueError()
-    except Exception as exc:
-        raise StateUnavailable('monitor_website_publish_unconfirmed') from exc
-
+    except urllib.error.HTTPError as exc:
+        raise PublicationError('http_rejected', exc.code) from None
+    except PublicationError:
+        raise
+    except Exception:
+        raise PublicationError('transport_unknown', http_status) from None
+    try:
+        if len(body) > 65536:
+            raise ValueError()
+        value = json.loads(body)
+    except (ValueError, TypeError):
+        raise PublicationError('response_invalid', 200) from None
+    if not isinstance(value, dict) or value.get('ok') is not True:
+        raise PublicationError('ack_mismatch', 200)
+    return 200
