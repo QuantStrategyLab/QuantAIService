@@ -31,4 +31,4 @@ GitHub Actions 的 OIDC 是业务工作流提交任务的身份，已经与助�
 
 本次结论不需要用户提供密码或密钥。新 OAuth 应用注册、授权服务部署、回调地址变更和生产配置切换尚未执行。
 
-共享的登录配置清单、助手执行指令和连接验收顺序见 PersonalAIService 的 [Dot / Grok 连接准备](../../../AIGateway/docs/upgrade-v2/NATIVE-CONNECTION.zh-CN.md)。该链接按本地多仓库工作区解析，正式发布时需替换为批准发布仓库的文档地址。
+共享的登录配置清单、助手执行指令和连接验收顺序见 PersonalAIService 仓库的 `docs/agent-connections.zh-CN.md`。该仓库为私有，此处不提供链接；本节只描述本仓库需要的身份配置。

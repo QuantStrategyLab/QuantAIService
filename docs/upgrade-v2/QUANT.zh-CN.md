@@ -14,7 +14,7 @@ SOXL、Global ETF、CN index ETF 的 prompt、冻结输入、来源校验、code
 
 旧 `service/`、`adapters/`、`client/`、模型部署和固定业务 workflow 已从活动源码删除；旧源码见 Git 基线及 [退役说明](RETIRED-V1.zh-CN.md)。两个服务 2.0.2 已通过正式 GitHub Release 发布并部署，采用时固定 release 的准确源码和 SHA256 清单；私有核心 wheel 只位于私有 release。生产调用方准入仍未开启，旧生产进程等待实际业务调用链验收后停用。历史审计、producer ID、来源 hash 和冻结记录保持原样。
 
-接口及产品文档依据见共享实现的 `docs/upgrade-v2/IMPLEMENTATION.zh-CN.md`。
+接口及产品文档依据见共享实现的 `docs/api-contract.zh-CN.md`。
 
 新服务使用独立 Keycloak realm、固定公开客户端与 PKCE S256，并已通过真实 GitHub OAuth；邮箱只用于云端登录，不进入 task JWT 或任务材料。旧看板配置的初次核对见 [登录配置核对](IDENTITY-INVENTORY.zh-CN.md)。
 
