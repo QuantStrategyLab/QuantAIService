@@ -150,6 +150,23 @@ def _run_binance_live_profile_monitor(run_monitor, *, source_revision: str, env=
     request, error = _binance_live_window(env, now=now)
     if error:
         return [], error
+    environment = os.environ if env is None else env
+    root = Path(environment.get("QUANT_MONITOR_ROOT") or Path(__file__).resolve().parents[1])
+    status_path = root / "data/lifecycle-artifacts/binance-report-source.json"
+    if status_path.exists():
+        try:
+            status = json.loads(status_path.read_text(encoding="utf-8"))
+            as_of = datetime.fromisoformat(status["as_of"].replace("Z", "+00:00"))
+            if as_of.tzinfo is None or as_of.utcoffset() is None:
+                raise ValueError("source status timestamp missing timezone")
+            age = (now or datetime.now(timezone.utc)).astimezone(timezone.utc) - as_of.astimezone(timezone.utc)
+            if (status.get("schema_version") != "quant_monitor_binance_report_source.v1"
+                    or status.get("stream_id") != request["stream_id"]
+                    or status.get("status") != "ready"
+                    or age > timedelta(hours=2) or age < -timedelta(minutes=5)):
+                return [], "live_archive_source_unavailable"
+        except (OSError, ValueError, TypeError, KeyError, AttributeError):
+            return [], "live_archive_source_unavailable"
     try:
         snapshots = list(run_monitor(
             "crypto",

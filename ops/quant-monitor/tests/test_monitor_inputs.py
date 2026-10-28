@@ -113,3 +113,106 @@ class InputBoundaryTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+def test_archive_reader_paginates_reads_exact_generation_and_is_idempotent(tmp_path):
+    from test_binance_report_input import report
+    raw = json.dumps(report()).encode()
+    blob = Mock(name='blob')
+    blob.name = 'reports/one.json'
+    blob.generation = 19
+    remote = Mock()
+    remote.download_as_bytes.return_value = raw
+    bucket = Mock()
+    bucket.blob.return_value = remote
+    page1 = Mock()
+    page1.pages = iter([[]])
+    page1.next_page_token = 'page2'
+    page2 = Mock()
+    page2.pages = iter([[blob]])
+    page2.next_page_token = None
+    client = Mock()
+    client.bucket.return_value = bucket
+    client.list_blobs.side_effect = [page1, page2]
+    args = dict(client=client, uri='gs://safe-bucket/reports', stream_id='synthetic', account_scope_sha256='a' * 64)
+    assert inputs.refresh_binance_report_archive(tmp_path, **args) == 1
+    remote.download_as_bytes.assert_called_once_with(if_generation_match=19, timeout=60, retry=None)
+    bucket.blob.assert_called_once_with(blob.name, generation=19)
+    page3 = Mock()
+    page3.pages = iter([[blob]])
+    page3.next_page_token = None
+    client.list_blobs.side_effect = [page3]
+    assert inputs.refresh_binance_report_archive(tmp_path, **args) == 0
+
+
+def test_archive_corrupt_existing_snapshot_never_becomes_empty(tmp_path):
+    from sync_binance_live_runs import BinanceLiveRunsError
+    path = tmp_path / 'monitor/data/lifecycle-store/live_runs/crypto/crypto_live_pool_rotation/streams/synthetic/bad.json'
+    path.parent.mkdir(parents=True)
+    path.write_text('{')
+    with unittest.TestCase().assertRaisesRegex(BinanceLiveRunsError, 'existing_record_read_failed'):
+        inputs.refresh_binance_report_archive(tmp_path, client=Mock(), uri='gs://safe-bucket/reports',
+                                             stream_id='synthetic', account_scope_sha256='a' * 64)
+
+
+def test_archive_failure_is_local_to_crypto_and_other_inputs_continue(tmp_path):
+    from google.cloud import storage
+    from sync_binance_live_runs import BinanceLiveRunsError
+    status = tmp_path / 'monitor/data/lifecycle-artifacts/status.json'
+    status.parent.mkdir(parents=True)
+    status.write_text(json.dumps({'schema_version': 'quant_monitor_lifecycle_artifact_status.v1',
+                                  'domains': {'us_equity': {'status': 'ready'}, 'crypto': {'status': 'ready'}}}))
+    env = {'BINANCE_REPORT_ARCHIVE_URI': 'gs://safe-bucket/reports',
+           'BINANCE_REPORT_ARCHIVE_STREAM_ID': 'synthetic',
+           'BINANCE_REPORT_ARCHIVE_ACCOUNT_SCOPE_SHA256': 'a' * 64}
+    with patch.dict(os.environ, env, clear=True), patch.object(sync, 'main'), \
+         patch('sync_binance_live_runs.run_from_environment'), patch.object(storage, 'Client'), \
+         patch.object(inputs, 'refresh_binance_report_archive', side_effect=BinanceLiveRunsError('archive_read_failed')):
+        inputs.refresh_inputs(tmp_path)
+    result = json.loads(status.read_text())
+    assert result['domains']['us_equity']['status'] == 'ready'
+    assert result['domains']['crypto']['status'] == 'ready'
+    source = json.loads((status.parent / 'binance-report-source.json').read_text())
+    assert source['status'] == 'error'
+    assert source['reason'] == 'archive_read_failed'
+
+
+def test_archive_verification_mode_does_not_access_input_store_or_write(tmp_path, capsys):
+    from google.cloud import storage
+    env = {'VERIFY_BINANCE_REPORT_ARCHIVE_ONLY': 'true', 'BINANCE_REPORT_ARCHIVE_URI': 'gs://safe/reports',
+           'BINANCE_REPORT_ARCHIVE_STREAM_ID': 'synthetic',
+           'BINANCE_REPORT_ARCHIVE_ACCOUNT_SCOPE_SHA256': 'a' * 64}
+    with patch.dict(os.environ, env, clear=True), patch.object(storage, 'Client'), \
+         patch.object(inputs, 'run_adapter', side_effect=AssertionError('must not access input store')), \
+         patch.object(inputs, 'refresh_binance_report_archive', return_value=2) as read:
+        assert inputs.main() == 0
+    assert read.call_args.kwargs['write'] is False
+    assert json.loads(capsys.readouterr().out) == {'status': 'verified', 'records': 2}
+
+
+def test_stream_key_alias_cannot_overwrite_existing_record(tmp_path):
+    from test_binance_report_input import report
+    from quant_platform_kit.strategy_lifecycle.performance_store import PerformanceStore
+    from sync_binance_live_runs import BinanceLiveRunsError
+    from binance_report_input import report_to_live_record
+
+    root = tmp_path / 'monitor/data/lifecycle-store'
+    store = PerformanceStore(local_root=root)
+    previous = report_to_live_record(report(), stream_id='a-b', account_scope_sha256='a' * 64,
+                                     source_sha256='b' * 64)
+    previous['lifecycle_stream_id'] = 'a:b'
+    store.save_live_run_record('crypto_live_pool_rotation', 'crypto', previous, stream_id='a:b')
+    path = next(root.rglob('*.json'))
+    before = path.read_bytes()
+    with unittest.TestCase().assertRaisesRegex(BinanceLiveRunsError, 'archive_binding_invalid'):
+        inputs.refresh_binance_report_archive(tmp_path, client=Mock(), uri='gs://safe/reports',
+                                             stream_id='a:b', account_scope_sha256='a' * 64)
+    client = Mock()
+    page = Mock()
+    page.pages = iter([[]])
+    page.next_page_token = None
+    client.list_blobs.return_value = page
+    with unittest.TestCase().assertRaisesRegex(BinanceLiveRunsError, 'existing_record_invalid'):
+        inputs.refresh_binance_report_archive(tmp_path, client=client, uri='gs://safe/reports',
+                                             stream_id='a-b', account_scope_sha256='a' * 64)
+    assert path.read_bytes() == before

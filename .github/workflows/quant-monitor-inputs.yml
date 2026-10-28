@@ -8,6 +8,10 @@ on:
         description: Validate saved inputs without refresh or Issue delivery
         type: boolean
         default: true
+      verify_binance_report_archive_only:
+        description: Read the bound Binance archive without writing input state
+        type: boolean
+        default: false
 permissions:
   contents: read
 concurrency:
@@ -27,6 +31,7 @@ jobs:
       MONITOR_INPUT_GCS_URI: ${{ vars.QUANT_MONITOR_INPUT_GCS_URI }}
       MONITOR_CORE_GCS_URI: ${{ vars.QUANT_MONITOR_CORE_GCS_URI }}
       VERIFY_STATE_ONLY: ${{ github.event_name == 'workflow_dispatch' && inputs.verify_state_only }}
+      VERIFY_BINANCE_REPORT_ARCHIVE_ONLY: ${{ github.event_name == 'workflow_dispatch' && inputs.verify_binance_report_archive_only }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
@@ -53,7 +58,7 @@ jobs:
           create_credentials_file: true
           export_environment_variables: true
       - name: Mint bounded source read token
-        if: env.VERIFY_STATE_ONLY != 'true'
+        if: env.VERIFY_STATE_ONLY != 'true' && env.VERIFY_BINANCE_REPORT_ARCHIVE_ONLY != 'true'
         id: reader
         uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
         with:
@@ -65,6 +70,9 @@ jobs:
       - name: Refresh or verify saved input data
         env:
           GH_TOKEN: ${{ steps.reader.outputs.token }}
+          BINANCE_REPORT_ARCHIVE_URI: ${{ vars.QUANT_MONITOR_BINANCE_REPORT_ARCHIVE_URI }}
+          BINANCE_REPORT_ARCHIVE_STREAM_ID: ${{ vars.QUANT_MONITOR_BINANCE_STREAM_ID }}
+          BINANCE_REPORT_ARCHIVE_ACCOUNT_SCOPE_SHA256: ${{ vars.QUANT_MONITOR_BINANCE_REPORT_SCOPE_SHA256 }}
           BINANCE_LIVE_RUNS_SYNC_ENABLED: ${{ vars.QUANT_MONITOR_BINANCE_SYNC_ENABLED }}
           BINANCE_LIVE_RUNS_START_AT: ${{ vars.QUANT_MONITOR_BINANCE_START_AT }}
           BINANCE_LIVE_RUNS_STREAM_ID: ${{ vars.QUANT_MONITOR_BINANCE_STREAM_ID }}
@@ -72,7 +80,7 @@ jobs:
           BINANCE_LIVE_RUNS_WORKFLOW_SHA: ${{ vars.QUANT_MONITOR_BINANCE_WORKFLOW_SHA }}
         run: python -B ops/quant-monitor/scripts/monitor_inputs.py
       - name: Mint issue-only token for the four registered repositories
-        if: env.VERIFY_STATE_ONLY != 'true' && vars.QUANT_MONITOR_ISSUE_DELIVERY_ENABLED == 'true'
+        if: env.VERIFY_STATE_ONLY != 'true' && env.VERIFY_BINANCE_REPORT_ARCHIVE_ONLY != 'true' && vars.QUANT_MONITOR_ISSUE_DELIVERY_ENABLED == 'true'
         id: writer
         uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
         with:
@@ -82,7 +90,7 @@ jobs:
           repositories: CnEquityStrategies,HkEquityStrategies,UsEquityStrategies,CryptoStrategies
           permission-issues: write
       - name: Consume fresh issue-only monitoring findings
-        if: env.VERIFY_STATE_ONLY != 'true' && vars.QUANT_MONITOR_ISSUE_DELIVERY_ENABLED == 'true'
+        if: env.VERIFY_STATE_ONLY != 'true' && env.VERIFY_BINANCE_REPORT_ARCHIVE_ONLY != 'true' && vars.QUANT_MONITOR_ISSUE_DELIVERY_ENABLED == 'true'
         env:
           GH_TOKEN: ${{ steps.writer.outputs.token }}
           ISSUE_DELIVERY_ENABLED: 'true'
