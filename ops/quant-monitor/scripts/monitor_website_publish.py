@@ -51,6 +51,11 @@ def classify_rejection(response):
                 'strategy health sync token is not configured': 'token_unconfigured',
                 'strategy health KV is not configured': 'kv_unconfigured',
             }.get(error, 'other') if isinstance(error, str) else 'other'
+        elif result['content_type'] == 'text' and (match := re.fullmatch(
+                rb'error code:[ \t]*(1010|1020)', body.strip(), re.I)):
+            result['body_read'] = 'complete'
+            code = match.group(1).decode('ascii')
+            result['body_marker'] = 'plain_error_' + code
         elif result['content_type'] == 'html' and re.search(rb'error\s+code\s*:\s*1020\b', body, re.I):
             result['body_read'] = 'complete'
             result['body_marker'] = 'cf_1020_marker'
