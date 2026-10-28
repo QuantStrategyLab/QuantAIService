@@ -165,11 +165,14 @@ class CloudJobTests(unittest.TestCase):
                 def website(root, *, checkpoint):
                     receipt = root / 'monitor/data/health/website-publication.json'
                     receipt.parent.mkdir(parents=True, exist_ok=True)
-                    receipt.write_text(json.dumps({'reason': reason, 'http_status': 'SENTINEL_PRIVATE'}))
+                    receipt.write_text(json.dumps({'reason': reason, 'http_status': 'SENTINEL_PRIVATE',
+                        'response_evidence': {'body_marker': 'SENTINEL_PRIVATE', 'challenge': ['SENTINEL_PRIVATE'],
+                                              'SENTINEL_PRIVATE': 'html'}}))
                     return 'unconfirmed'
                 result = job.run_once(store, self.evaluate, mode='run', execution_id='first', website_publish=website)
                 self.assertEqual(result['website_publication_reason'], 'unknown')
                 self.assertIsNone(result['website_publication_http_status'])
+                self.assertEqual(result['website_publication_response_evidence'], {})
                 self.assertNotIn('SENTINEL_PRIVATE', json.dumps(result))
 
     def test_uncertain_computation_save_stops_before_any_publication(self):
@@ -219,6 +222,30 @@ class CloudJobTests(unittest.TestCase):
                 patch.object(job, 'CloudState') as store:
             self.assertEqual(job.main(), 1)
             store.return_value.claim.assert_not_called()
+
+    def test_failure_log_allows_only_fixed_state_reasons_and_types(self):
+        storage = types.ModuleType('google.cloud.storage')
+        storage.Client = Mock()
+        google = types.ModuleType('google')
+        cloud = types.ModuleType('google.cloud')
+        google.cloud, cloud.storage = cloud, storage
+        cases = [(state.StateUnavailable('monitor_inputs_stale_or_invalid'), 'state_unavailable', 'monitor_inputs_stale_or_invalid'),
+                 (state.StateUnavailable('SENTINEL_PRIVATE'), 'state_unavailable', 'unknown'),
+                 (TimeoutError('SENTINEL_PRIVATE'), 'timeout', 'unknown'),
+                 (RuntimeError('SENTINEL_PRIVATE'), 'other', 'unknown')]
+        for exc, kind, code in cases:
+            with self.subTest(kind=kind, code=code):
+                output = io.StringIO()
+                with patch.dict(os.environ, {'MONITOR_MODE': 'run', 'MONITOR_STATE_GCS_URI': 'gs://synthetic/state',
+                                             'TELEGRAM_TOKEN': 'synthetic', 'GLOBAL_TELEGRAM_CHAT_ID': 'synthetic'}, clear=True), \
+                        patch.dict(sys.modules, {'google': google, 'google.cloud': cloud, 'google.cloud.storage': storage}), \
+                        patch.object(job, 'run_once', side_effect=exc), patch('sys.stdout', output):
+                    self.assertEqual(job.main(), 1)
+                raw = output.getvalue()
+                value = json.loads(raw)
+                self.assertEqual((value['reason'], value['failure_type'], value['failure_code']),
+                                 ('monitor_cycle_failed', kind, code))
+                self.assertNotIn('SENTINEL_PRIVATE', raw)
 
     def test_missing_website_binding_does_not_block_cli_and_is_reported_as_warning(self):
         storage = types.ModuleType('google.cloud.storage')

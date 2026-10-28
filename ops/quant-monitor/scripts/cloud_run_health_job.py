@@ -62,9 +62,20 @@ def run_once(store, evaluate, *, mode='preview', execution_id='', refresh=None, 
                 store.commit(pack(root), state_generation=generation, claim_generation=claim_generation)
             website_reason = 'not_requested'
             website_http_status = None
+            website_evidence = {}
             if mode == 'run' and website_publish is not None:
                 try:
                     receipt = json.loads((root / 'monitor/data/health/website-publication.json').read_text())
+                    evidence = receipt.get('response_evidence')
+                    if isinstance(evidence, dict):
+                        allowed = {'content_type': {'json', 'html', 'text', 'other', 'unknown'},
+                                   'challenge': {'challenge', 'absent_or_other', 'unknown'},
+                                   'cf_ray': {'present', 'absent', 'unknown'},
+                                   'body_read': {'complete', 'truncated', 'unknown'},
+                                   'body_marker': {'cf_1020_marker', 'token_invalid', 'token_unconfigured',
+                                                   'kv_unconfigured', 'other', 'unknown'}}
+                        website_evidence = {k: v for k, v in evidence.items()
+                                            if k in allowed and isinstance(v, str) and v in allowed[k]}
                     reason = receipt.get('reason')
                     status = receipt.get('http_status')
                     if type(status) is int and 100 <= status <= 599:
@@ -80,6 +91,7 @@ def run_once(store, evaluate, *, mode='preview', execution_id='', refresh=None, 
                     'snapshot_count': result['snapshot_count'], 'data_status': result['data_status'],
                     'website_publication': website_status, 'website_publication_reason': website_reason,
                     'website_publication_http_status': website_http_status,
+                    'website_publication_response_evidence': website_evidence,
                     'source_matches_runtime': manifest['source_revision'] == os.environ.get('MONITOR_SOURCE_REVISION'),
                     'qpk_matches_runtime': manifest['qpk_revision'] == os.environ.get('MONITOR_QPK_REVISION')}
     except Exception:
@@ -163,6 +175,29 @@ def publish_projections(client, uri, root, *, claim_generation):
                                 timeout=30, retry=None)
 
 
+FAILURE_CODES = frozenset({
+    'monitor_notification_binding_missing', 'monitor_inputs_stale_or_invalid', 'monitor_inputs_scope_invalid',
+    'state_read_failed', 'claim_outcome_unknown', 'checkpoint_outcome_unknown', 'release_outcome_unknown',
+    'state_write_too_large', 'workspace_invalid', 'workspace_link_not_portable', 'workspace_manifest_invalid',
+    'workspace_member_not_allowed', 'workspace_too_large',
+})
+
+
+def safe_failure(exc):
+    if isinstance(exc, StateUnavailable):
+        code = str(exc)
+        return {'failure_type': 'state_unavailable', 'failure_code': code if code in FAILURE_CODES else 'unknown'}
+    if isinstance(exc, TimeoutError):
+        kind = 'timeout'
+    elif isinstance(exc, OSError):
+        kind = 'os_error'
+    elif isinstance(exc, ValueError):
+        kind = 'value_error'
+    else:
+        kind = 'other'
+    return {'failure_type': kind, 'failure_code': 'unknown'}
+
+
 def main():
     mode = os.environ.get('MONITOR_MODE', 'preview')
     from google.cloud import storage
@@ -198,9 +233,10 @@ def main():
         healthy = result['healthy'] and result['website_publication'] != 'unconfirmed'
         print(json.dumps({'component': 'strategy_health', 'severity': 'INFO' if healthy else 'WARNING', **result}))
         return 0
-    except Exception:
+    except Exception as exc:
         print(json.dumps({'component': 'strategy_health', 'severity': 'ERROR',
-                          'status': 'unavailable', 'reason': 'monitor_cycle_failed', 'mode': mode}))
+                          'status': 'unavailable', 'reason': 'monitor_cycle_failed', 'mode': mode,
+                          **safe_failure(exc)}))
         return 1
 
 
