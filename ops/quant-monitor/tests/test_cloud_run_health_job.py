@@ -141,6 +141,7 @@ class CloudJobTests(unittest.TestCase):
                 return publish_saved_snapshot(root, checkpoint=checkpoint, url='synthetic', secret_version='synthetic')
             result = job.run_once(self.store, self.evaluate, mode='run', execution_id='first', website_publish=website)
             self.assertEqual(result['website_publication'], 'unconfirmed')
+            self.assertEqual(result['website_publication_reason'], 'credential_unavailable')
             self.assertIsNone(self.store.owner)
             with tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
@@ -155,6 +156,19 @@ class CloudJobTests(unittest.TestCase):
             self.assertEqual(again['status'], 'evaluated')
             self.assertIsNone(self.store.owner)
             self.assertEqual(read.call_count, 2)
+
+    def test_untrusted_website_reason_cannot_leak_or_fail_cycle(self):
+        for reason in (['SENTINEL_PRIVATE'], 'SENTINEL_PRIVATE'):
+            with self.subTest(reason=reason):
+                store = MemoryStore(self.store.raw)
+                def website(root, *, checkpoint):
+                    receipt = root / 'monitor/data/health/website-publication.json'
+                    receipt.parent.mkdir(parents=True, exist_ok=True)
+                    receipt.write_text(json.dumps({'reason': reason}))
+                    return 'unconfirmed'
+                result = job.run_once(store, self.evaluate, mode='run', execution_id='first', website_publish=website)
+                self.assertEqual(result['website_publication_reason'], 'unknown')
+                self.assertNotIn('SENTINEL_PRIVATE', json.dumps(result))
 
     def test_uncertain_computation_save_stops_before_any_publication(self):
         publish, website = Mock(), Mock()
