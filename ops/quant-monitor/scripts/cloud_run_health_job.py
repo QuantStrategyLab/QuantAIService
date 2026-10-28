@@ -62,9 +62,20 @@ def run_once(store, evaluate, *, mode='preview', execution_id='', refresh=None, 
                 store.commit(pack(root), state_generation=generation, claim_generation=claim_generation)
             website_reason = 'not_requested'
             website_http_status = None
+            website_evidence = {}
             if mode == 'run' and website_publish is not None:
                 try:
                     receipt = json.loads((root / 'monitor/data/health/website-publication.json').read_text())
+                    evidence = receipt.get('response_evidence')
+                    if isinstance(evidence, dict):
+                        allowed = {'content_type': {'json', 'html', 'text', 'other', 'unknown'},
+                                   'challenge': {'challenge', 'absent_or_other', 'unknown'},
+                                   'cf_ray': {'present', 'absent', 'unknown'},
+                                   'body_read': {'complete', 'truncated', 'unknown'},
+                                   'body_marker': {'cf_1020_marker', 'token_invalid', 'token_unconfigured',
+                                                   'kv_unconfigured', 'other', 'unknown'}}
+                        website_evidence = {k: v for k, v in evidence.items()
+                                            if k in allowed and isinstance(v, str) and v in allowed[k]}
                     reason = receipt.get('reason')
                     status = receipt.get('http_status')
                     if type(status) is int and 100 <= status <= 599:
@@ -80,6 +91,7 @@ def run_once(store, evaluate, *, mode='preview', execution_id='', refresh=None, 
                     'snapshot_count': result['snapshot_count'], 'data_status': result['data_status'],
                     'website_publication': website_status, 'website_publication_reason': website_reason,
                     'website_publication_http_status': website_http_status,
+                    'website_publication_response_evidence': website_evidence,
                     'source_matches_runtime': manifest['source_revision'] == os.environ.get('MONITOR_SOURCE_REVISION'),
                     'qpk_matches_runtime': manifest['qpk_revision'] == os.environ.get('MONITOR_QPK_REVISION')}
     except Exception:

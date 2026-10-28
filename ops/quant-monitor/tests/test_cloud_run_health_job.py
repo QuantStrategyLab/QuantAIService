@@ -165,11 +165,14 @@ class CloudJobTests(unittest.TestCase):
                 def website(root, *, checkpoint):
                     receipt = root / 'monitor/data/health/website-publication.json'
                     receipt.parent.mkdir(parents=True, exist_ok=True)
-                    receipt.write_text(json.dumps({'reason': reason, 'http_status': 'SENTINEL_PRIVATE'}))
+                    receipt.write_text(json.dumps({'reason': reason, 'http_status': 'SENTINEL_PRIVATE',
+                        'response_evidence': {'body_marker': 'SENTINEL_PRIVATE', 'challenge': ['SENTINEL_PRIVATE'],
+                                              'SENTINEL_PRIVATE': 'html'}}))
                     return 'unconfirmed'
                 result = job.run_once(store, self.evaluate, mode='run', execution_id='first', website_publish=website)
                 self.assertEqual(result['website_publication_reason'], 'unknown')
                 self.assertIsNone(result['website_publication_http_status'])
+                self.assertEqual(result['website_publication_response_evidence'], {})
                 self.assertNotIn('SENTINEL_PRIVATE', json.dumps(result))
 
     def test_uncertain_computation_save_stops_before_any_publication(self):

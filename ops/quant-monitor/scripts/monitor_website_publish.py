@@ -18,9 +18,48 @@ def bounded_http_status(value):
 
 
 class PublicationError(StateUnavailable):
-    def __init__(self, reason, http_status=None):
+    def __init__(self, reason, http_status=None, response_evidence=None):
         super().__init__(reason)
         self.http_status = bounded_http_status(http_status)
+        self.response_evidence = response_evidence
+
+
+def classify_rejection(response):
+    """Project bounded response markers only; no response text or headers leave memory."""
+    result = {'content_type': 'unknown', 'challenge': 'unknown', 'cf_ray': 'unknown',
+              'body_marker': 'unknown', 'body_read': 'unknown'}
+    try:
+        headers = response.headers
+        content_type = str(headers.get('Content-Type', '')).split(';', 1)[0].strip().lower()
+        result['content_type'] = {'application/json': 'json', 'text/html': 'html',
+                                  'text/plain': 'text'}.get(content_type, 'other' if content_type else 'unknown')
+        challenge = headers.get('cf-mitigated')
+        result['challenge'] = 'challenge' if challenge == 'challenge' else 'absent_or_other'
+        result['cf_ray'] = 'present' if headers.get('cf-ray') else 'absent'
+    except Exception:
+        return result
+    try:
+        body = response.read(4097)
+        if len(body) > 4096:
+            result['body_read'] = 'truncated'
+        elif result['content_type'] == 'json':
+            result['body_read'] = 'complete'
+            value = json.loads(body)
+            error = value.get('error') if isinstance(value, dict) else None
+            result['body_marker'] = {
+                'strategy health sync token is invalid': 'token_invalid',
+                'strategy health sync token is not configured': 'token_unconfigured',
+                'strategy health KV is not configured': 'kv_unconfigured',
+            }.get(error, 'other') if isinstance(error, str) else 'other'
+        elif result['content_type'] == 'html' and re.search(rb'error\s+code\s*:\s*1020\b', body, re.I):
+            result['body_read'] = 'complete'
+            result['body_marker'] = 'cf_1020_marker'
+        else:
+            result['body_read'] = 'complete'
+            result['body_marker'] = 'other'
+    except Exception:
+        result['body_marker'] = 'unknown'
+    return result
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -81,6 +120,8 @@ def publish_saved_snapshot(root, *, checkpoint, url, secret_version, session=Non
             receipt['http_status'] = bounded_http_status(publish_snapshot(snapshot, url=url, token=token, opener=opener))
         except PublicationError as exc:
             receipt['http_status'] = bounded_http_status(exc.http_status)
+            if exc.response_evidence is not None:
+                receipt['response_evidence'] = exc.response_evidence
             reason = str(exc)
             receipt['reason'] = reason if reason in {'binding_invalid', 'snapshot_invalid', 'http_rejected',
                                                       'transport_unknown', 'response_invalid', 'ack_mismatch'} else 'transport_unknown'
@@ -116,10 +157,17 @@ def publish_snapshot(path, *, url, token, opener=None):
         with opener.open(request, timeout=20) as response:
             http_status = bounded_http_status(response.status)
             if response.status != 200:
-                raise PublicationError('http_rejected', response.status)
+                raise PublicationError('http_rejected', response.status, classify_rejection(response))
             body = response.read(65537)
     except urllib.error.HTTPError as exc:
-        raise PublicationError('http_rejected', exc.code) from None
+        try:
+            evidence = classify_rejection(exc)
+        finally:
+            try:
+                exc.close()
+            except Exception:
+                pass
+        raise PublicationError('http_rejected', exc.code, evidence) from None
     except PublicationError:
         raise
     except Exception:

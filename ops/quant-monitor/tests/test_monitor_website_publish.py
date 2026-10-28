@@ -167,6 +167,57 @@ class WebsitePublishTests(unittest.TestCase):
             self.assertNotIn('SENTINEL', raw)
             opener.open.assert_called_once()
 
+    def test_rejected_response_evidence_is_bounded_and_redacted(self):
+        import io
+        from urllib.error import HTTPError
+        url = 'https://synthetic.invalid/api/internal/sync-strategy-health'
+        cases = [
+            ('text/html', b'<h1>Error code: 1020</h1>SENTINEL_PRIVATE', 'cf_1020_marker', 'complete'),
+            ('application/json', b'{"error":"strategy health sync token is invalid","detail":"SENTINEL_PRIVATE"}', 'token_invalid', 'complete'),
+            ('application/json', b'{"error":"SENTINEL_PRIVATE"}', 'other', 'complete'),
+            ('text/html', b'SENTINEL_PRIVATE' * 400, 'unknown', 'truncated'),
+        ]
+        for content_type, body, marker, read_status in cases:
+            with self.subTest(marker=marker), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                snapshot = root / 'monitor/data/health/strategy_health_dashboard.v1.json'
+                snapshot.parent.mkdir(parents=True)
+                snapshot.write_text('{"schema_version":"strategy_health_dashboard.v1"}')
+                headers = {'Content-Type': content_type, 'cf-mitigated': 'challenge',
+                           'cf-ray': 'SENTINEL_RAY', 'Server': 'SENTINEL_SERVER'}
+                stream = io.BytesIO(body)
+                opener = Mock()
+                opener.open.side_effect = HTTPError(url, 403, 'SENTINEL_ERROR', headers, stream)
+                with patch('monitor_website_publish.read_sync_token', return_value='SENTINEL_TOKEN'):
+                    status = publish_saved_snapshot(root, checkpoint=Mock(), url=url, secret_version=VERSION, opener=opener)
+                raw = (snapshot.parent / 'website-publication.json').read_text()
+                receipt = json.loads(raw)
+                self.assertEqual((status, receipt['http_status']), ('unconfirmed', 403))
+                self.assertEqual(receipt['response_evidence'], {'content_type': 'json' if content_type == 'application/json' else 'html',
+                    'challenge': 'challenge', 'cf_ray': 'present', 'body_marker': marker, 'body_read': read_status})
+                self.assertNotIn('SENTINEL', raw)
+                opener.open.assert_called_once()
+
+    def test_unknown_response_or_failed_body_read_preserves_unknown(self):
+        from urllib.error import HTTPError
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            snapshot = root / 'monitor/data/health/strategy_health_dashboard.v1.json'
+            snapshot.parent.mkdir(parents=True)
+            snapshot.write_text('{"schema_version":"strategy_health_dashboard.v1"}')
+            stream = Mock()
+            stream.read.side_effect = TimeoutError('SENTINEL_PRIVATE')
+            opener = Mock()
+            opener.open.side_effect = HTTPError('https://synthetic.invalid', 403, 'secret', {}, stream)
+            with patch('monitor_website_publish.read_sync_token', return_value='SENTINEL_TOKEN'):
+                publish_saved_snapshot(root, checkpoint=Mock(),
+                    url='https://synthetic.invalid/api/internal/sync-strategy-health', secret_version=VERSION, opener=opener)
+            raw = (snapshot.parent / 'website-publication.json').read_text()
+            self.assertEqual(json.loads(raw)['response_evidence']['body_marker'], 'unknown')
+            self.assertEqual(json.loads(raw)['response_evidence']['body_read'], 'unknown')
+            self.assertNotIn('SENTINEL', raw)
+            opener.open.assert_called_once()
+
     def test_pre_send_failures_do_not_send(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
