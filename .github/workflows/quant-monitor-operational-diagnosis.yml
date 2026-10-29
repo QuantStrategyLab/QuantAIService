@@ -4,6 +4,10 @@ on:
     - cron: '37 * * * *'
   workflow_dispatch:
     inputs:
+      verify_native_only:
+        description: Verify the native caller with synthetic input and no production ledger access
+        type: boolean
+        default: false
       verify_state_only:
         description: Check cloud state access without requesting a diagnosis
         type: boolean
@@ -15,7 +19,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   diagnose:
-    if: github.repository == 'QuantStrategyLab/QuantAIService' && github.ref == 'refs/heads/main'
+    if: github.repository == 'QuantStrategyLab/QuantAIService' && github.ref == 'refs/heads/main' && !inputs.verify_native_only
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -69,5 +73,37 @@ jobs:
         with:
           name: operational-diagnosis-receipt
           path: ${{ runner.temp }}/operational-diagnosis-receipt.json
+          if-no-files-found: error
+          retention-days: 14
+
+  verify-native:
+    if: github.repository == 'QuantStrategyLab/QuantAIService' && github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && inputs.verify_native_only && !inputs.verify_state_only
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+      - name: Verify the existing native caller with synthetic classification
+        env:
+          AI_SERVICE_DIAGNOSIS_READY: ${{ vars.AI_SERVICE_DIAGNOSIS_READY || 'false' }}
+          AI_SERVICE_URL: ${{ vars.AI_SERVICE_URL }}
+          AI_SERVICE_AUDIENCE: ${{ vars.AI_SERVICE_AUDIENCE }}
+          AI_SERVICE_DIAGNOSIS_MODEL: ${{ vars.AI_SERVICE_DIAGNOSIS_MODEL }}
+          AI_SERVICE_DIAGNOSIS_PROFILE: ${{ vars.AI_SERVICE_DIAGNOSIS_PROFILE || 'default' }}
+        run: python3 -B scripts/verify_native_diagnosis.py --workspace "$RUNNER_TEMP/native-verification"
+      - name: Save synthetic verification state and sanitized receipt
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: native-diagnosis-verification
+          path: ${{ runner.temp }}/native-verification
           if-no-files-found: error
           retention-days: 14
