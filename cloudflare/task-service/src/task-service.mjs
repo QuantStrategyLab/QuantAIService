@@ -1,3 +1,4 @@
+import {imageMaterials} from './image-materials.mjs';
 import {workerContext,workerProjects} from './projects.mjs';
 import {eventCatalog} from './webhooks.mjs';
 import {WorkerEntrypoint} from 'cloudflare:workers';
@@ -155,7 +156,7 @@ export class TaskService extends WorkerEntrypoint {
           }
           let record=await this.snapshot(c,a.task_id,true,params.name!=='report_task_result');
           if(params.name==='claim_task')record=replaceFields(record,{attempt_id:nodeFrom(a.attempt_id)});
-          result=objectNode([['content',nodeFrom([{type:'text',text:serialize(record)}])],['structuredContent',record],['isError',nodeFrom(false)]]);break;
+          result=objectNode([['content',nodeFrom([{type:'text',text:serialize(record)},...(params.name==='get_task'?imageMaterials(valueOf(record).request?.materials??[]):[])])],['structuredContent',record],['isError',nodeFrom(false)]]);break;
         }
         default:return ordinary({jsonrpc:'2.0',id:message.id,error:{code:-32601,message:'method not found'}});
       }

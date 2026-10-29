@@ -91,3 +91,9 @@ It does not authenticate to cloud storage, read real observations, or change the
 production daily-attempt ledger. Normal scheduled diagnosis remains unchanged.
 The test is single-attempt; an uncertain submission is inspected through its
 saved task state rather than automatically submitted again.
+
+Inline bitmap materials use `type=image`, `mime_type` and Base64 data. Native
+workers receive standard MCP image blocks in `get_task`; the original request
+and result binding remain unchanged. `python -m ai_service.image_command` adapts
+existing read-only prompt/image/schema commands to explicitly configured task
+routes. Unknown submissions retain their state and use read-only lookup.
