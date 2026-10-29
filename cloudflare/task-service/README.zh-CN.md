@@ -80,3 +80,11 @@ REST 机器入口中，`tasks:read` 允许 `GET /v1/tasks/lookup`、`GET /v1/tas
 Claude 使用[官方 Routine API](https://platform.claude.com/docs/en/api/claude-code/routines-fire)，以 Routine 专用 Bearer token、`anthropic-version` 和 `text` 请求体触发；Grok 使用[Routine webhook](https://cursor.com/help/grok-bot/routines)。触发只发送任务 ID、项目、revision、change 和 MCP 地址，不携带任务材料或推理凭据。HTTP 200 只表示开始执行，结果仍须经已准入的相同 provider 领取和回报。不会用触发回执证明模型身份。
 
 触发前持久化状态；超时、5xx 或进程中断保留 `outcome_unknown`，不会自动重新触发。追加材料和取消通知按事件发送至多一次；取消完成仍需 worker 确认。Claude Routine 没有幂等键，不能把 Dot 的事件重试规则套到 Routine。开启任一 Routine、创建 token 或实际测试均按具体授权执行。
+
+## 多项目准入
+
+一个组织的 Worker 可承载多个显式项目上下文，沿用同一任务存储中的项目隔离。`GITHUB_WORKLOAD_GRANTS_JSON` 接受最多 100 个精确 grant；签名核验前的 JWT 声明仅用于选择候选，必须唯一匹配 subject 和固定 workflow/ref/仓库约束，随后仍核验完整签名、audience 和 scope。项目来自选中的服务端 grant 和唯一 context，同组织下的 context 还必须属于原服务 owner；调用方不能用 query 或任务内容切换项目。
+
+worker 默认保持原项目。要访问其他项目，在对应 `AUTH_CLIENTS[client_id].projects` 中列出准确的仓库全名，并分别配置 `PROJECT_CONTEXTS` 和 `PROJECT_POLICIES`；这些项目必须与原身份同组织、同 owner，并允许该 provider。额外项目的工具调用传入 `project`，事件订阅仍按准确 project 建立。既有 token、OAuth client、scope 和原项目行为保持；配置列表不会代替各业务调用方准入，也不会自动创建原生宿主订阅。服务端移除项目或连接后，相关订阅停止投递。
+
+首次切换前，由原调用方完成合成任务提交和消费，并由原 worker 连接完成相同项目的订阅、领取和回报。各项目验证通过后分别修改调用地址和启用开关；不要将配置检查当成真实任务验收，也不要在仍有旧调用方时停止旧服务。

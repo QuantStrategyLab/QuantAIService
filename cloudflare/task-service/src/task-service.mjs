@@ -1,3 +1,4 @@
+import {workerContext,workerProjects} from './projects.mjs';
 import {eventCatalog} from './webhooks.mjs';
 import {WorkerEntrypoint} from 'cloudflare:workers';
 import {insufficientScope} from '@cloudflare/workers-oauth-provider';
@@ -22,12 +23,16 @@ const REQUEST=schema({mode:{enum:['agent','api']},profile:{type:'string',minLeng
 const MESSAGE=schema({text:string,materials:{type:'array'}},['text']);
 
 export class TaskService extends WorkerEntrypoint {
-  context(identity,request){
+  context(identity,request,selectedProject){
     if(!obj(identity)||identity.organization!==this.env.ORGANIZATION||!Array.isArray(identity.scopes)||
        !/^[1-9][0-9]*$/.test(identity.githubUserId??'')||typeof identity.clientId!=='string'||!identity.clientId||
        identity.provider!==null&&!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(identity.provider??''))denied();
     const map=this.env.PROJECT_CONTEXTS??{};
-    const c=Object.hasOwn(map,identity.projectId)?map[identity.projectId]:null;
+    const home=Object.hasOwn(map,identity.projectId)?map[identity.projectId]:null;
+    if(!home)denied();
+    const query=new URL(request.url).searchParams.getAll('project');
+    if(query.length>1||selectedProject!==undefined&&query.length&&selectedProject!==query[0])denied();
+    const c=workerContext(this.env,identity,selectedProject??query[0]);
     if(!c||c.organization!==identity.organization||c.ownerId!==identity.ownerId||identity.provider!==null&&!c.providers.includes(identity.provider))denied();
     const url=new URL(request.url),resource=url.pathname==='/mcp'?'/mcp':'/v1/tasks';
     if(url.origin!==this.env.PUBLIC_ORIGIN||identity.resource!==url.origin+resource)denied();
@@ -90,8 +95,10 @@ export class TaskService extends WorkerEntrypoint {
     }
   }
   tools(c){
-    if(c.provider!=='dot')return TOOLS;
-    return [...TOOLS,...['get_event_subscription','delete_event_subscription'].map(name=>({name,description:name==='get_event_subscription'?'Read owned subscription lifecycle.':'Delete owned subscription and stop delivery.',inputSchema:schema({subscription_id:{type:'string',minLength:1,maxLength:200}}),securitySchemes:securitySchemes(EVENT_SCOPES)}))];
+    const projects=workerProjects(this.env,c.identity);
+    const scoped=tool=>projects.length<2?tool:{...tool,inputSchema:{...tool.inputSchema,properties:{...tool.inputSchema.properties,project:{type:'string',enum:projects}}}};
+    if(c.provider!=='dot')return TOOLS.map(scoped);
+    return [...TOOLS,...['get_event_subscription','delete_event_subscription'].map(name=>({name,description:name==='get_event_subscription'?'Read owned subscription lifecycle.':'Delete owned subscription and stop delivery.',inputSchema:schema({subscription_id:{type:'string',minLength:1,maxLength:200}}),securitySchemes:securitySchemes(EVENT_SCOPES)}))].map(scoped);
   }
   async mcp(request,c){
     const root=parseJson(await request.text()),message=valueOf(root);
@@ -113,6 +120,7 @@ export class TaskService extends WorkerEntrypoint {
         case 'events/list':case 'events/subscribe':case 'events/unsubscribe':{
           if(c.provider!=='dot')denied();
           if(!c.scopes.includes('events:subscribe'))return eventScopeChallenge(c);
+          if(message.method!=='events/list')c=this.context(c.identity,request,params.arguments?.project);
           result=nodeFrom(message.method==='events/list'?eventCatalog():message.method==='events/subscribe'?await this.store().subscribe(c.project,c.worker,c.identity,params):await this.store().unsubscribeRequest(c.project,c.worker,params));break;
         }
         case 'tools/list':result=nodeFrom({tools:this.tools(c)});break;
@@ -120,6 +128,7 @@ export class TaskService extends WorkerEntrypoint {
           await check(schema({name:string,arguments:{type:'object'}}),params);
           const tool=this.tools(c).find(t=>t.name===params.name);if(!tool)bad();await check(tool.inputSchema,params.arguments);
           const a=params.arguments;
+          c=this.context(c.identity,request,a.project??c.project);
           if(['get_event_subscription','delete_event_subscription'].includes(params.name)){
             if(!c.scopes.includes('events:subscribe')){
               result=nodeFrom({content:[{type:'text',text:'Authorize event subscription access to continue.'}],isError:true,_meta:{'mcp/www_authenticate':[eventScopeChallenge(c).headers.get('WWW-Authenticate')]}});break;

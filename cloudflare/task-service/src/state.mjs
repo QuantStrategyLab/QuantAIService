@@ -1,3 +1,4 @@
+import {workerContext} from './projects.mjs';
 import {callbackURL,signingKey,signedHeaders} from './webhooks.mjs';
 import {apiConfiguration,executeAPI} from './api.mjs';
 import {nativeConfiguration,triggerNative} from './native.mjs';
@@ -322,7 +323,7 @@ export class TaskStore extends DurableObject {
 
   #eventAccess(owner,identity) {
     if(identity.provider!=='dot')return false;
-    const project=this.env.PROJECT_CONTEXTS?.[identity.projectId];
+    let project;try{project=workerContext(this.env,identity,owner);}catch{return false;}
     const client=this.env.AUTH_CLIENTS?.[identity.clientId];
     if(!project||project.project!==owner||client?.provider!=='dot'||!client.scopes?.includes('events:subscribe'))return false;
     let admissions;try{admissions=JSON.parse(this.env.ADMISSIONS_JSON??'[]');}catch{return false;}

@@ -34,6 +34,8 @@ async function organizationFixture(organization, ownerId, internalOwnerId = owne
     PROJECT_CONTEXTS: {[projectId]: {organization, ownerId: internalOwnerId, project, providers: ['dot']}},
     PROJECT_POLICIES: {[project]: {providers: {agent: 'dot'}, models: {dot: ['configured-dot']},
       max_active: 20, max_timeout_seconds: 3600, max_request_bytes: 2000000}}};
+  bindings.PROJECT_CONTEXTS[projectId+'-second']={organization,ownerId:internalOwnerId,project:ownerId+'/SecondSynthetic',providers:['dot']};
+  bindings.PROJECT_POLICIES[ownerId+'/SecondSynthetic']=bindings.PROJECT_POLICIES[project];
   const outbound = [];
   const mf = new Miniflare({cf: false, workers: [{name: 'workload', modules: true, script: fixture,
     compatibilityDate: '2026-07-30', compatibilityFlags: ['global_fetch_strictly_public'], bindings,
@@ -295,6 +297,19 @@ try {
       assert.equal((await f.request('/v1/tasks/' + id + '/messages', {method: 'POST',
         body: {text: 'Terminal follow-up'}, headers: {'Idempotency-Key': 'terminal-message'}})).status, 409);
       assert.equal((await f.request('/v1/tasks/' + id + '/events')).status, 200);
+    });
+    await test(organization+': exact multi-project workload grants cannot read or select each other',async()=>{
+      const otherProject=f.ownerId+'/SecondSynthetic',otherId=f.projectId+'-second';
+      const otherGrant={...f.grant,identity:'second-workflow',project:otherProject,subject:`repo:${otherProject}:ref:refs/heads/main`,claims:{...f.grant.claims,repository:otherProject,workflow_ref:`${otherProject}/.github/workflows/ai-task.yml@refs/heads/main`}};
+      const contexts={...f.bindings.PROJECT_CONTEXTS,[otherId]:{...f.bindings.PROJECT_CONTEXTS[f.projectId],project:otherProject}};
+      const policies={...f.bindings.PROJECT_POLICIES,[otherProject]:f.bindings.PROJECT_POLICIES[f.project]};
+      // The fixture supplies the same explicit map to the service binding and auth.
+      await f.worker.policy({GITHUB_WORKLOAD_GRANTS_JSON:JSON.stringify([f.grant,otherGrant]),PROJECT_CONTEXTS:contexts,PROJECT_POLICIES:policies});
+      const bearer=f.token({sub:otherGrant.subject,...otherGrant.claims});
+      const result=await f.request('/v1/tasks/'+id,{bearer});assert.equal(result.status,404);
+      assert.equal((await f.request('/v1/tasks/'+id+'?project='+encodeURIComponent(f.project),{bearer})).status,403);
+      assert.equal((await f.request('/v1/tasks/'+id)).status,200);
+      await f.worker.policy({GITHUB_WORKLOAD_GRANTS_JSON:JSON.stringify([f.grant]),PROJECT_CONTEXTS:f.bindings.PROJECT_CONTEXTS,PROJECT_POLICIES:f.bindings.PROJECT_POLICIES});
     });
     assert.ok(f.outbound.length >= 1);
     assert.ok(f.outbound.every(url => url === jwksURL));
