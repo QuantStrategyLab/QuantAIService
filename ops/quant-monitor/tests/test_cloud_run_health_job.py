@@ -83,6 +83,50 @@ class CloudJobTests(unittest.TestCase):
             ledger.write_text(json.dumps({**LEDGER, 'new_event': 'sent'}))
         return {'healthy': False, 'snapshot_count': 0, 'data_status': 'unavailable'}
 
+    def test_refresh_cycle_uses_fresh_input_once_before_consumption(self):
+        input_store, root = Mock(), Mock()
+        input_store.read.return_value = (b'synthetic', 3)
+        config = {'private_key': 'synthetic-key', 'archive_uri': 'synthetic',
+                  'stream_id': 'synthetic', 'account_scope_sha256': 'synthetic'}
+        env = {'MONITOR_INPUT_REFRESH_IN_CYCLE': 'true', 'MONITOR_INPUT_READER_CONFIG_JSON': json.dumps(config),
+               'MONITOR_READER_APP_ID': '1', 'MONITOR_READER_INSTALLATION_ID': '2',
+               'CLOUD_RUN_EXECUTION': 'synthetic-execution'}
+        def observe(*_args, **_kwargs):
+            self.assertEqual(os.environ.get('GH_TOKEN'), 'synthetic-token')
+            self.assertNotIn('MONITOR_INPUT_READER_CONFIG_JSON', os.environ)
+        with patch.dict(os.environ, env, clear=True), patch('shutil.which', return_value='/synthetic/gh'), \
+             patch('monitor_inputs.mint_reader_token', return_value='synthetic-token'), \
+             patch('monitor_inputs.run_adapter', side_effect=observe) as refresh, patch('monitor_inputs.apply_inputs') as apply:
+            job.refresh_cycle_inputs(input_store, root, mode='run')
+            self.assertNotIn('GH_TOKEN', os.environ)
+        refresh.assert_called_once_with(input_store, execution_id='synthetic-execution', source_kind='cloud_run')
+        apply.assert_called_once_with(root, b'synthetic')
+
+    def test_refresh_without_reader_fails_before_input_read(self):
+        input_store = Mock()
+        with patch.dict(os.environ, {'MONITOR_INPUT_REFRESH_IN_CYCLE': 'true'}, clear=True), \
+             self.assertRaisesRegex(state.StateUnavailable, 'monitor_input_reader_unavailable'):
+            job.refresh_cycle_inputs(input_store, Mock(), mode='run')
+        input_store.read.assert_not_called()
+
+    def test_refresh_failure_clears_token_and_does_not_consume_input(self):
+        input_store = Mock()
+        config = {'private_key': 'synthetic-key', 'archive_uri': 'synthetic',
+                  'stream_id': 'synthetic', 'account_scope_sha256': 'synthetic'}
+        env = {'MONITOR_INPUT_REFRESH_IN_CYCLE': 'true', 'MONITOR_INPUT_READER_CONFIG_JSON': json.dumps(config),
+               'MONITOR_READER_APP_ID': '1', 'MONITOR_READER_INSTALLATION_ID': '2',
+               'CLOUD_RUN_EXECUTION': 'synthetic-execution'}
+        with patch.dict(os.environ, env, clear=True), patch('shutil.which', return_value='/synthetic/gh'), \
+             patch('monitor_inputs.mint_reader_token', return_value='synthetic-token'), \
+             patch('monitor_inputs.run_adapter', side_effect=state.StateUnavailable('write_unknown')), \
+             self.assertRaises(state.StateUnavailable):
+            try:
+                job.refresh_cycle_inputs(input_store, Mock(), mode='run')
+            finally:
+                self.assertNotIn('GH_TOKEN', os.environ)
+                self.assertNotIn('MONITOR_INPUT_READER_CONFIG_JSON', os.environ)
+        input_store.read.assert_not_called()
+
     def test_preview_is_read_only_even_with_all_callbacks_present(self):
         refresh, publish, website_publish = Mock(), Mock(), Mock()
         before = self.store.raw

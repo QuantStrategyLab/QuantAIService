@@ -178,6 +178,7 @@ def publish_projections(client, uri, root, *, claim_generation):
 
 FAILURE_CODES = frozenset({
     'monitor_notification_binding_missing', 'monitor_inputs_stale_or_invalid', 'monitor_inputs_scope_invalid',
+    'monitor_input_reader_unavailable',
     'state_read_failed', 'claim_outcome_unknown', 'checkpoint_outcome_unknown', 'release_outcome_unknown',
     'state_write_too_large', 'workspace_invalid', 'workspace_link_not_portable', 'workspace_manifest_invalid',
     'workspace_member_not_allowed', 'workspace_too_large',
@@ -199,6 +200,40 @@ def safe_failure(exc):
     return {'failure_type': kind, 'failure_code': 'unknown'}
 
 
+def refresh_cycle_inputs(input_store, root, *, mode):
+    from monitor_inputs import apply_inputs, mint_reader_token, run_adapter
+    if mode == 'run' and os.environ.get('MONITOR_INPUT_REFRESH_IN_CYCLE') == 'true':
+        raw_config = os.environ.pop('MONITOR_INPUT_READER_CONFIG_JSON', '')
+        required = ('MONITOR_READER_APP_ID', 'MONITOR_READER_INSTALLATION_ID', 'CLOUD_RUN_EXECUTION')
+        try:
+            config = json.loads(raw_config)
+        except (TypeError, ValueError):
+            raise StateUnavailable('monitor_input_reader_unavailable') from None
+        fields = {'private_key', 'archive_uri', 'stream_id', 'account_scope_sha256'}
+        if (not isinstance(config, dict) or set(config) != fields
+                or any(not isinstance(config[k], str) or not config[k] for k in fields)
+                or any(not os.environ.get(name) for name in required) or not shutil.which('gh')):
+            raise StateUnavailable('monitor_input_reader_unavailable')
+        token = mint_reader_token(os.environ['MONITOR_READER_APP_ID'],
+                                  os.environ['MONITOR_READER_INSTALLATION_ID'], config['private_key'])
+        values = {'GH_TOKEN': token, 'NO_COLOR': '1',
+                  'BINANCE_REPORT_ARCHIVE_URI': config['archive_uri'],
+                  'BINANCE_REPORT_ARCHIVE_STREAM_ID': config['stream_id'],
+                  'BINANCE_REPORT_ARCHIVE_ACCOUNT_SCOPE_SHA256': config['account_scope_sha256']}
+        previous = {name: os.environ.get(name) for name in values}
+        os.environ.update(values)
+        try:
+            run_adapter(input_store, execution_id=os.environ['CLOUD_RUN_EXECUTION'], source_kind='cloud_run')
+        finally:
+            for name, value in previous.items():
+                if value is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = value
+    raw, _ = input_store.read()
+    apply_inputs(root, raw)
+
+
 def main():
     mode = os.environ.get('MONITOR_MODE', 'preview')
     from google.cloud import storage
@@ -208,9 +243,7 @@ def main():
         uri = os.environ['MONITOR_STATE_GCS_URI']
         store = CloudState(client, uri)
         def refresh(root):
-            from monitor_inputs import apply_inputs
-            raw, _ = CloudState(client, os.environ['MONITOR_INPUT_GCS_URI']).read()
-            apply_inputs(root, raw)
+            refresh_cycle_inputs(CloudState(client, os.environ['MONITOR_INPUT_GCS_URI']), root, mode=mode)
         def evaluate(root, *, effects_enabled):
             if not effects_enabled:
                 refresh(root)

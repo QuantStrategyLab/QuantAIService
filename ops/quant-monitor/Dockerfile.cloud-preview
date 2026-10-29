@@ -11,6 +11,9 @@ ARG CRYPTO_SOURCE_SHA
 COPY ops/quant-monitor/requirements-linux-py312.lock ops/quant-monitor/qpk-runtime.sha /build/
 RUN python -m pip --isolated install --no-cache-dir --require-hashes --only-binary=:all: -r /build/requirements-linux-py312.lock
 RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates && rm -rf /var/lib/apt/lists/*
+RUN python -c "import hashlib,urllib.request; u='https://github.com/cli/cli/releases/download/v2.103.3/gh_2.103.3_linux_amd64.tar.gz'; p='/tmp/gh.tar.gz'; urllib.request.urlretrieve(u,p); assert hashlib.sha256(open(p,'rb').read()).hexdigest() == '4c806978ffce1cec70853302a56d70ac6da4f19bae7adca4e1a8ab00633dd91d'" \
+    && tar -xzf /tmp/gh.tar.gz --strip-components=2 -C /usr/local/bin gh_2.103.3_linux_amd64/bin/gh \
+    && rm /tmp/gh.tar.gz && gh --version
 RUN set -eu; test "$QPK_SOURCE_SHA" = "$(cat /build/qpk-runtime.sha)"; \
     for binding in "QuantPlatformKit:$QPK_SOURCE_SHA" "CnEquityStrategies:$CN_SOURCE_SHA" \
       "HkEquityStrategies:$HK_SOURCE_SHA" "UsEquityStrategies:$US_SOURCE_SHA" "CryptoStrategies:$CRYPTO_SOURCE_SHA"; do \
@@ -33,6 +36,8 @@ COPY ops/quant-monitor/scripts/health_cycle.py ops/quant-monitor/scripts/build_d
      ops/quant-monitor/scripts/monitor_cloud_state.py ops/quant-monitor/scripts/monitor_diagnosis_state.py \
      ops/quant-monitor/scripts/cloud_run_health_job.py /app/monitor/scripts/
 COPY ops/quant-monitor/scripts/monitor_inputs.py ops/quant-monitor/scripts/monitor_findings.py /app/monitor/scripts/
+COPY ops/quant-monitor/scripts/export_local_monitor_state.py ops/quant-monitor/scripts/sync_lifecycle_artifacts.py \
+     ops/quant-monitor/scripts/sync_binance_live_runs.py ops/quant-monitor/scripts/binance_report_input.py /app/monitor/scripts/
 COPY ops/quant-monitor/scripts/monitor_website_publish.py /app/monitor/scripts/
 RUN PYTHONPATH=/app/monitor:/app/monitor/scripts python -c \
     "import cloud_run_health_job, health_cycle; from quant_platform_kit.strategy_lifecycle.performance_monitor import run_monitor; from quant_platform_kit.strategy_lifecycle.drift_detector import run_drift_detection; from quant_platform_kit.strategy_lifecycle.health_dashboard import build_dashboard"
