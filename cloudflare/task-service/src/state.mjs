@@ -402,7 +402,7 @@ export class TaskStore extends DurableObject {
   async cancel(owner,taskId) {
     const record=this.ctx.storage.transactionSync(()=>{
       const row=this.#row(owner,taskId);
-      if(row.status==='queued')this.#state(taskId,'cancelled');
+      if(row.status==='queued'||(['running','cancel_requested'].includes(row.status)&&row.provider==='dot'&&JSON.parse(row.request).mode==='agent'&&!row.worker&&!row.attempt))this.#state(taskId,'cancelled');
       else if(!TERMINAL.has(row.status)&&!['outcome_unknown','cancel_requested'].includes(row.status))this.#state(taskId,'cancel_requested');
       return this.get(owner,taskId);
     });
@@ -414,13 +414,15 @@ export class TaskStore extends DurableObject {
     await this.ctx.blockConcurrencyWhile(async()=>{
       const timestamp=now();
       this.ctx.storage.transactionSync(()=>{
-        for(const task of this.sql.exec("SELECT * FROM tasks WHERE status IN ('queued','submitting','running') OR (status='cancel_requested' AND json_extract(request,'$.mode')='api' AND handle IS NULL)").toArray()){
+        for(const task of this.sql.exec("SELECT * FROM tasks WHERE status IN ('queued','submitting','running') OR (status='cancel_requested' AND ((json_extract(request,'$.mode')='api' AND handle IS NULL) OR (provider='dot' AND json_extract(request,'$.mode')='agent' AND worker IS NULL AND attempt IS NULL)))").toArray()){
+          const unclaimedDot=task.provider==='dot'&&JSON.parse(task.request).mode==='agent'&&!task.worker&&!task.attempt;
+          if(task.status==='cancel_requested'&&unclaimedDot){this.#state(task.id,'cancelled',{error:task.error});continue;}
           if(task.status==='submitting'||task.status==='cancel_requested'){
             if(this.apiInFlight.has(task.id)||this.nativeInFlight.has(task.id))continue;
             // Crash before acceptance is unknown, never an instruction to submit a new task.
             this.#state(task.id,'outcome_unknown',{error:'acceptance_unknown'});continue;
           }
-          if(task.deadline<=timestamp){this.#state(task.id,task.status==='queued'?'cancelled':'cancel_requested',{error:task.status==='queued'?'deadline_before_submission':'deadline_exceeded'});continue;}
+          if(task.deadline<=timestamp){this.#state(task.id,task.status==='queued'||unclaimedDot?'cancelled':'cancel_requested',{error:task.status==='queued'?'deadline_before_submission':'deadline_exceeded'});continue;}
           if(task.status!=='queued')continue;
           this.#state(task.id,'submitting');
           if(JSON.parse(task.request).mode==='api'){this.apiInFlight.add(task.id);apiJobs.push(task);continue;}
@@ -463,7 +465,7 @@ export class TaskStore extends DurableObject {
       // An expired live API call can only finish or become unknown; inspect its
       // recovery state at most once per second instead of rearming every 10ms.
       const scheduledAt=now();
-      const taskDeadlines=this.sql.exec("SELECT id,deadline FROM tasks WHERE status IN ('queued','submitting','running') OR (status='cancel_requested' AND json_extract(request,'$.mode')='api' AND handle IS NULL)").toArray()
+      const taskDeadlines=this.sql.exec("SELECT id,deadline FROM tasks WHERE status IN ('queued','submitting','running') OR (status='cancel_requested' AND ((json_extract(request,'$.mode')='api' AND handle IS NULL) OR (provider='dot' AND json_extract(request,'$.mode')='agent' AND worker IS NULL AND attempt IS NULL)))").toArray()
         .map(task=>(this.apiInFlight.has(task.id)||this.nativeInFlight.has(task.id))&&task.deadline<=scheduledAt?scheduledAt+1:task.deadline);
       const next=[delivery,...taskDeadlines].filter(v=>v!==null);
       if(next.length)await this.ctx.storage.setAlarm(Math.max(Date.now()+10,Math.min(...next)*1000));

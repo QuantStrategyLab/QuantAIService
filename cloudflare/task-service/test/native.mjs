@@ -166,6 +166,24 @@ try{
   const r=await request('/v1/tasks/'+t.id+'/cancel',{method:'POST',headers:auth(tokens.caller),body:'{}'});assert.equal(r.status,200);assert.equal((await r.json()).status,'cancel_requested');
   const report=await tool('report_task_result',{task_id:t.id,attempt_id:'cancel-attempt',revision:1,status:'cancelled'});assert.equal(report.body.result.structuredContent.status,'cancelled');
  });
+ await test('unclaimed Dot cancellation is terminal without a worker acknowledgement',async()=>{
+  const t=await submit('cancel-unclaimed-native',taskRequest);await until(async()=> (await get(t.id)).status==='running');
+  const response=await request('/v1/tasks/'+t.id+'/cancel',{method:'POST',headers:auth(tokens.caller),body:'{}'});
+  assert.equal((await response.json()).status,'cancelled');
+  assert.ok((await tool('claim_task',{task_id:t.id,attempt_id:'late-unclaimed'})).body.error);
+ });
+ await test('expired unclaimed Dot tasks become cancelled and retain their deadline error',async()=>{
+  const t=await submit('deadline-unclaimed-native',taskRequest);await until(async()=> (await get(t.id)).status==='running');
+  await worker.alarmProbe('expire',project,t.id);
+  await until(async()=> (await get(t.id)).status==='cancelled');
+  const result=await get(t.id);assert.equal(result.error,'deadline_exceeded');assert.equal(result.worker,null);assert.equal(result.attempt,null);
+ });
+ await test('old unclaimed cancellation rows are finalized without rewriting their request',async()=>{
+  const t=await submit('stale-unclaimed-native',taskRequest);await until(async()=> (await get(t.id)).status==='running');
+  await worker.alarmProbe('stale-unclaimed',project,t.id);
+  await until(async()=> (await get(t.id)).status==='cancelled');
+  const result=await get(t.id);assert.deepEqual(result.request,taskRequest);assert.equal(result.error,'deadline_exceeded');
+ });
  await test('deadline alarm requests cancellation; late completed is rejected until worker confirms stop',async()=>{
   const t=await submit('deadline-native',{...taskRequest,timeout_seconds:1});await until(async()=> (await get(t.id)).status==='running');
   await tool('claim_task',{task_id:t.id,attempt_id:'deadline-attempt'});

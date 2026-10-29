@@ -88,3 +88,7 @@ Claude 使用[官方 Routine API](https://platform.claude.com/docs/en/api/claude
 worker 默认保持原项目。要访问其他项目，在对应 `AUTH_CLIENTS[client_id].projects` 中列出准确的仓库全名，并分别配置 `PROJECT_CONTEXTS` 和 `PROJECT_POLICIES`；这些项目必须与原身份同组织、同 owner，并允许该 provider。额外项目可显式传入 `project`。为兼容原生宿主已缓存的单项目工具 schema，任务工具在未传 project 时仅在该 worker 的明确准入列表内按已存任务 ID 定位项目；不会搜索或访问其他项目。事件订阅仍按准确 project 建立。既有 token、OAuth client、scope 和原项目行为保持；配置列表不会代替各业务调用方准入，也不会自动创建原生宿主订阅。服务端移除项目或连接后，相关订阅停止投递。
 
 首次切换前，由原调用方完成合成任务提交和消费，并由原 worker 连接完成相同项目的订阅、领取和回报。各项目验证通过后分别修改调用地址和启用开关；不要将配置检查当成真实任务验收，也不要在仍有旧调用方时停止旧服务。
+
+## 未领取 Dot 任务的取消
+
+Dot agent 在 worker 领取前仅有持久化事件，没有正在执行的工作。显式取消或期限到达时，未领取任务直接进入 cancelled，释放并发名额；旧版本留下的同类 cancel_requested 会由 alarm 完成取消，保留原请求和错误原因。已经领取的任务仍须原 worker 确认停止，已有终态不会被取消请求改写。其他 provider 的未知提交和取消规则保持不变。
