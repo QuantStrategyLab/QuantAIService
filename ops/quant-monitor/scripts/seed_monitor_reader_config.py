@@ -29,7 +29,7 @@ def seed(environ, *, session_factory=AuthorizedSession):
         config['installation_id'] = installation_id
         payload = base64.b64encode(json.dumps(config, separators=(',', ':')).encode()).decode()
         credentials, _ = google.auth.default(scopes=['https://www.googleapis.com/auth/cloud-platform'])
-        session = session_factory(credentials)
+        session = session_factory(credentials, max_refresh_attempts=0)
     except Exception:
         return 'preflight_failed'
     try:

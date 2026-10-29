@@ -19,10 +19,12 @@ def fixture():
 def test_seed_checks_original_app_and_transfers_one_config():
     session = Mock()
     session.post.return_value.status_code = 200
+    factory = Mock(return_value=session)
     with patch.object(seed, 'reader_installation_id', return_value='2'), \
          patch.object(seed, 'mint_reader_token') as mint, patch('google.auth.default', return_value=(Mock(), None)):
-        assert seed.seed(fixture(), session_factory=lambda _: session) == 'created'
+        assert seed.seed(fixture(), session_factory=factory) == 'created'
     mint.assert_called_once_with('1', '2', 'synthetic-key')
+    assert factory.call_args.kwargs['max_refresh_attempts'] == 0
     body = session.post.call_args.kwargs['json']
     config = json.loads(base64.b64decode(body['payload']['data']))
     assert config['app_id'] == '1' and config['installation_id'] == '2'
@@ -34,12 +36,12 @@ def test_seed_checks_original_app_and_transfers_one_config():
 def test_preflight_and_unknown_write_never_retry():
     session = Mock()
     with patch.object(seed, 'reader_installation_id', side_effect=ValueError('synthetic')):
-        assert seed.seed(fixture(), session_factory=lambda _: session) == 'preflight_failed'
+        assert seed.seed(fixture(), session_factory=lambda *_args, **_kwargs: session) == 'preflight_failed'
     session.post.assert_not_called()
     session.post.side_effect = TimeoutError('synthetic')
     with patch.object(seed, 'reader_installation_id', return_value='2'), \
          patch.object(seed, 'mint_reader_token'), patch('google.auth.default', return_value=(Mock(), None)):
-        assert seed.seed(fixture(), session_factory=lambda _: session) == 'unconfirmed'
+        assert seed.seed(fixture(), session_factory=lambda *_args, **_kwargs: session) == 'unconfirmed'
     assert session.post.call_count == 1
 
 
