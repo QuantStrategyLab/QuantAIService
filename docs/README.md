@@ -54,6 +54,6 @@ and verify state access before restoring its hourly schedule.
 ## Historical architecture
 
 - [V1 AI Gateway architecture](architecture.md): former Analyze/Execute/Review interfaces and components, preserved for historical interpretation; not the V2 connection/API guide.
-- [AI autonomy draft](ai_autonomy_architecture.md): **HISTORICAL_DRAFT_NOT_CURRENT_QSL_AUTHORITY**. Earlier audit/repair ideas do not define current runtime qualification, automatic merge permission or P0–P6 authority.
+- [AI autonomy draft](ai-autonomy-architecture.md): **HISTORICAL_DRAFT_NOT_CURRENT_QSL_AUTHORITY**. Earlier audit/repair ideas do not define current runtime qualification, automatic merge permission or P0–P6 authority.
 
 Source documentation and migration history do not establish deployed state, OAuth validity, event delivery or real-business acceptance. Provider/tool rights remain independently controlled. See [LICENSE](../LICENSE) and [task-service MIT license](../LICENSE.task-service).

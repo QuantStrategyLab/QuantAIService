@@ -27,7 +27,7 @@ P6、资金、杠杆、凭证和硬熔断恢复仍遵循既定授权。
 | 监测 → 诊断 | `service/research_task.py` 与 `scripts/run_research_task_diagnosis.py`：P1/P2/P3、revision、task 摘要绑定，先写 attempt，再作有界 advisory 调用 | implemented；下述自然 run 为 real 安全跳过，未运行模型 |
 | 策略重构 | ADR 的 `strategy_revision` 候选；月审只处理具体低风险缺陷，不允许无关 broad refactor 或直接改策略行为 | design；具体候选入口已实现，通用无人重构链未完成验收 |
 | 联网新研究 | `scripts/run_new_research.py`：固定 SOXL 模板、明确目标、两个固定公开引文；`run_global_etf_research_codegen.py` 当前只复核固定候选 | implemented subset；有界源码/合成检查不证明开放研究工厂或真实 OOS |
-| CN 受控研究 | `scripts/run_cn_index_etf_research.py`：独立受保护策略、冻结输入、持久票据、每日新实验上限、shadow reader 与 console 接续 | implemented / synthetic；[CN 交接](cn-index-etf-research-dispatch-2026-09-09.md)记录默认关闭及真实许可输入、forward 工件和生产周期证据缺口 |
+| CN 受控研究 | `scripts/run_cn_index_etf_research.py`：独立受保护策略、冻结输入、持久票据、每日新实验上限、shadow reader 与 console 接续 | implemented / synthetic；[CN 交接](cn-index-etf-research-dispatch.md)记录默认关闭及真实许可输入、forward 工件和生产周期证据缺口 |
 | 自动修复 | `scripts/run_monthly_codex_audit.py` 的月审小修及单独授权的 LongBridge `platform_bugfix`；后者精确两文件、禁 auto-merge | implemented；[watchdog 演练](watchdog-repair-rehearsal.md)不代表自然故障自动修复/上线验收 |
 | 验证 → shadow → 采纳 | 固定 WFA/OOS 验证入口、QPK 持久恢复与 paired-shadow/console adapters | implemented / synthetic；材料不足停车，真实链逐段 unverified，接受只记意图 |
 
@@ -43,7 +43,7 @@ P6、资金、杠杆、凭证和硬熔断恢复仍遵循既定授权。
 
 ### 当前路由与隔离证据
 
-调用规则以 [provider 场景表](provider-call-scenarios-2026-09-17.md)和
+调用规则以 [provider 场景表](provider-call-scenarios.md)和
 `service/provider_scenarios.py` 为准。本次源码中 watcher 诊断显式选择 Cursor canary；
 优化、新研究、codegen、晋级主审及 bugfix 保留各自 fixed-Codex 场景。
 下方早期“Codex only”诊断说明须结合该后续场景政策阅读，不扩大到 API 自动补位。
