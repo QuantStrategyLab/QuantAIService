@@ -851,3 +851,31 @@ def test_enabling_native_route_preserves_existing_legacy_job_recovery(tmp_path):
     assert result['job_id'] == ID
     assert [r.method for r in opener.calls] == ['GET', 'GET']
     assert opener.calls[1].full_url == 'https://audit.invalid' + caller.JOBS + '/' + ID
+
+
+def test_native_synthetic_verification_uses_real_caller_without_production_state(tmp_path, monkeypatch):
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1] / 'scripts'))
+    import verify_native_diagnosis as verifier
+    env = {**native_environment(), 'GITHUB_RUN_ATTEMPT': '1'}
+    opener = NativeOpener()
+    root = tmp_path / 'fixture'
+    result = verifier.verify(root, env=env, opener=opener, now=NOW)
+    assert result['status'] == 'succeeded'
+    assert result['synthetic_only'] and not result['business_access']
+    assert not result['production_ledger_access']
+    requests = [json.loads(r.data) for r in opener.calls if r.data is not None]
+    assert len(requests) == 1
+    assert requests[0]['objective'].startswith('SYNTHETIC CONNECTION TEST ONLY.')
+    assert (root / 'state' / (NOW.date().isoformat() + '.json')).exists()
+    with pytest.raises(FileExistsError):
+        verifier.verify(root, env=env, opener=NativeOpener(), now=NOW)
+
+
+def test_native_synthetic_verification_rejects_reruns_before_http_or_state(tmp_path, monkeypatch):
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1] / 'scripts'))
+    import verify_native_diagnosis as verifier
+    opener = NativeOpener()
+    root = tmp_path / 'fixture'
+    with pytest.raises(verifier.caller.Rejected, match='invalid_native_verification_identity'):
+        verifier.verify(root, env={**native_environment(), 'GITHUB_RUN_ATTEMPT': '2'}, opener=opener, now=NOW)
+    assert not opener.calls and not root.exists()

@@ -81,3 +81,13 @@ Keep credentials, private data, and external service tokens out of Git and logs.
 
 MIT. See [LICENSE](LICENSE). The task-service component carries its own MIT
 license in [`LICENSE.task-service`](LICENSE.task-service).
+
+## Native diagnostic caller verification
+
+The existing operational-diagnosis workflow accepts `verify_native_only` for a
+manual synthetic connection test. It uses the production caller's OIDC,
+submission, polling and response binding with an explicitly synthetic input.
+It does not authenticate to cloud storage, read real observations, or change the
+production daily-attempt ledger. Normal scheduled diagnosis remains unchanged.
+The test is single-attempt; an uncertain submission is inspected through its
+saved task state rather than automatically submitted again.
