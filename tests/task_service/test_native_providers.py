@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from ai_service.providers import GrokWebhookProvider
+from ai_service.providers import ClaudeRoutineProvider, GrokWebhookProvider
 from ai_service.runtime import Policy, TaskRuntime
 from ai_service.transport import HttpReply, public_destination
 
@@ -86,6 +86,43 @@ class NativeProviderTests(unittest.TestCase):
         parsed, addresses = public_destination('https://example.com/callback', resolver)
         self.assertEqual(parsed.hostname, 'example.com')
         self.assertEqual(addresses, [(socket.AF_INET, '93.184.216.34')])
+
+
+class ClaudeRoutineTests(unittest.TestCase):
+    def test_official_protocol_sends_identifiers_only(self):
+        transport = FakeTransport()
+        provider = ClaudeRoutineProvider(
+            'https://api.anthropic.com/v1/claude_code/routines/trig_SYNTHETIC/fire',
+            'synthetic-key', 'https://service.example/mcp', transport=transport)
+        receipt = provider.submit({'objective': 'private input'}, task_id='synthetic-task', owner='owner/repo')
+        self.assertEqual(receipt['model_verification'], 'unavailable')
+        call = transport.calls[0][1]
+        self.assertEqual(call['headers']['anthropic-version'], '2026-10-21')
+        event = json.loads(json.loads(call['body'])['text'])
+        self.assertEqual(event['task_id'], 'synthetic-task')
+        self.assertNotIn('private', str(event))
+
+    def test_official_endpoint_is_required(self):
+        for url in ['https://attacker.example/fire',
+                    'https://api.anthropic.com/v1/messages',
+                    'https://api.anthropic.com/v1/claude_code/routines/trig_TEST/fire?x=1']:
+            with self.subTest(url=url), self.assertRaises(ValueError):
+                ClaudeRoutineProvider(url, 'synthetic', 'https://service.example/mcp')
+
+    def test_both_routines_preserve_unknown_5xx_receipt(self):
+        for cls, url in [(GrokWebhookProvider, 'https://cursor.com/example'),
+                         (ClaudeRoutineProvider, 'https://api.anthropic.com/v1/claude_code/routines/trig_TEST/fire')]:
+            transport = FakeTransport(status=503)
+            with self.subTest(provider=cls.__name__), tempfile.TemporaryDirectory() as temporary:
+                provider = cls(url, 'synthetic', 'https://service.example/mcp', transport=transport)
+                runtime = TaskRuntime(Path(temporary) / 'state.sqlite', {'bot': provider},
+                                      {'owner/repo': Policy({'agent': 'bot'}, {'bot': {'configured'}})})
+                task = runtime.submit('owner/repo', 'unknown', {'mode': 'agent', 'model': 'configured',
+                    'objective': 'synthetic', 'output_schema': {'type': 'object'}})
+                runtime.tick()
+                runtime.tick()
+                self.assertEqual(runtime.get('owner/repo', task['id'])['status'], 'outcome_unknown')
+                self.assertEqual(len(transport.calls), 1)
 
 
 if __name__ == '__main__':

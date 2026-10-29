@@ -13,9 +13,22 @@ const policy={ORGANIZATION:organization,ORGANIZATION_ID:organizationId,PUBLIC_OR
 policy.PROJECT_POLICIES[project].providers={agent:'dot','api:disabled':'disabled-api','api:no-authorization':'unapproved-api','api:no-key':'missing-key-api'};
 for(const name of ['disabled-api','unapproved-api','missing-key-api'])policy.PROJECT_POLICIES[project].models[name]=['synthetic-fixed'];
 policy.API_PROVIDERS={'disabled-api':{type:'gemini_api',enabled:false,api_usage_authorized:true,model:'synthetic-fixed',key_env:'SYNTHETIC_API_KEY'},'unapproved-api':{type:'gemini_api',enabled:true,api_usage_authorized:false,model:'synthetic-fixed',key_env:'SYNTHETIC_API_KEY'},'missing-key-api':{type:'gemini_api',enabled:true,api_usage_authorized:true,model:'synthetic-fixed',key_env:'MISSING_KEY'}};
+for(const name of ['grok','claude','disabled-bot','missing-bot-key']){
+ policy.PROJECT_POLICIES[project].providers['agent:'+name]=name;
+ policy.PROJECT_POLICIES[project].models[name]=['configured-bot'];
+}
+policy.SYNTHETIC_ROUTINE_KEY='synthetic-routine-key';
+policy.AGENT_PROVIDERS={grok:{type:'grok_webhook',enabled:true,url:'https://routine.example/trigger',key_env:'SYNTHETIC_ROUTINE_KEY'},claude:{type:'claude_routine',enabled:true,url:'https://api.anthropic.com/v1/claude_code/routines/trig_SYNTHETIC/fire',key_env:'SYNTHETIC_ROUTINE_KEY'},'disabled-bot':{type:'grok_webhook',enabled:false,url:'https://routine.example/trigger',key_env:'SYNTHETIC_ROUTINE_KEY'},'missing-bot-key':{type:'grok_webhook',enabled:true,url:'https://routine.example/trigger',key_env:'ABSENT_KEY'}};
+const nativeCalls=[];let nativeReply=200;
 const deliveries=[],key=randomBytes(32),secret='whsec_'+key.toString('base64');let failedOnce=false,githubUser=10001,outbound=0;
 const apiCalls=[];let apiReply='success',releaseAPI;
-const outboundService=async request=>{outbound++;const url=new URL(request.url);if(url.hostname==='github.com')return Response.json({access_token:'synthetic-github-token'});if(url.hostname==='api.github.com')return Response.json({id:githubUser});
+const outboundService=async request=>{outbound++;const url=new URL(request.url);if(url.hostname==='routine.example'||url.hostname==='api.anthropic.com'){
+ const body=await request.json(),event=url.hostname==='api.anthropic.com'?JSON.parse(body.text):body;
+ assert.equal(request.headers.get('authorization'),'Bearer synthetic-routine-key');
+ if(url.hostname==='api.anthropic.com')assert.equal(request.headers.get('anthropic-version'),'2026-10-21');
+ assert.deepEqual(Object.keys(event).sort(),['change','project','resource','revision','task_id','type']);
+ nativeCalls.push(event);if(nativeReply==='timeout')throw Error('private upstream error');return new Response('',{status:nativeReply});
+} if(url.hostname==='github.com')return Response.json({access_token:'synthetic-github-token'});if(url.hostname==='api.github.com')return Response.json({id:githubUser});
  if(url.hostname==='generativelanguage.googleapis.com'){
   assert.equal(url.pathname,'/v1beta/models/synthetic-fixed:generateContent');assert.equal(request.headers.get('x-goog-api-key'),'synthetic-api-key');
   const body=await request.json();assert.equal(body.generationConfig.candidateCount,1);assert.ok(body.generationConfig.responseJsonSchema);assert.ok(!body.tools);assert.ok(!body.safetySettings);apiCalls.push(body);
@@ -44,7 +57,7 @@ const rpc=async(method,params={},token=tokens.dot)=>{const r=await request('/mcp
 const tool=(name,args)=>rpc('tools/call',{name,arguments:args});
 const taskRequest={mode:'agent',model:'configured-dot',objective:'Synthetic engineering counts only',materials:[{source_id:'first-org-synthetic-v1',checks:[{id:'a',passed:true},{id:'b',passed:false}]}],output_schema:{type:'object',properties:{source_id:{const:'first-org-synthetic-v1'},passed:{const:1},failed:{const:1},trade_authorized:{const:false}},required:['source_id','passed','failed','trade_authorized'],additionalProperties:false}};
 const submit=async(key,body=taskRequest)=>{const r=await request('/v1/tasks',{method:'POST',headers:{...auth(tokens.caller),'Idempotency-Key':key},body:JSON.stringify(body)});assert.equal(r.status,202);return r.json();};
-const get=async id=>{const r=await request('/v1/tasks/'+id,{headers:auth(tokens.caller)});assert.equal(r.status,200);return r.json();};
+const get=async id=>{const r=await request('/v1/tasks/'+id,{headers:auth(tokens.caller)});assert.equal(r.status,200,r.status===200?'':await r.clone().text());return r.json();};
 const until=async(fn,ms=10000)=>{const end=Date.now()+ms;while(Date.now()<end){const v=await fn();if(v)return v;await new Promise(r=>setTimeout(r,50));}throw Error('bounded wait expired');};
 try{
  await test('production bundle has no test issuance or out imports',async()=>{assert.ok(!production.includes('synthetic-github-token'));assert.ok(!production.includes('/__fixture__/'));assert.ok(!production.includes('abandonAPI'));assert.ok(!production.includes('/out/'));});
@@ -195,6 +208,31 @@ try{
   }
   apiReply='success';const t=await submit('api-after-unknown',apiRequest);await until(async()=> (await get(t.id)).status==='completed');assert.equal(apiCalls.length,15);
  });
+ for(const provider of ['grok','claude']){
+  await test(provider+' routine disabled and missing credentials reject before outbound',async()=>{
+   const before=nativeCalls.length;
+   for(const profile of ['disabled-bot','missing-bot-key']){const r=await request('/v1/tasks',{method:'POST',headers:{...auth(tokens.caller),'Idempotency-Key':provider+profile},body:JSON.stringify({...taskRequest,profile,model:'configured-bot'})});assert.equal(r.status,403);}
+   assert.equal(nativeCalls.length,before);
+  });
+  await test(provider+' routine starts once, messages and cancellation notify once, MCP confirms stop',async()=>{
+   nativeReply=200;const before=nativeCalls.length;
+   const t=await submit(provider+'-routine',{...taskRequest,profile:provider,model:'configured-bot'});
+   await until(async()=> (await get(t.id)).status==='running');assert.equal(nativeCalls.length,before+1);assert.equal((await get(t.id)).output,null);
+   await worker.nativeClaim(project,t.id,provider);
+   await request('/v1/tasks/'+t.id+'/messages',{method:'POST',headers:{...auth(tokens.caller),'Idempotency-Key':'routine-message'},body:JSON.stringify({text:'synthetic update'})});
+   await until(()=>nativeCalls.length===before+2);assert.equal(nativeCalls.at(-1).change,'message');
+   await request('/v1/tasks/'+t.id+'/cancel',{method:'POST',headers:auth(tokens.caller),body:'{}'});
+   await until(()=>nativeCalls.length===before+3);assert.equal(nativeCalls.at(-1).change,'cancel_requested');
+   assert.equal((await get(t.id)).status,'cancel_requested');await worker.nativeReport(project,t.id,provider,2);
+   assert.equal((await get(t.id)).status,'cancelled');await worker.alarmProbe('tick');assert.equal(nativeCalls.length,before+3);
+  });
+  await test(provider+' rejection and unknown receipts never retrigger',async()=>{
+   for(const [reply,expected] of [[401,'failed'],[503,'outcome_unknown'],['timeout','outcome_unknown']]){
+    nativeReply=reply;const before=nativeCalls.length,t=await submit(provider+'-'+reply,{...taskRequest,profile:provider,model:'configured-bot'});
+    await until(async()=> (await get(t.id)).status===expected);await worker.alarmProbe('tick');assert.equal(nativeCalls.length,before+1);
+   }
+  });
+ }
  await test('unsubscribe stops further acceptance, unavailable provider fails instead of paid fallback',async()=>{
   assert.equal((await tool('delete_event_subscription',{subscription_id:sub})).body.result.structuredContent.status,'gone');const t=await submit('no-subscription');await until(async()=> (await get(t.id)).status==='failed');
   const r=await request('/v1/tasks',{method:'POST',headers:{...auth(tokens.caller),'Idempotency-Key':'no-paid-fallback'},body:JSON.stringify({...taskRequest,mode:'api'})});assert.equal(r.status,403);

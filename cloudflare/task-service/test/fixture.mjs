@@ -14,6 +14,8 @@ export class PersonalFixtureStore extends observed(PigbibiTaskStore){}
 export class QuantFixtureStore extends observed(QuantTaskStore){}
 export default class Fixture extends WorkerEntrypoint {
   async subscriptionCount(){return this.env.TASK_STATE.get(this.env.TASK_STATE.idFromName(this.env.TASK_STORE_NAME)).subscriptionCount();}
+  async nativeClaim(owner,id,provider){const store=this.env.TASK_STATE.get(this.env.TASK_STATE.idFromName(this.env.TASK_STORE_NAME));return store.claim(owner,id,provider,'synthetic-worker','synthetic-attempt');}
+  async nativeReport(owner,id,provider,revision){const store=this.env.TASK_STATE.get(this.env.TASK_STATE.idFromName(this.env.TASK_STORE_NAME));return store.commitReport(owner,id,provider,'synthetic-worker','synthetic-attempt',{body:JSON.stringify({revision,status:'cancelled',output:null,artifacts:[]}),terminal_status:'cancelled'});}
   async alarmProbe(action,owner,id){const store=this.env.TASK_STATE.get(this.env.TASK_STATE.idFromName(this.env.TASK_STORE_NAME));if(action==='expire')await store.expireAPI(owner,id);else if(action==='tick')await store.probeTick();return store.alarmStats();}
   async abandonAPI(owner,request,cancel=false){const store=this.env.TASK_STATE.get(this.env.TASK_STATE.idFromName(this.env.TASK_STORE_NAME));const task=await store.submit(owner,'fixture-abandoned-api-'+cancel,JSON.stringify(request));await store.beginSubmission(owner,task.id);if(cancel)await store.cancel(owner,task.id);return task.id;}
   async client(redirect='https://chatgpt.com/connector_platform_oauth_redirect'){

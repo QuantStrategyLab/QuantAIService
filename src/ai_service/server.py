@@ -22,7 +22,7 @@ from .events import CallbackEndpointError, DotEventProvider, EventSubscriptions
 from .inference import ChatGPTPlanProvider
 from .gemini import GeminiProvider
 from .notifications import NativeNotifications
-from .providers import GrokWebhookProvider
+from .providers import ClaudeRoutineProvider, GrokWebhookProvider
 from .github_apps import GitHubApps, GitHubComments, validate_apps
 from .runtime import Conflict, NotFound, Policy, TaskRuntime
 from .transport import json_body
@@ -282,10 +282,11 @@ def validate_configuration(config):
         kind = item['type']
         if kind == 'dot_events':
             dot_count += 1
-        elif kind == 'grok_webhook':
+        elif kind in {'grok_webhook', 'claude_routine'}:
             item['key_env']
             # A synthetic key validates static constructor arguments only.
-            GrokWebhookProvider(item['url'], 'configuration-check', config['resource'])
+            provider_class = ClaudeRoutineProvider if kind == 'claude_routine' else GrokWebhookProvider
+            provider_class(item['url'], 'configuration-check', config['resource'])
         elif kind == 'chatgpt_plan_oauth':
             item['token_env']
             ChatGPTPlanProvider(lambda: None, plan_usage_authorized=item.get('plan_usage_authorized', False))
@@ -348,9 +349,12 @@ def build_application(config, *, github_key_loader=None, github_transport=None):
     runtime = TaskRuntime(Path(config['state_path']), providers, policies)
     events = None
     for name, item in config['providers'].items():
-        if item['type'] == 'grok_webhook':
+        if item['type'] in {'grok_webhook', 'claude_routine'}:
+            if item.get('enabled') is not True:
+                continue
             key = os.environ.get(item['key_env'])
-            providers[name] = GrokWebhookProvider(item['url'], key, config['resource'])
+            provider_class = ClaudeRoutineProvider if item['type'] == 'claude_routine' else GrokWebhookProvider
+            providers[name] = provider_class(item['url'], key, config['resource'])
         elif item['type'] == 'dot_events':
             if events is not None:
                 raise ValueError('one Dot event provider per service deployment')

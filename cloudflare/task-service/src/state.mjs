@@ -1,5 +1,6 @@
 import {callbackURL,signingKey,signedHeaders} from './webhooks.mjs';
 import {apiConfiguration,executeAPI} from './api.mjs';
+import {nativeConfiguration,triggerNative} from './native.mjs';
 import {outputValid} from './validation.mjs';
 import {serialize,valueOf,objectNode,nodeFrom} from './canonical.mjs';
 import { DurableObject } from "cloudflare:workers";
@@ -58,6 +59,7 @@ export class TaskStore extends DurableObject {
     this.sql = ctx.storage.sql;
     this.env = env;
     this.apiInFlight = new Set();
+    this.nativeInFlight = new Set();
     this.sql.exec(`
       CREATE TABLE IF NOT EXISTS tasks (
         id TEXT PRIMARY KEY, owner TEXT NOT NULL, idem TEXT NOT NULL,
@@ -70,6 +72,7 @@ export class TaskStore extends DurableObject {
       CREATE TABLE IF NOT EXISTS events (
         seq INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT NOT NULL,
         status TEXT NOT NULL, created REAL NOT NULL);
+      CREATE TABLE IF NOT EXISTS native_notifications (seq INTEGER PRIMARY KEY, status TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS messages (
         task_id TEXT NOT NULL, idem TEXT NOT NULL, body TEXT NOT NULL,
         revision INTEGER NOT NULL, created REAL NOT NULL,
@@ -151,6 +154,9 @@ export class TaskStore extends DurableObject {
     if (!["agent","api"].includes(request.mode) || !provider) denied("execution mode is unavailable");
     if (request.mode === "api") {
       try { apiConfiguration(this.env,provider,request); } catch { denied("execution mode is unavailable"); }
+    }
+    if (request.mode === 'agent' && provider !== 'dot') {
+      try { nativeConfiguration(this.env,provider); } catch { denied('execution mode is unavailable'); }
     }
     if (!policy.models[provider]?.includes(request.model)) denied("model is not admitted");
     const timeout = Object.hasOwn(request, "timeout_seconds") ? request.timeout_seconds : policy.max_timeout_seconds;
@@ -396,13 +402,13 @@ export class TaskStore extends DurableObject {
   }
 
   async alarm() {
-    const apiJobs=[];
+    const apiJobs=[],nativeJobs=[];
     await this.ctx.blockConcurrencyWhile(async()=>{
       const timestamp=now();
       this.ctx.storage.transactionSync(()=>{
         for(const task of this.sql.exec("SELECT * FROM tasks WHERE status IN ('queued','submitting','running') OR (status='cancel_requested' AND json_extract(request,'$.mode')='api' AND handle IS NULL)").toArray()){
           if(task.status==='submitting'||task.status==='cancel_requested'){
-            if(this.apiInFlight.has(task.id))continue;
+            if(this.apiInFlight.has(task.id)||this.nativeInFlight.has(task.id))continue;
             // Crash before acceptance is unknown, never an instruction to submit a new task.
             this.#state(task.id,'outcome_unknown',{error:'acceptance_unknown'});continue;
           }
@@ -410,6 +416,7 @@ export class TaskStore extends DurableObject {
           if(task.status!=='queued')continue;
           this.#state(task.id,'submitting');
           if(JSON.parse(task.request).mode==='api'){this.apiInFlight.add(task.id);apiJobs.push(task);continue;}
+          if(task.provider!=='dot'){this.nativeInFlight.add(task.id);nativeJobs.push({...task,change:'requested'});continue;}
           const active=this.sql.exec('SELECT * FROM subscriptions WHERE owner=? AND deleted IS NULL AND expires>?',task.owner,timestamp).toArray().some(s=>this.#eventAccess(task.owner,JSON.parse(s.identity_json)));
           if(task.provider!=='dot'||!active){this.#state(task.id,'failed',{error:'submission_rejected'});continue;}
           // Pure durable event acceptance has no remote side effect between these writes.
@@ -425,6 +432,15 @@ export class TaskStore extends DurableObject {
           if(rows.length)this.sql.exec('UPDATE subscriptions SET start_seq=? WHERE id=?',rows.at(-1).seq,sub.id);
         }
       });
+      this.sql.exec("UPDATE native_notifications SET status='outcome_unknown' WHERE status='sending'");
+      const notifications=this.sql.exec(`SELECT e.seq,e.status AS change,t.* FROM events e JOIN tasks t ON t.id=e.task_id
+        LEFT JOIN native_notifications n ON n.seq=e.seq WHERE e.status IN ('message','cancel_requested')
+        AND n.seq IS NULL AND t.provider!='dot' AND json_extract(t.request,'$.mode')='agent'
+        AND t.status IN ('running','cancel_requested') ORDER BY e.seq LIMIT 100`).toArray();
+      for(const event of notifications){
+        this.sql.exec("INSERT INTO native_notifications(seq,status) VALUES(?,'sending')",event.seq);
+        nativeJobs.push(event);
+      }
       const deliveries=this.sql.exec(`SELECT d.*,s.url,s.secret,s.previous_secret,s.previous_expires,s.owner,s.identity_json,s.expires,s.deleted FROM event_deliveries d JOIN subscriptions s ON s.id=d.subscription
         WHERE d.status='pending' AND d.next_attempt<=? ORDER BY d.seq LIMIT 4`,timestamp).toArray();
       for(const row of deliveries){
@@ -440,10 +456,29 @@ export class TaskStore extends DurableObject {
       // recovery state at most once per second instead of rearming every 10ms.
       const scheduledAt=now();
       const taskDeadlines=this.sql.exec("SELECT id,deadline FROM tasks WHERE status IN ('queued','submitting','running') OR (status='cancel_requested' AND json_extract(request,'$.mode')='api' AND handle IS NULL)").toArray()
-        .map(task=>this.apiInFlight.has(task.id)&&task.deadline<=scheduledAt?scheduledAt+1:task.deadline);
+        .map(task=>(this.apiInFlight.has(task.id)||this.nativeInFlight.has(task.id))&&task.deadline<=scheduledAt?scheduledAt+1:task.deadline);
       const next=[delivery,...taskDeadlines].filter(v=>v!==null);
       if(next.length)await this.ctx.storage.setAlarm(Math.max(Date.now()+10,Math.min(...next)*1000));
     });
+    // Marked durably before sending. Lost receipts never cause a second routine run.
+    for(const task of nativeJobs){
+      let status='accepted',handle;
+      try{
+        const current=this.#row(task.owner,task.id);
+        if(task.change==='requested'&&(current.status==='cancel_requested'||task.deadline<=now())){
+          this.#state(task.id,'cancelled');continue;
+        }
+        handle=await triggerNative(this.env,task.provider,{task_id:task.id,project:task.owner,change:task.change,revision:task.revision},task.change==='requested'?task.deadline-now():30);
+      }catch(e){status=e.name==='SubmissionRejected'?'rejected':'outcome_unknown';}
+      finally{this.nativeInFlight.delete(task.id);}
+      this.ctx.storage.transactionSync(()=>{
+        if(task.seq!==undefined){this.sql.exec('UPDATE native_notifications SET status=? WHERE seq=?',status,task.seq);return;}
+        // A fast worker may have already claimed, cancelled or completed the task.
+        if(this.#row(task.owner,task.id).status!=='submitting')return;
+        this.#state(task.id,status==='accepted'?'running':status==='rejected'?'failed':'outcome_unknown',
+          {handle:handle?JSON.stringify(handle):null,error:status==='accepted'?null:status==='rejected'?'submission_rejected':'acceptance_unknown'});
+      });
+    }
     // The durable submitting transition commits before any outbound inference.
     // A crash/lost receipt is outcome_unknown and never submits a replacement.
     for(const task of apiJobs){

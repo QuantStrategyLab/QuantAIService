@@ -2,7 +2,7 @@
 
 独立部署的 Cloudflare Worker、OAuth KV 和 SQLite Durable Object。此目录的生产入口使用 Quant 状态空间；Pigbibi 回归夹具使用单独的测试状态类。保留 DO 类名 PersonalTaskStore 仅为存储绑定兼容，组织身份由服务端配置限定。
 
-Dot 是当前 agent 执行方。API 模式保留同一任务提交、查询、事件和幂等合同，当前支持旧服务已有的 Gemini 文本 JSON 协议；默认关闭。Claude、Grok 不启用。
+Dot 是当前 agent 执行方。API 模式保留同一任务提交、查询、事件和幂等合同，当前支持旧服务已有的 Gemini 文本 JSON 协议；默认关闭。Claude、Grok Routine 已有适配，默认关闭。
 
 MCP 的资源 metadata 和未登录 challenge 广告 `AUTH_CLIENTS` 中精确匹配该资源、provider 非 null 的已配置工作角色 scope 并集，顺序沿服务端 `SCOPES`；不根据请求、当前 token 或 REST 调用方推断权限。该广告供客户端在正常授权时申请所需能力，不是执行许可：MCP 基本操作仍要求 `tasks:work`，订阅及其管理仍要求 `events:subscribe`，原 client、admission、组织、项目和 audience 校验保持不变。REST 继续只广告当前读取或提交操作的最小 scope。
 
@@ -68,3 +68,15 @@ REST 机器入口中，`tasks:read` 允许 `GET /v1/tasks/lookup`、`GET /v1/tas
 公有 OAuth 客户端注册脚本要求 `node scripts/register-clients.mjs --config /absolute/private/registration.json`，配置含 organization、PROJECT_ID、PUBLIC_ORIGIN。远端模式另需 --remote 与准确 --namespace-id。已有 .local 注册计划时先读回，禁止盲重；不发 grant 或 token。
 
 生产采用须分别验证 OAuth、active 订阅、同一任务提交/领取/回传/原客户端消费和重连恢复；这些通过后才能切旧调用者并清理 VPS 专属项。
+
+## 其他 Routine 执行方
+
+`AGENT_PROVIDERS` 按服务端 provider 别名配置。每项必须显式设置 `enabled: true`、`type`、`url` 和 `key_env`，并注入对应 Secret；缺失配置、关闭或缺少凭据时，提交前拒绝。项目 policy、模型白名单及 OAuth worker 准入仍须分别配置，请求不能选择任意 provider。示例保持关闭：
+
+```json
+{"AGENT_PROVIDERS":{"grok":{"type":"grok_webhook","enabled":false,"url":"https://CONFIGURE_ROUTINE_HOST/trigger","key_env":"GROK_ROUTINE_KEY"},"claude":{"type":"claude_routine","enabled":false,"url":"https://api.anthropic.com/v1/claude_code/routines/trig_CONFIGURE/fire","key_env":"CLAUDE_ROUTINE_TOKEN"}}}
+```
+
+Claude 使用[官方 Routine API](https://platform.claude.com/docs/en/api/claude-code/routines-fire)，以 Routine 专用 Bearer token、`anthropic-version` 和 `text` 请求体触发；Grok 使用[Routine webhook](https://cursor.com/help/grok-bot/routines)。触发只发送任务 ID、项目、revision、change 和 MCP 地址，不携带任务材料或推理凭据。HTTP 200 只表示开始执行，结果仍须经已准入的相同 provider 领取和回报。不会用触发回执证明模型身份。
+
+触发前持久化状态；超时、5xx 或进程中断保留 `outcome_unknown`，不会自动重新触发。追加材料和取消通知按事件发送至多一次；取消完成仍需 worker 确认。Claude Routine 没有幂等键，不能把 Dot 的事件重试规则套到 Routine。开启任一 Routine、创建 token 或实际测试均按具体授权执行。

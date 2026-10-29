@@ -42,7 +42,7 @@ def validate_apps(config):
                 or not isinstance(route['private_key_ref'], str)
                 or re.fullmatch(r'[A-Za-z0-9_.:-]{1,200}', route['private_key_ref']) is None
                 or not isinstance(route['provider'], str)
-                or config['providers'].get(route['provider'], {}).get('type') not in {'dot_events', 'grok_webhook'}):
+                or config['providers'].get(route['provider'], {}).get('type') not in {'dot_events', 'grok_webhook', 'claude_routine'}):
             raise ValueError('invalid App worker route')
         grants = [g for g in config['grants'] if g['identity'] == identity and 'tasks:work' in g['scopes']]
         if not grants or any(g.get('provider') != route['provider'] for g in grants):

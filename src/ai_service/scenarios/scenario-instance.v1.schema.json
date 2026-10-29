@@ -87,7 +87,7 @@
       "properties": {
         "phase": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"},
         "role": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"},
-        "worker_type": {"enum": ["dot", "grok", "api"], "default": "dot"},
+        "worker_type": {"enum": ["dot", "grok", "claude", "api"], "default": "dot"},
         "route_ref": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"},
         "model_ref": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"},
         "tool_sets": {
@@ -208,7 +208,7 @@
             }
           },
           "stages": {
-            "items": {"properties": {"phase": {"enum": ["author", "request", "review"]}, "worker_type": {"enum": ["dot", "grok"]}}}
+            "items": {"properties": {"phase": {"enum": ["author", "request", "review"]}, "worker_type": {"enum": ["dot", "grok", "claude"]}}}
           },
           "executor_ref": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"}
         }
@@ -235,7 +235,7 @@
               }
             }
           },
-          "stages": {"items": {"properties": {"phase": {"enum": ["request", "review"]}, "worker_type": {"enum": ["dot", "grok"]}}}},
+          "stages": {"items": {"properties": {"phase": {"enum": ["request", "review"]}, "worker_type": {"enum": ["dot", "grok", "claude"]}}}},
           "executor_ref": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"}
         }
       }
@@ -260,7 +260,7 @@
               }
             }
           },
-          "stages": {"items": {"properties": {"phase": {"enum": ["discover", "review"]}, "worker_type": {"enum": ["dot", "grok"]}}}}
+          "stages": {"items": {"properties": {"phase": {"enum": ["discover", "review"]}, "worker_type": {"enum": ["dot", "grok", "claude"]}}}}
         }
       }
     },
@@ -327,7 +327,7 @@
               }
             }
           },
-          "stages": {"items": {"properties": {"phase": {"enum": ["analyze", "confirm"]}, "worker_type": {"enum": ["dot", "grok"]}}}}
+          "stages": {"items": {"properties": {"phase": {"enum": ["analyze", "confirm"]}, "worker_type": {"enum": ["dot", "grok", "claude"]}}}}
         }
       }
     },
@@ -352,7 +352,7 @@
           },
           "stages": {
             "items": {
-              "properties": {"phase": {"enum": ["select", "group", "history_match", "draft"]}, "worker_type": {"enum": ["dot", "grok"]}}
+              "properties": {"phase": {"enum": ["select", "group", "history_match", "draft"]}, "worker_type": {"enum": ["dot", "grok", "claude"]}}
             }
           }
         }
@@ -387,7 +387,7 @@
                   "then": {"properties": {"phase": {"const": "api"}}}
                 },
                 {
-                  "if": {"properties": {"worker_type": {"enum": ["dot", "grok"]}}, "required": ["worker_type"]},
+                  "if": {"properties": {"worker_type": {"enum": ["dot", "grok", "claude"]}}, "required": ["worker_type"]},
                   "then": {"properties": {"phase": {"const": "agent"}}}
                 }
               ]
