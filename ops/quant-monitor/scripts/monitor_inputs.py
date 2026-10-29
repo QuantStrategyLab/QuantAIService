@@ -11,6 +11,7 @@ import os
 import re
 import shutil
 import tempfile
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.request import HTTPRedirectHandler, Request, build_opener
@@ -232,13 +233,18 @@ def refresh_inputs(root):
         stream = os.environ.get('BINANCE_REPORT_ARCHIVE_STREAM_ID', '').strip()
         scope = os.environ.get('BINANCE_REPORT_ARCHIVE_ACCOUNT_SCOPE_SHA256', '').strip()
         configured = bool(uri or stream or scope)
+        lifecycle_start = time.monotonic()
+        _stage('lifecycle_reads', 'started')
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             sync_lifecycle_artifacts.main([])
             if not configured:
                 sync_binance_live_runs.run_from_environment()
+        _stage('lifecycle_reads', 'finished', time.monotonic() - lifecycle_start)
         status_path = root / 'monitor/data/lifecycle-artifacts/binance-report-source.json'
         if uri or stream or scope:
             from google.cloud import storage
+            archive_start = time.monotonic()
+            _stage('archive_reads', 'started')
             try:
                 try:
                     client = storage.Client()
@@ -250,6 +256,7 @@ def refresh_inputs(root):
                 source_status = {'status': 'error', 'reason': exc.reason}
             else:
                 source_status = {'status': 'ready'}
+            _stage('archive_reads', 'finished', time.monotonic() - archive_start)
             source_status.update(schema_version='quant_monitor_binance_report_source.v1',
                                  stream_id=stream, as_of=datetime.now(timezone.utc).isoformat())
             sync_binance_live_runs._write_json(status_path, source_status)
@@ -261,6 +268,15 @@ def refresh_inputs(root):
                 os.environ.pop(key, None)
             else:
                 os.environ[key] = value
+
+
+def _stage(stage, event, elapsed=None):
+    if os.environ.get('MONITOR_INPUT_REFRESH_IN_CYCLE') != 'true':
+        return
+    value = {'component': 'monitor_input_refresh', 'stage': stage, 'event': event}
+    if elapsed is not None:
+        value['elapsed_seconds'] = round(elapsed, 3)
+    print(json.dumps(value, separators=(',', ':')), flush=True)
 
 
 def run_adapter(store, *, verify_only=False, execution_id=None, source_kind='github_actions'):
@@ -286,7 +302,10 @@ def run_adapter(store, *, verify_only=False, execution_id=None, source_kind='git
             root = Path(directory)
             restore(raw, root)
             refresh_inputs(root)
+            pack_start = time.monotonic()
+            _stage('input_pack', 'started')
             prepared = input_archive(root, refreshed=True, source_kind=source_kind)
+            _stage('input_pack', 'finished', time.monotonic() - pack_start)
     except Exception:
         # Source reads and local preparation have no external write to replay.
         # A known claim can be released so fresh inputs can recover next time.

@@ -1,4 +1,5 @@
 """Offline input scope and refresh checks. No real data or external calls."""
+import io
 import json
 import os
 import sys
@@ -32,6 +33,14 @@ def fixture(root):
 
 
 class InputBoundaryTests(unittest.TestCase):
+    def test_cloud_stage_log_contains_only_fixed_stage_and_duration(self):
+        output = io.StringIO()
+        with patch.dict(os.environ, {'MONITOR_INPUT_REFRESH_IN_CYCLE': 'true'}), \
+             patch('sys.stdout', output):
+            inputs._stage('archive_reads', 'finished', 1.23456)
+        self.assertEqual(json.loads(output.getvalue()), {'component': 'monitor_input_refresh',
+                         'stage': 'archive_reads', 'event': 'finished', 'elapsed_seconds': 1.235})
+
     def test_roundtrip_preserves_live_and_snapshot_data_but_not_core_ledger(self):
         with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as other:
             root, target = Path(directory), Path(other)
