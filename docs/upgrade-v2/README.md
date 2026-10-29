@@ -10,6 +10,6 @@
 
 ## Migration history
 
-The dated `QUANT.zh-CN.md`, `IDENTITY-INVENTORY.zh-CN.md` and `RETIRED-V1.zh-CN.md` files retain migration, login-inventory and retirement context. They contain version-specific or environment-specific statements and are not the current connection guide or proof of current login/deployment. In particular, the former shared-core/thin-wrapper design was superseded by the independent runtime baseline.
+The dated `quant.zh-CN.md`, `identity-inventory.zh-CN.md` and `retired-v1.zh-CN.md` files retain migration, login-inventory and retirement context. They contain version-specific or environment-specific statements and are not the current connection guide or proof of current login/deployment. In particular, the former shared-core/thin-wrapper design was superseded by the independent runtime baseline.
 
 V1 gateway components and fixed business orchestration are retired from active source. The old Cloudflare dashboard is not a V2 API entry. Business prompts, validation, adoption and financial permissions remain with the owning business repository. This index adds no authority to restore old workflows, merge, deploy, or submit business tasks.

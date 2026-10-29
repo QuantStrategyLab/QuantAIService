@@ -1,6 +1,6 @@
 # Async Codex Audit Service Deployment
 
-**V1 / history only.** This page preserves the retired async Codex audit VPS design and its old deployment commands for historical reference. It is not current deployment guidance and must not be used to restore the retired Codex/Cursor business CLI path. The independently packaged project-scoped native task service is described in the [current task-service README](../README.md), and the retirement is recorded in [V1 retirement](upgrade-v2/RETIRED-V1.zh-CN.md). This notice does not assert that every historical cloud process has already been stopped.
+**V1 / history only.** This page preserves the retired async Codex audit VPS design and its old deployment commands for historical reference. It is not current deployment guidance and must not be used to restore the retired Codex/Cursor business CLI path. The independently packaged project-scoped native task service is described in the [current task-service README](../README.md), and the retirement is recorded in [V1 retirement](upgrade-v2/retired-v1.zh-CN.md). This notice does not assert that every historical cloud process has already been stopped.
 
 AIAuditBridge uses an async service contract to avoid keeping a GitHub Actions request open while Codex runs on the VPS.
 
@@ -108,7 +108,7 @@ when policy omits `low_cost_model`) resolve from the same live catalog filtered 
 `OPENAI_MODEL`, `DUAL_REVIEW_GPT_MODEL`, and policy `low_cost_model` values stay
 as-is. If the catalog has no usable OpenAI model, those defaults fail closed.
 
-Dashboard health panels intentionally separate online service health, organization workflow health, background job status, and artifact/content evidence. See [`health_taxonomy.md`](health_taxonomy.md) before treating a dashboard status as an automation gate.
+Dashboard health panels intentionally separate online service health, organization workflow health, background job status, and artifact/content evidence. See [`health-taxonomy.md`](health-taxonomy.md) before treating a dashboard status as an automation gate.
 
 ### 2. Deploy the Cloudflare Worker
 

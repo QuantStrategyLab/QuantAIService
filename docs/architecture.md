@@ -75,7 +75,7 @@ operations: **Analyze**, **Execute**, and **Review**.
 | `/v1/ai/automation/triage` | POST | Structured failure triage and bounded next-step advice | No |
 | `/v1/ai/feedback/*` | GET/POST | Change tracking and evaluation | No |
 
-Health status vocabulary is defined in [`health_taxonomy.md`](health_taxonomy.md). Do not use `/v1/ai/health` as a substitute for monthly audit results, artifact freshness, or strategy-level health evidence.
+Health status vocabulary is defined in [`health-taxonomy.md`](health-taxonomy.md). Do not use `/v1/ai/health` as a substitute for monthly audit results, artifact freshness, or strategy-level health evidence.
 
 Automation triage is advisory: `auto_fix_allowed` and `open_fix_pr` describe eligibility
 to propose a bounded repair PR, not permission to merge, deploy, or change an account.
@@ -117,8 +117,8 @@ POST /v1/ai/analyze
 `service/provider_scenarios.py`, not this Analyze endpoint. It consumes a
 verified `qsl.research_task.v1` and produces an advisory Issue comment without
 raw bars, credentials, or P4--P6 authority. Provider eligibility and fallback
-rules remain in the [scenario policy](provider-call-scenarios-2026-09-17.md).
-The [implementation and audit register](bounded_research_diagnosis.md#2026-10-06-implementation-and-audit-register)
+rules remain in the [scenario policy](provider-call-scenarios.md).
+The [implementation and audit register](bounded-research-diagnosis.md#2026-10-06-implementation-and-audit-register)
 distinguishes that diagnosis from candidate generation and real validation.
 
 ### Execute (async)
