@@ -138,6 +138,9 @@ export class TaskService extends WorkerEntrypoint {
             result=nodeFrom({content:[{type:'text',text:JSON.stringify(value)}],structuredContent:value,isError:false});break;
           }
           const store=this.store();
+          // Existing native-host tools may cache the single-project input schema.
+          // Resolve an event task only inside the worker's explicit, server-controlled list.
+          if(a.project===undefined){const project=await store.projectForTask(workerProjects(this.env,c.identity),a.task_id);c=this.context(c.identity,request,project);}
           await this.snapshot(c,a.task_id,true);
           if(params.name==='claim_task')await store.claim(c.project,a.task_id,c.provider,c.worker,a.attempt_id);
           if(params.name==='report_task_result'){

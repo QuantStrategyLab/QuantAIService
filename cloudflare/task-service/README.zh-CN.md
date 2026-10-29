@@ -85,6 +85,6 @@ Claude 使用[官方 Routine API](https://platform.claude.com/docs/en/api/claude
 
 一个组织的 Worker 可承载多个显式项目上下文，沿用同一任务存储中的项目隔离。`GITHUB_WORKLOAD_GRANTS_JSON` 接受最多 100 个精确 grant；签名核验前的 JWT 声明仅用于选择候选，必须唯一匹配 subject 和固定 workflow/ref/仓库约束，随后仍核验完整签名、audience 和 scope。项目来自选中的服务端 grant 和唯一 context，同组织下的 context 还必须属于原服务 owner；调用方不能用 query 或任务内容切换项目。
 
-worker 默认保持原项目。要访问其他项目，在对应 `AUTH_CLIENTS[client_id].projects` 中列出准确的仓库全名，并分别配置 `PROJECT_CONTEXTS` 和 `PROJECT_POLICIES`；这些项目必须与原身份同组织、同 owner，并允许该 provider。额外项目的工具调用传入 `project`，事件订阅仍按准确 project 建立。既有 token、OAuth client、scope 和原项目行为保持；配置列表不会代替各业务调用方准入，也不会自动创建原生宿主订阅。服务端移除项目或连接后，相关订阅停止投递。
+worker 默认保持原项目。要访问其他项目，在对应 `AUTH_CLIENTS[client_id].projects` 中列出准确的仓库全名，并分别配置 `PROJECT_CONTEXTS` 和 `PROJECT_POLICIES`；这些项目必须与原身份同组织、同 owner，并允许该 provider。额外项目可显式传入 `project`。为兼容原生宿主已缓存的单项目工具 schema，任务工具在未传 project 时仅在该 worker 的明确准入列表内按已存任务 ID 定位项目；不会搜索或访问其他项目。事件订阅仍按准确 project 建立。既有 token、OAuth client、scope 和原项目行为保持；配置列表不会代替各业务调用方准入，也不会自动创建原生宿主订阅。服务端移除项目或连接后，相关订阅停止投递。
 
 首次切换前，由原调用方完成合成任务提交和消费，并由原 worker 连接完成相同项目的订阅、领取和回报。各项目验证通过后分别修改调用地址和启用开关；不要将配置检查当成真实任务验收，也不要在仍有旧调用方时停止旧服务。
