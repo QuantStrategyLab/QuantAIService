@@ -24,6 +24,15 @@ deployment. The monitor reads strategy artifacts, builds a health dashboard,
 detects drift, files issue-only optimization proposals, and sends Telegram
 alerts for operational problems.
 
+A shared lifecycle status file that is missing, unreadable, invalid, stale, or
+future-dated makes the affected market evidence unavailable. Operational alerts
+group that shared file failure while retaining each market's error and existing
+delivery identity. Live coverage configuration and current drift evidence are
+reported separately; missing data is not a healthy strategy result. Telegram
+messages are sent as plain text, with explanations and stable diagnostic codes
+for investigation. `QSL_NOTIFY_LANG` selects Chinese (`zh`, including `zh-CN`)
+or English (`en`); unset and unrecognized values default to English.
+
 ## Status
 
 Experimental. Use at your own risk. This project is not financial advice and

@@ -49,6 +49,10 @@ _GITHUB_UPSTREAM_CODES = frozenset({
     "github_api_rate_limit",
     "github_api_unavailable",
 })
+_STATUS_FILE_REASONS = frozenset({
+    "artifact_status_missing", "artifact_status_read_failed", "artifact_status_invalid",
+    "artifact_status_stale", "artifact_status_future",
+})
 _SAFE_RESET_AT = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:+.\-Z]{8,32}$")
 _LIVE_STREAM_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 _BINANCE_LIVE_PROFILE = "crypto_live_pool_rotation"
@@ -392,13 +396,25 @@ def _load_expected_coverage(
             not isinstance(payload, dict)
             or payload.get("schema_version") != _ARTIFACT_STATUS_SCHEMA
             or not isinstance(domain_statuses, dict)
-            or age > max_age
-            or age < -timedelta(minutes=5)
         ):
-            raise ValueError("artifact status is invalid or stale")
-    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise ValueError("artifact status is invalid")
+        if age > max_age:
+            reason = "artifact_status_stale"
+        elif age < -timedelta(minutes=5):
+            reason = "artifact_status_future"
+        else:
+            reason = None
+    except (OSError, KeyError, TypeError, ValueError, UnicodeDecodeError) as exc:
+        reason = ("artifact_status_missing" if isinstance(exc, FileNotFoundError)
+                  else "artifact_status_read_failed" if isinstance(exc, OSError)
+                  else "artifact_status_invalid")
+        error_type = type(exc).__name__
+    else:
+        error_type = "ValueError"
+    if reason:
         return {}, {}, None, {
-            domain: _artifact_status_error(domain, error_type=type(exc).__name__)
+            domain: _artifact_status_error(domain, error_type=error_type,
+                                           reason_code=reason, shared_root_cause=reason)
             for domain in domains
         }, set()
 
@@ -492,13 +508,16 @@ def _format_data_error_alerts(
     notify_lines: list[str] = []
     alert_identities: list[str] = []
     shared_groups: dict[str, list[dict[str, Any]]] = {}
+    status_groups: dict[str, list[dict[str, Any]]] = {}
     remainder: list[dict[str, Any]] = []
 
     for error in data_errors:
         shared = str(error.get("shared_root_cause") or "")
         code = str(error.get("code") or "")
         reason = str(error.get("reason_code") or code)
-        if shared in _GITHUB_UPSTREAM_CODES or (
+        if shared in _STATUS_FILE_REASONS and code == "artifact_sync_status_unavailable" and reason == shared:
+            status_groups.setdefault(shared, []).append(error)
+        elif shared in _GITHUB_UPSTREAM_CODES or (
             shared
             and _SAFE_TOKEN.fullmatch(shared)
             and (code in _GITHUB_UPSTREAM_CODES or reason in _GITHUB_UPSTREAM_CODES)
@@ -506,6 +525,15 @@ def _format_data_error_alerts(
             shared_groups.setdefault(shared or reason, []).append(error)
         else:
             remainder.append(error)
+
+    for reason, group in sorted(status_groups.items()):
+        domains = ",".join(sorted(str(item.get("domain") or "") for item in group))
+        notify_lines.append(f"[artifact_status] artifact_sync_status_unavailable reason={reason} domains={domains}")
+        # Preserve the previous per-domain identity despite the grouped display.
+        alert_identities.extend(
+            f"data_error:{item.get('domain') or ''}:artifact_sync_status_unavailable:{item.get('error_type') or ''}"
+            for item in group
+        )
 
     for shared_key, group in sorted(shared_groups.items()):
         domains = ",".join(sorted(str(item.get("domain") or "") for item in group))
@@ -550,12 +578,60 @@ def _alert_fingerprint(lines: list[str]) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def _build_alert_body(lines: list[str]) -> str:
-    return (
-        "🚨 quant-monitor operational\n"
-        "• scope: data/evidence or optimization-record delivery failure\n"
-        + "\n".join(f"• {line}" for line in lines)
-    )
+def _build_alert_body(lines: list[str], *, locale: str | None = None) -> str:
+    from quant_platform_kit.common.notification_localization import resolve_notification_locale
+
+    zh = resolve_notification_locale(os.environ.get("QSL_NOTIFY_LANG") if locale is None else locale) == "zh"
+    explanations = {
+        "artifact_status_missing": ("同步状态文件缺失", "Synchronization status file is missing"),
+        "artifact_status_read_failed": ("同步状态文件读取失败", "Synchronization status file could not be read"),
+        "artifact_status_invalid": ("同步状态文件格式或内容无效", "Synchronization status file is invalid"),
+        "artifact_status_stale": ("同步状态文件已过期", "Synchronization status file is stale"),
+        "artifact_status_future": ("同步状态文件时间超前", "Synchronization status file is future-dated"),
+        "live_coverage_configuration_missing": ("实时覆盖配置缺失，当前监测证据不可用", "Live coverage configuration is missing; monitoring evidence is unavailable"),
+        "live_drift_snapshot_unavailable": ("当前实时快照不可用，无法计算漂移", "Current live snapshot is unavailable; drift cannot be calculated"),
+        "live_coverage_configuration_invalid": ("实时覆盖配置无效", "Live coverage configuration is invalid"),
+        "live_coverage_stale": ("实时覆盖窗口已过期", "Live coverage window is stale"),
+        "live_coverage_future": ("实时覆盖窗口时间超前", "Live coverage window is future-dated"),
+        "live_archive_source_unavailable": ("实时归档来源不可用", "Live archive source is unavailable"),
+        "live_coverage_incomplete": ("实时覆盖不完整", "Live coverage is incomplete"),
+        "live_drift_baseline_unavailable": ("实时漂移基准不可用", "Live drift baseline is unavailable"),
+        "live_drift_unavailable": ("实时漂移证据不可用", "Live drift evidence is unavailable"),
+        "live_health_score_unavailable": ("实时健康评分不可用", "Live health score is unavailable"),
+        "profile_coverage_incomplete": ("预期策略证据不完整", "Expected strategy evidence is incomplete"),
+        "profile_coverage_unexpected": ("策略证据身份不符合预期", "Strategy evidence contains unexpected identities"),
+    }
+    rendered = []
+    monitors = [line for line in lines if line.startswith("[crypto] monitor_data_unavailable ")
+                and "reason=live_coverage_configuration_missing " in line]
+    drifts = [line for line in lines if line.startswith("[crypto] drift_data_unavailable ")
+              and "reason=live_drift_snapshot_unavailable " in line]
+    live_monitor, live_drift = (monitors[0], drifts[0]) if len(monitors) == len(drifts) == 1 else (None, None)
+    for line in lines:
+        if live_monitor and live_drift and line == live_drift:
+            continue
+        if live_monitor and live_drift and line == live_monitor:
+            detail = ("实时覆盖配置缺失；当前实时快照不可用，无法计算漂移" if zh else
+                      "Live coverage configuration is missing; the current live snapshot is unavailable for drift")
+            rendered.append(f"{detail}{'：' if zh else ': '}{live_monitor}{'；' if zh else '; '}{live_drift}")
+            continue
+        match = re.search(r"\breason=([A-Za-z][A-Za-z0-9_]*)", line)
+        translations = explanations.get(match.group(1)) if match else None
+        if translations:
+            explanation = translations[0 if zh else 1]
+        else:
+            if "issue_record_failed" in line:
+                explanation = "优化记录投递失败" if zh else "Optimization record delivery failed"
+            elif "github_api_" in line:
+                explanation = "GitHub 上游访问异常，相关证据不可用" if zh else "GitHub upstream access failed; evidence is unavailable"
+            else:
+                explanation = "监测数据或证据不可用，请根据代码排查" if zh else "Monitoring data or evidence is unavailable; investigate the code"
+        rendered.append(f"{explanation}{'：' if zh else ': '}{line}")
+    heading = ("🚨 量化监控｜运行告警\n"
+               "• 范围：数据、证据或优化记录投递异常\n"
+               if zh else "🚨 quant-monitor operational\n• scope: data/evidence or optimization-record delivery failure\n")
+    return (heading
+            + "\n".join(f"• {line}" for line in rendered))
 
 
 def _alert_state_path(root: Path) -> Path:
