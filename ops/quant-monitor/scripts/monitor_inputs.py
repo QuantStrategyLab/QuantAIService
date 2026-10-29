@@ -28,6 +28,33 @@ class _NoRedirect(HTTPRedirectHandler):
         return None
 
 
+def reader_installation_id(app_id, private_key, *, opener=None, now=None):
+    """Resolve the existing organization's installation using the App identity."""
+    import jwt
+
+    if not re.fullmatch(r'[1-9][0-9]*', app_id or '') or not private_key:
+        raise StateUnavailable('monitor_input_reader_unavailable')
+    now = int(datetime.now(timezone.utc).timestamp()) if now is None else int(now)
+    try:
+        assertion = jwt.encode({'iat': now - 60, 'exp': now + 540, 'iss': app_id}, private_key, algorithm='RS256')
+        request = Request('https://api.github.com/orgs/QuantStrategyLab/installation', headers={
+            'Authorization': 'Bearer ' + assertion, 'Accept': 'application/vnd.github+json',
+            'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'QuantStrategyLab-Monitor/1.0'})
+        with (opener or build_opener(_NoRedirect())).open(request, timeout=20) as response:
+            raw = response.read(65537)
+            if response.status != 200 or len(raw) > 65536:
+                raise ValueError('invalid response')
+            result = json.loads(raw)
+        installation = result.get('id') if isinstance(result, dict) else None
+        if (type(installation) is not int or installation <= 0 or result.get('app_id') != int(app_id)
+                or not isinstance(result.get('account'), dict)
+                or result['account'].get('login', '').lower() != 'quantstrategylab'):
+            raise ValueError('invalid installation')
+        return str(installation)
+    except Exception as exc:
+        raise StateUnavailable('monitor_input_reader_unavailable') from exc
+
+
 def mint_reader_token(app_id, installation_id, private_key, *, opener=None, now=None):
     """Mint the existing reader App's bounded token without exposing key or response."""
     import jwt

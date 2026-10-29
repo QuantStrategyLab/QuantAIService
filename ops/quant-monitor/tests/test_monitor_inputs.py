@@ -148,6 +148,18 @@ class InputBoundaryTests(unittest.TestCase):
         self.assertEqual(request.full_url, 'https://api.github.com/app/installations/34/access_tokens')
         self.assertEqual(sign.call_args.kwargs['algorithm'], 'RS256')
 
+    def test_reader_installation_matches_the_original_app_and_organization(self):
+        response = Mock()
+        response.status = 200
+        response.read.return_value = b'{"id":34,"app_id":12,"account":{"login":"QuantStrategyLab"}}'
+        opener = Mock()
+        opener.open.return_value.__enter__ = Mock(return_value=response)
+        opener.open.return_value.__exit__ = Mock(return_value=False)
+        with patch('jwt.encode', return_value='synthetic-jwt'):
+            self.assertEqual(inputs.reader_installation_id('12', 'synthetic-key', opener=opener, now=1000), '34')
+            with self.assertRaises(state.StateUnavailable):
+                inputs.reader_installation_id('13', 'synthetic-key', opener=opener, now=1000)
+
     def test_app_token_errors_are_fixed_and_do_not_expose_response(self):
         opener = Mock()
         opener.open.side_effect = RuntimeError('synthetic-sensitive-response')

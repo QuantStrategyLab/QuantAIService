@@ -86,8 +86,8 @@ class CloudJobTests(unittest.TestCase):
     def test_refresh_cycle_uses_fresh_input_once_before_consumption(self):
         input_store, root = Mock(), Mock()
         input_store.read.return_value = (b'synthetic', 3)
-        config = {'private_key': 'synthetic-key', 'archive_uri': 'synthetic',
-                  'stream_id': 'synthetic', 'account_scope_sha256': 'synthetic'}
+        config = {'private_key': 'synthetic-key', 'archive_uri': 'synthetic', 'stream_id': 'synthetic',
+                  'account_scope_sha256': 'synthetic', 'app_id': '1', 'installation_id': '2'}
         env = {'MONITOR_INPUT_REFRESH_IN_CYCLE': 'true', 'MONITOR_INPUT_READER_CONFIG_JSON': json.dumps(config),
                'MONITOR_READER_APP_ID': '1', 'MONITOR_READER_INSTALLATION_ID': '2',
                'CLOUD_RUN_EXECUTION': 'synthetic-execution'}
@@ -111,8 +111,8 @@ class CloudJobTests(unittest.TestCase):
 
     def test_refresh_failure_clears_token_and_does_not_consume_input(self):
         input_store = Mock()
-        config = {'private_key': 'synthetic-key', 'archive_uri': 'synthetic',
-                  'stream_id': 'synthetic', 'account_scope_sha256': 'synthetic'}
+        config = {'private_key': 'synthetic-key', 'archive_uri': 'synthetic', 'stream_id': 'synthetic',
+                  'account_scope_sha256': 'synthetic', 'app_id': '1', 'installation_id': '2'}
         env = {'MONITOR_INPUT_REFRESH_IN_CYCLE': 'true', 'MONITOR_INPUT_READER_CONFIG_JSON': json.dumps(config),
                'MONITOR_READER_APP_ID': '1', 'MONITOR_READER_INSTALLATION_ID': '2',
                'CLOUD_RUN_EXECUTION': 'synthetic-execution'}

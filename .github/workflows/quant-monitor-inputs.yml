@@ -12,6 +12,10 @@ on:
         description: Read the bound Binance archive without writing input state
         type: boolean
         default: false
+      seed_reader_config:
+        description: Transfer existing reader configuration to the approved protected target once
+        type: boolean
+        default: false
 permissions:
   contents: read
 concurrency:
@@ -19,7 +23,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   inputs:
-    if: github.repository == 'QuantStrategyLab/QuantAIService' && github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' || vars.QUANT_MONITOR_INPUT_REFRESH_ENABLED == 'true')
+    if: github.repository == 'QuantStrategyLab/QuantAIService' && github.ref == 'refs/heads/main' && !inputs.seed_reader_config && (github.event_name == 'workflow_dispatch' || vars.QUANT_MONITOR_INPUT_REFRESH_ENABLED == 'true')
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -95,3 +99,39 @@ jobs:
           GH_TOKEN: ${{ steps.writer.outputs.token }}
           ISSUE_DELIVERY_ENABLED: 'true'
         run: python -B ops/quant-monitor/scripts/monitor_findings.py
+  seed-reader-config:
+    if: github.repository == 'QuantStrategyLab/QuantAIService' && github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && inputs.seed_reader_config && github.run_attempt == 1
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      PYTHONPATH: ops/quant-monitor/scripts:ops/quant-monitor
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+      - name: Install existing pinned monitor dependencies
+        run: |
+          python -m pip --isolated install --require-hashes --only-binary=:all: -r ops/quant-monitor/requirements-linux-py312.lock
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
+        with:
+          project_id: longbridgequant
+          workload_identity_provider: ${{ vars.QUANT_MONITOR_INPUTS_GCP_WIF_PROVIDER }}
+          create_credentials_file: true
+          export_environment_variables: true
+      - name: Transfer existing reader configuration once
+        env:
+          MONITOR_READER_CONFIG_TARGET: ${{ secrets.QUANT_MONITOR_READER_CONFIG_TARGET }}
+          QUANT_MONITOR_READER_APP_ID: ${{ vars.QUANT_MONITOR_READER_APP_ID }}
+          QUANT_MONITOR_READER_APP_PRIVATE_KEY: ${{ secrets.QUANT_MONITOR_READER_APP_PRIVATE_KEY }}
+          QUANT_MONITOR_BINANCE_REPORT_ARCHIVE_URI: ${{ secrets.QUANT_MONITOR_BINANCE_REPORT_ARCHIVE_URI }}
+          QUANT_MONITOR_BINANCE_STREAM_ID: ${{ secrets.QUANT_MONITOR_BINANCE_STREAM_ID }}
+          QUANT_MONITOR_BINANCE_REPORT_SCOPE_SHA256: ${{ secrets.QUANT_MONITOR_BINANCE_REPORT_SCOPE_SHA256 }}
+        run: python -B ops/quant-monitor/scripts/seed_monitor_reader_config.py
