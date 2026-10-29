@@ -4,7 +4,7 @@
 
 > 状态：`HISTORICAL_DRAFT_NOT_CURRENT_QSL_AUTHORITY`
 >
-> 本文记录早期 AIAuditBridge 的审计/修复设想，不定义 Quant 的 P0–P6 运行资格，也不描述当前 TQQQ P1–P3 主线。P0–P6 架构与运行边界见 `QuantRuntimeSettings/docs/QSL_P0_P6_CURRENT_STATE_AND_DRIVER_POLICY.zh-CN.md`；任何与其冲突的“人工审核”“自动合并”或“完全无人值守”措辞都只能按本草稿的历史上下文理解。
+> 本文记录早期 AIAuditBridge 的审计/修复设想，不定义 Quant 的 P0–P6 运行资格，也不描述当前 TQQQ P1–P3 主线。P0–P6 架构与运行边界见 `QuantRuntimeSettings/docs/qsl-p0-p6-current-state-and-driver-policy.zh-CN.md`；任何与其冲突的“人工审核”“自动合并”或“完全无人值守”措辞都只能按本草稿的历史上下文理解。
 
 > 目标：评估当前 AIAuditBridge / Codex review-gate / monthly audit / dashboard-org-health / auto-merge / QSL 管理链路，是否足够支撑“策略智能监控优化、月度报告审计、健康状态检测、AI 自动修复、自动合并 PR”的无人值守目标。
 
