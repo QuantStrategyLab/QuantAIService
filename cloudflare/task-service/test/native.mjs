@@ -230,6 +230,16 @@ try{
  await test('abandoned durable API submission becomes unknown without an outbound replacement',async()=>{
   const before=apiCalls.length;for(const cancel of [false,true]){const id=await worker.abandonAPI(project,apiRequest,cancel);await until(async()=> (await get(id)).status==='outcome_unknown');}assert.equal(apiCalls.length,before);
  });
+ await test('Dot inline images are rendered as MCP image content without changing the stored request',async()=>{
+  const image={type:'image',mime_type:'image/png',base64:'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jrN8AAAAASUVORK5CYII='};
+  const task=await submit('native-image-material',{...taskRequest,materials:[image]});
+  const result=(await tool('get_task',{task_id:task.id})).body.result;
+  assert.deepEqual(result.content[1],{type:'image',mimeType:'image/png',data:image.base64});
+  assert.deepEqual((await get(task.id)).request.materials,[image]);
+  const rejected=await request('/v1/tasks',{method:'POST',headers:{...auth(tokens.caller),'Idempotency-Key':'invalid-inline-image'},body:JSON.stringify({...taskRequest,materials:[{...image,base64:'YQ=='}]})});
+  assert.equal(rejected.status,400);
+  await request('/v1/tasks/'+task.id+'/cancel',{method:'POST',headers:auth(tokens.caller),body:'{}'});
+ });
  await test('unconfigured model/profile/image and foreign organization cause no API request',async()=>{
   const before=apiCalls.length;
   for(const changes of [{model:'another-model'},{profile:'unconfigured'},{materials:[{type:'image',mime_type:'image/png',base64:'YQ=='}]}]){

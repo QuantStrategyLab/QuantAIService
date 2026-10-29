@@ -53,7 +53,15 @@ def main():
         result = verify(args.workspace, env=os.environ)
         code = 0
     except Exception as exc:
-        result = {'status': 'failed', 'reason': ('http_status_' + str(exc.code)) if isinstance(exc, HTTPError) else type(exc).__name__,
+        reason = ('http_status_' + str(exc.code)) if isinstance(exc, HTTPError) else type(exc).__name__
+        if isinstance(exc, HTTPError):
+            try:
+                category = json.loads(exc.read(4096)).get('error')
+            except (ValueError, AttributeError):
+                category = None
+            if category in {'workload_token_rejected', 'workload_operation_denied', 'access denied', 'invalid arguments', 'task conflict', 'invalid_token', 'insufficient_scope', 'invalid_request'}:
+                reason += ':' + category
+        result = {'status': 'failed', 'reason': reason,
                   'synthetic_only': True, 'business_access': False,
                   'production_ledger_access': False}
         code = 3

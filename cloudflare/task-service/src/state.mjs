@@ -1,3 +1,4 @@
+import {imageMaterials} from './image-materials.mjs';
 import {workerContext} from './projects.mjs';
 import {callbackURL,signingKey,signedHeaders} from './webhooks.mjs';
 import {apiConfiguration,executeAPI} from './api.mjs';
@@ -167,6 +168,7 @@ export class TaskStore extends DurableObject {
     if (!object(request.output_schema)) invalid("output_schema must be an object");
     noExternalReferences(request.output_schema);
     if (bytes(canonicalRequest).length > policy.max_request_bytes) invalid("request too large");
+    if(provider==='dot')imageMaterials(request.materials??[]);
     const requestDigest = await digest(canonicalRequest);
     const record = this.ctx.storage.transactionSync(() => {
       const old = this.sql.exec("SELECT * FROM tasks WHERE owner=? AND idem=?", owner, idempotencyKey).toArray()[0];

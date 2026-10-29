@@ -2159,9 +2159,11 @@ class SDKDependencySetupTests(unittest.TestCase):
                 for package in (source / 'src').iterdir():
                     shutil.copytree(package, site / package.name, dirs_exist_ok=True)
                 if qas:
-                    metadata = site / 'quant_ai_service-2.0.13.dist-info/METADATA'
+                    import tomllib
+                    sdk_version = tomllib.loads((source / 'pyproject.toml').read_text())['project']['version']
+                    metadata = site / ('quant_ai_service-' + sdk_version + '.dist-info/METADATA')
                     metadata.parent.mkdir()
-                    metadata.write_text('Name: quant-ai-service\\nVersion: ' + ('0.0.0' if fault == 'version' else '2.0.13') + '\\n')
+                    metadata.write_text('Name: quant-ai-service\\nVersion: ' + ('0.0.0' if fault == 'version' else sdk_version) + '\\n')
                     if fault == 'digest':
                         with (site / 'ai_service/client.py').open('a') as out:
                             out.write('\\n# changed fixture bytes\\n')
