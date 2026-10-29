@@ -1966,11 +1966,13 @@ def main(*, effects_enabled: bool = True, emit_summary: bool = True,
         for snapshot in snapshots
     }
     # A prior store row cannot repair an expected profile's missing refresh.
-    # Keep other current rows locally; QRS's aggregate unavailable contract
-    # intentionally clears its display rows at the receiver.
+    # A failed domain cannot contribute a health score to the published view.
+    failed_domains = {error.get("domain") for error in data_errors}
+    domains_known = failed_domains.issubset(DOMAINS)
     normalized_rows = [
         row for row in normalized_payload.get("strategies", [])
         if (row.get("domain"), row.get("profile")) in refreshed_identities
+        and (not data_errors or (domains_known and row.get("domain") not in failed_domains))
     ]
     normalized_payload["strategies"] = normalized_rows
     normalized_payload["summary"] = {
@@ -1979,7 +1981,9 @@ def main(*, effects_enabled: bool = True, emit_summary: bool = True,
            for status in ("healthy", "watch", "review", "critical")},
     }
     if data_errors:
-        normalized_payload["data_status"] = "unavailable"
+        normalized_payload["data_status"] = (
+            "partial" if normalized_rows and domains_known and not collector_payload_invalid else "unavailable"
+        )
         normalized_payload["errors"] = list(dict.fromkeys([
             *normalized_payload.get("errors", []),
             *(error["code"] for error in data_errors),
