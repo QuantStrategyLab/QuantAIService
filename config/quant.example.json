@@ -19,7 +19,14 @@
     "grok": {
       "type": "grok_webhook",
       "url": "https://CONFIGURE_CURSOR_ROUTINE_WEBHOOK",
-      "key_env": "AI_SERVICE_GROK_WEBHOOK_KEY"
+      "key_env": "AI_SERVICE_GROK_WEBHOOK_KEY",
+      "enabled": false
+    },
+    "claude": {
+      "type": "claude_routine",
+      "enabled": false,
+      "url": "https://api.anthropic.com/v1/claude_code/routines/trig_CONFIGURE/fire",
+      "key_env": "AI_SERVICE_CLAUDE_ROUTINE_TOKEN"
     }
   },
   "projects": {

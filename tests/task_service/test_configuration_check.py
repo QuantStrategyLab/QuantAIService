@@ -106,6 +106,16 @@ class ConfigurationCheckTests(unittest.TestCase):
             self.assertEqual(error.exception.code, 1)
             self.assertFalse(json.loads(output.getvalue())['valid'])
 
+    def test_native_providers_default_disabled_and_do_not_read_keys(self):
+        self.config['providers'] = {
+            'grok': {'type': 'grok_webhook', 'url': 'https://routine.example/fire', 'key_env': 'PRIVATE_KEY'},
+            'claude': {'type': 'claude_routine', 'enabled': False,
+                       'url': 'https://api.anthropic.com/v1/claude_code/routines/trig_TEST/fire',
+                       'key_env': 'PRIVATE_CLAUDE_KEY'}}
+        with patch('ai_service.server.os.environ.get', side_effect=AssertionError('credential read')):
+            app = build_application(self.config)
+        self.assertEqual(app.runtime.providers, {})
+
     def test_validation_returns_the_same_authorizer_and_policies_used_by_build(self):
         self.config['providers'] = {'dot': {'type': 'dot_events'}}
         auth, policies = validate_configuration(self.config)

@@ -37,6 +37,8 @@ class GrokWebhookProvider:
             body=json_body({'type': 'task.requested', 'task_id': task_id,
                             'project': owner, 'resource': self._resource,
                             'change': change, 'revision': revision}))
+        if reply.status >= 500:
+            raise RuntimeError('routine acceptance unknown')
         if reply.status != 200:
             # Cursor explicitly documents non-200 as "a run did not start".
             raise SubmissionRejected('native routine rejected the trigger')
@@ -45,3 +47,28 @@ class GrokWebhookProvider:
         # No documented native cancellation API. The task tool exposes cancel_requested;
         # only the authenticated execution attempt can confirm it stopped.
         return None
+
+
+class ClaudeRoutineProvider(GrokWebhookProvider):
+    """Claude Code subscription routine, not an Anthropic inference API key."""
+
+    def __init__(self, webhook_url, key, task_resource, *, transport=None):
+        import re
+        parsed = urlsplit(webhook_url)
+        if (parsed.scheme != 'https' or parsed.netloc != 'api.anthropic.com'
+                or re.fullmatch(r'/v1/claude_code/routines/trig_[A-Za-z0-9]+/fire', parsed.path) is None
+                or parsed.query or parsed.fragment):
+            raise ValueError('Claude routine must use the official fire endpoint')
+        super().__init__(webhook_url, key, task_resource, transport=transport)
+
+    def notify(self, *, task_id, owner, change, revision):
+        event = {'type': 'task.requested', 'task_id': task_id, 'project': owner,
+                 'resource': self._resource, 'change': change, 'revision': revision}
+        reply = self._transport.request(self._url,
+            headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ' + self._key,
+                     'anthropic-version': '2026-10-21'},
+            body=json_body({'text': json_body(event).decode('utf-8')}))
+        if reply.status >= 500:
+            raise RuntimeError('routine acceptance unknown')
+        if reply.status != 200:
+            raise SubmissionRejected('native routine rejected the trigger')
