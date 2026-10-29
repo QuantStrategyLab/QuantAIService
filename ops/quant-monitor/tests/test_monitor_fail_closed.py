@@ -2276,13 +2276,16 @@ class TrustedProfileCoverageTests(unittest.TestCase):
             self.assertEqual(old_revisions, revisions)
             self.assertEqual(old_errors, [{"domain": "crypto", "code": "artifact_sync_status_unavailable", "error_type": "RuntimeError"}])
 
-    def test_main_writes_unavailable_keeps_valid_results_and_never_optimizes_missing_profile(self) -> None:
+    def test_main_publishes_unaffected_domains_and_never_optimizes_missing_profile(self) -> None:
         self._check_main_profile_coverage()
 
     def test_main_missing_current_drift_low_dashboard_score_remains_operational_only(self) -> None:
         self._check_main_profile_coverage(missing_current_drift=True)
 
-    def _check_main_profile_coverage(self, *, missing_current_drift=False) -> None:
+    def test_main_no_refreshed_results_remains_unavailable(self) -> None:
+        self._check_main_profile_coverage(all_missing=True)
+
+    def _check_main_profile_coverage(self, *, missing_current_drift=False, all_missing=False) -> None:
         from quant_platform_kit.strategy_lifecycle.watch import runner as watcher
         normalizer = _load_script("build_dashboard_snapshot")
         with tempfile.TemporaryDirectory() as tmp:
@@ -2295,7 +2298,7 @@ class TrustedProfileCoverageTests(unittest.TestCase):
             monitor = types.ModuleType("quant_platform_kit.strategy_lifecycle.performance_monitor")
             drift = types.ModuleType("quant_platform_kit.strategy_lifecycle.drift_detector")
             dashboard = types.ModuleType("quant_platform_kit.strategy_lifecycle.health_dashboard")
-            monitor.run_monitor = lambda domain, **kwargs: [types.SimpleNamespace(
+            monitor.run_monitor = lambda domain, **kwargs: [] if all_missing else [types.SimpleNamespace(
                 domain=domain, strategy_profile="research" if domain == "crypto" else f"{domain}_profile",
             )]
             def detect(domain):
@@ -2337,14 +2340,19 @@ class TrustedProfileCoverageTests(unittest.TestCase):
             dispatch.assert_called_once_with([], dry_run=False, comment_existing=False)
             output = json.loads((root / "data/health/strategy_health_dashboard.v1.json").read_text())
             summary = json.loads(next((root / "data/health").glob("cycle_*.json")).read_text())
-            self.assertEqual(output["data_status"], "unavailable")
+            self.assertEqual(output["data_status"], "unavailable" if all_missing else "partial")
             self.assertIn("monitor_data_unavailable", output["errors"])
-            self.assertEqual(len(output["strategies"]), 4)
-            self.assertNotIn("native", {row["profile"] for row in output["strategies"]})
-            self.assertEqual(summary["snapshot_count"], 4)
-            self.assertEqual(summary["strategy_count"], 4)
+            self.assertEqual(len(output["strategies"]), 0 if all_missing else 3)
+            self.assertEqual({row["domain"] for row in output["strategies"]},
+                             set() if all_missing else set(HEALTH_CYCLE.DOMAINS) - {"crypto"})
+            self.assertEqual(output["summary"]["strategy_count"], 0 if all_missing else 3)
+            self.assertFalse(summary["ok"])
+            self.assertEqual(summary["snapshot_count"], 0 if all_missing else 4)
+            self.assertEqual(summary["strategy_count"], 0 if all_missing else 4)
             self.assertEqual(summary["optimization_findings"], 0)
-            self.assertEqual({row["code"] for row in summary["data_errors"]}, {"monitor_data_unavailable", "drift_data_unavailable"})
+            self.assertEqual({row["code"] for row in summary["data_errors"]},
+                             {"monitor_data_unavailable"} if all_missing else
+                             {"monitor_data_unavailable", "drift_data_unavailable"})
 
 
 if __name__ == "__main__":
