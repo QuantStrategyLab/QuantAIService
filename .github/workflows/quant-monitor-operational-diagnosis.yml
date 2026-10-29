@@ -42,6 +42,11 @@ jobs:
           export_environment_variables: true
       - name: Diagnose saved observation with native OIDC
         env:
+          AI_SERVICE_DIAGNOSIS_READY: ${{ vars.AI_SERVICE_DIAGNOSIS_READY || 'false' }}
+          AI_SERVICE_URL: ${{ vars.AI_SERVICE_URL }}
+          AI_SERVICE_AUDIENCE: ${{ vars.AI_SERVICE_AUDIENCE }}
+          AI_SERVICE_DIAGNOSIS_MODEL: ${{ vars.AI_SERVICE_DIAGNOSIS_MODEL }}
+          AI_SERVICE_DIAGNOSIS_PROFILE: ${{ vars.AI_SERVICE_DIAGNOSIS_PROFILE || 'default' }}
           CODEX_AUDIT_SERVICE_URL: ${{ secrets.CODEX_AUDIT_SERVICE_URL }}
           CODEX_AUDIT_SERVICE_AUDIENCE: quant-codex-audit
           PYTHONDONTWRITEBYTECODE: '1'

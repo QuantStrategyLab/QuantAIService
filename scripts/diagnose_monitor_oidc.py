@@ -2,7 +2,8 @@
 """Actions-only, read-only diagnostic caller for the existing audit service.
 
 Consumes saved observations, never runs the monitor, publishes, or repairs.
-The V2 native task client remains separate from this deliberately narrow caller.
+New diagnoses use the common native task contract after explicit configuration.
+Accepted legacy jobs retain their exact recovery route until drained.
 See ../AGENTS.md for operating and authorization boundaries.
 """
 from __future__ import annotations
@@ -64,11 +65,13 @@ def https_url(value, *, base=False):
     return url
 
 
-def json_request(opener, url, token, payload=None):
+def json_request(opener, url, token, payload=None, *, idempotency_key=None):
     req = request.Request(url, data=None if payload is None else json.dumps(payload).encode(),
                           headers={"Authorization": "Bearer " + token,
                                    "Accept": "application/json", "Content-Type": "application/json"},
                           method="GET" if payload is None else "POST")
+    if idempotency_key is not None:
+        req.add_header('Idempotency-Key', idempotency_key)
     with opener.open(req, timeout=30) as response:
         body = response.read(LIMIT + 1)
     if len(body) > LIMIT:
@@ -79,12 +82,12 @@ def json_request(opener, url, token, payload=None):
     return value
 
 
-def oidc_token(env, opener):
+def oidc_token(env, opener, *, audience=AUDIENCE):
     url = https_url(env["ACTIONS_ID_TOKEN_REQUEST_URL"])
     if not (url.hostname.endswith(".actions.githubusercontent.com")):
         raise Rejected("invalid_oidc_origin")
     query = [(k, v) for k, v in parse.parse_qsl(url.query) if k != "audience"]
-    url = parse.urlunsplit(url._replace(query=parse.urlencode(query + [("audience", AUDIENCE)])))
+    url = parse.urlunsplit(url._replace(query=parse.urlencode(query + [("audience", audience)])))
     value = json_request(opener, url, env["ACTIONS_ID_TOKEN_REQUEST_TOKEN"]).get("value")
     if not isinstance(value, str) or not value or any(c.isspace() for c in value):
         raise Rejected("invalid_oidc_response")
@@ -173,6 +176,97 @@ def unresolved_attempts(state_dir):
     return attempts
 
 
+def native_diagnosis(root, state_dir, path, pending, *, env, opener, now, monotonic,
+                     sleep, persist, include_healthy, prepare_observation):
+    """Use the common task contract; the caller retains observation and claim ownership."""
+    service = env.get('AI_SERVICE_URL', '').rstrip('/')
+    https_url(service, base=True)
+    audience = service + '/mcp'
+    if env.get('AI_SERVICE_AUDIENCE') != audience:
+        raise Rejected('invalid_native_audience')
+    if pending:
+        path, state = pending[0]
+        if not state.get('job_id'):
+            raise Rejected('submit_outcome_unknown')
+        if state.get('service_sha256') != digest(service):
+            raise Rejected('pending_request_changed')
+    else:
+        if path.exists():
+            return {'status': 'skipped', 'reason': 'daily_attempt_limit'}
+        if prepare_observation is not None:
+            prepare_observation()
+        paths = sorted((root / 'data/health').glob('cycle_*.json'))
+        if not paths:
+            raise Rejected('latest_cycle_unavailable')
+        observed_at, errors = _read_diagnosis_cycle(paths[-1], now=now, max_age=timedelta(hours=2))
+        if not errors and not include_healthy:
+            return {'status': 'skipped', 'reason': 'no_data_errors'}
+        model, profile = env.get('AI_SERVICE_DIAGNOSIS_MODEL', ''), env.get('AI_SERVICE_DIAGNOSIS_PROFILE', 'default')
+        if not re.fullmatch(r'[A-Za-z0-9_.-]{1,100}', model) or not re.fullmatch(r'[A-Za-z0-9_.-]{1,100}', profile):
+            raise Rejected('native_route_not_configured')
+        observation = {'observed_at': observed_at.isoformat(), 'latest_cycle_at': observed_at.isoformat(),
+                       'current_state': 'still_observed' if errors else 'no_data_errors'}
+        payload = {'mode': 'agent', 'model': model, 'profile': profile, 'timeout_seconds': 600,
+                   'objective': _operational_diagnosis_prompt(errors, observation=observation)
+                   + '\nUse only this saved classification. Empty incidents mean no data errors were recorded, '
+                   'not account or trading health. No external tools, repairs, notifications, deployments or orders. '
+                   'Return advisory JSON with a diagnosis string only.',
+                   'materials': [{'source': 'saved-monitor-classification', 'observed_at': observed_at.isoformat()}],
+                   'output_schema': {'type': 'object', 'properties': {'diagnosis': {'type': 'string', 'minLength': 1}},
+                                     'required': ['diagnosis'], 'additionalProperties': False}}
+        state = {'protocol': 'native_tasks_v1', 'request_sha256': digest(payload),
+                 'service_sha256': digest(service), 'observed_at': observed_at.isoformat(),
+                 'job_id': None, 'deadline': now.timestamp() + 660,
+                 'route': {'provider': 'dot', 'model': model, 'profile': profile}}
+        token = oidc_token(env, opener, audience=audience)
+        persist(path, state)
+        task = json_request(opener, service + '/v1/tasks', token, payload,
+                            idempotency_key='monitor-diagnosis:' + path.stem + ':' + state['request_sha256'])
+        if (not re.fullmatch(r'[0-9a-f-]{36}', str(task.get('id', '')))
+                or task.get('owner') != REPOSITORY or task.get('provider') != 'dot'
+                or task.get('result_kind') != 'advisory' or digest(task.get('request')) != state['request_sha256']):
+            raise Rejected('invalid_native_receipt')
+        state['job_id'] = task['id']
+        persist(path, state)
+    if (not re.fullmatch(r'[0-9a-f-]{36}', str(state.get('job_id', '')))
+            or not re.fullmatch(r'[0-9a-f]{64}', str(state.get('request_sha256', '')))
+            or type(state.get('deadline')) not in (int, float) or not math.isfinite(state['deadline'])):
+        raise Rejected('invalid_native_receipt')
+    deadline = monotonic() + max(0, min(660, state['deadline'] - now.timestamp()))
+    first_poll = True
+    while first_poll or monotonic() < deadline:
+        first_poll = False
+        task = json_request(opener, service + '/v1/tasks/' + state['job_id'], oidc_token(env, opener, audience=audience))
+        if (task.get('id') != state['job_id'] or task.get('owner') != REPOSITORY
+                or task.get('provider') != 'dot' or task.get('result_kind') != 'advisory'
+                or digest(task.get('request')) != state['request_sha256']):
+            raise Rejected('native_task_identity_changed')
+        if task.get('status') == 'completed':
+            output = task.get('output')
+            if not isinstance(output, dict) or set(output) != {'diagnosis'} or not isinstance(output['diagnosis'], str) or not output['diagnosis'].strip():
+                raise Rejected('empty_diagnosis_output')
+            text = output['diagnosis']
+            receipt = {'status': 'succeeded', 'protocol': 'native_tasks_v1', 'job_id': state['job_id'],
+                       'task_id': state['job_id'], **state['route'], 'model_verification': 'unavailable',
+                       'task': TASK, 'mode': 'review_only', 'sandbox': 'read-only', 'source_repository': REPOSITORY,
+                       'audience': audience, 'observed_at': state['observed_at'], 'request_sha256': state['request_sha256'],
+                       'output_sha256': hashlib.sha256(text.encode()).hexdigest(), 'output_length': len(text),
+                       'advisory_only': True, 'execution_authority_granted': False}
+            persist(path, {**state, 'receipt': receipt})
+            return receipt
+        if task.get('status') in {'failed', 'cancelled', 'invalid_output'}:
+            persist(path, {**state, 'receipt': {'status': task['status'], 'protocol': 'native_tasks_v1',
+                                             'advisory_only': True, 'execution_authority_granted': False}})
+            raise Rejected('native_task_failed')
+        if task.get('status') == 'outcome_unknown':
+            raise Rejected('native_task_outcome_unknown')
+        if task.get('status') not in {'queued', 'submitting', 'running', 'cancel_requested'}:
+            raise Rejected('invalid_native_receipt')
+        if monotonic() < deadline:
+            sleep(5)
+    raise Rejected('native_task_timeout')
+
+
 def diagnose(root, state_dir, *, include_healthy=False, env=None, opener=None,
              now=None, monotonic=time.monotonic, sleep=time.sleep, checkpoint=None,
              prepare_observation=None):
@@ -194,7 +288,6 @@ def diagnose(root, state_dir, *, include_healthy=False, env=None, opener=None,
     if not identity_available(env, include_healthy=include_healthy):
         return {"status": "skipped", "reason": "no_oidc"}
     service = env.get("CODEX_AUDIT_SERVICE_URL", "").rstrip("/")
-    https_url(service, base=True)
     now = now or datetime.now(timezone.utc)
     opener = opener or request.build_opener(NoRedirect())
     state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -203,6 +296,12 @@ def diagnose(root, state_dir, *, include_healthy=False, env=None, opener=None,
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         path = state_dir / (now.date().isoformat() + ".json")
         pending = unresolved_attempts(state_dir)
+        native_pending = pending and pending[0][1].get('protocol') == 'native_tasks_v1'
+        if native_pending or (not pending and env.get('AI_SERVICE_DIAGNOSIS_READY') == 'true'):
+            return native_diagnosis(root, state_dir, path, pending, env=env, opener=opener, now=now,
+                                    monotonic=monotonic, sleep=sleep, persist=persist,
+                                    include_healthy=include_healthy, prepare_observation=prepare_observation)
+        https_url(service, base=True)
         for previous, state in pending:
             if previous != path and not state.get("job_id"):
                 raise Rejected("previous_outcome_unresolved")
@@ -285,7 +384,7 @@ def diagnose_cloud(*, include_healthy=False, verify_state_only=False, env=None,
     if not identity_available(env, include_healthy=include_healthy):
         return {"status": "skipped", "reason": "no_oidc"}
     if not verify_state_only:
-        https_url(env.get("CODEX_AUDIT_SERVICE_URL", "").rstrip("/"), base=True)
+        https_url((env.get("AI_SERVICE_URL", "") if env.get("AI_SERVICE_DIAGNOSIS_READY") == "true" else env.get("CODEX_AUDIT_SERVICE_URL", "")).rstrip("/"), base=True)
     elif env["GITHUB_EVENT_NAME"] != "workflow_dispatch":
         raise Rejected("state_verification_requires_manual_dispatch")
     if (not re.fullmatch(r"[0-9]{1,24}", env.get("GITHUB_RUN_ID", ""))
@@ -348,7 +447,12 @@ def diagnose_cloud(*, include_healthy=False, verify_state_only=False, env=None,
                 if restored_raw != raw or restored_generation != generation:
                     retain_claim = True
                     raise Rejected("checkpoint_verification_failed")
-                result = {"status": "verified", "mode": "cloud_state_only", **bounds,
+                pending = unresolved_attempts(state_dir)
+                drain = {"unresolved_attempts": len(pending),
+                         "legacy_pending_attempts": sum(s.get('protocol') != 'native_tasks_v1' for _, s in pending),
+                         "native_pending_attempts": sum(s.get('protocol') == 'native_tasks_v1' for _, s in pending),
+                         "unknown_submission_attempts": sum(not s.get('job_id') for _, s in pending)}
+                result = {"status": "verified", "mode": "cloud_state_only", **bounds, **drain,
                           "adc_refresh_verified": True, "checkpoint_unchanged": True,
                           "audit_requests": 0}
             else:

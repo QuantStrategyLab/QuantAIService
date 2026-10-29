@@ -588,7 +588,9 @@ def test_cloud_verification_refreshes_adc_and_cas_writes_unchanged_ledger_withou
                                     env=cloud_environment(), now=NOW, opener=opener)
     assert receipt == {"status": "verified", "mode": "cloud_state_only", "audit_requests": 0,
                        "archive_metadata_denied": True, "object_listing_denied": True,
-                       "adc_refresh_verified": True, "checkpoint_unchanged": True}
+                       "adc_refresh_verified": True, "checkpoint_unchanged": True,
+                       "unresolved_attempts": 1, "legacy_pending_attempts": 1,
+                       "native_pending_attempts": 0, "unknown_submission_attempts": 1}
     assert store.events[-4:] == ["refresh", ("checkpoint", 10, 20), ("read", 11), ("release", 20)]
     assert store.files == {"2026-10-21.json": original} and opener.calls == []
     refresh.assert_called_once_with()
@@ -744,3 +746,108 @@ def test_workflow_has_no_trading_deployment_or_static_credentials():
     assert "id-token: write" in text and "quant-codex-audit" in text
     for forbidden in ("CODEX_AUDIT_SERVICE_TOKEN", "systemctl", "health_check.sh", "deploy", "trade", "pull_request"):
         assert forbidden not in text
+
+
+NATIVE_ID = '42509a19-b704-4a4b-a66c-f163a15699f1'
+
+
+class NativeOpener:
+    def __init__(self):
+        self.calls = []
+        self.payload = None
+        self.lost_submit = False
+        self.status = 'completed'
+        self.owner = caller.REPOSITORY
+
+    def open(self, req, timeout):
+        self.calls.append(req)
+        if 'actions.githubusercontent.com' in req.full_url:
+            return io.BytesIO(b'{"value":"synthetic-native-oidc"}')
+        if req.method == 'POST':
+            self.payload = json.loads(req.data)
+            if self.lost_submit:
+                raise TimeoutError('synthetic lost acknowledgement')
+            status = 'queued'
+        else:
+            status = self.status
+        value = {'id': NATIVE_ID, 'owner': self.owner, 'provider': 'dot', 'request': self.payload,
+                 'status': status, 'result_kind': 'advisory', 'output': {'diagnosis': 'synthetic advisory'}}
+        return io.BytesIO(json.dumps(value).encode())
+
+
+def native_environment():
+    return {**environment(), 'AI_SERVICE_DIAGNOSIS_READY': 'true',
+            'AI_SERVICE_URL': 'https://native.invalid', 'AI_SERVICE_AUDIENCE': 'https://native.invalid/mcp',
+            'AI_SERVICE_DIAGNOSIS_MODEL': 'configured-dot'}
+
+
+def native_run(root, opener, **kwargs):
+    return caller.diagnose(root, root / 'actions-state', env=native_environment(), opener=opener,
+                           now=NOW, monotonic=lambda: 0, sleep=lambda _: None, **kwargs)
+
+
+def test_native_diagnosis_uses_common_task_contract_and_advisory_receipt(tmp_path):
+    snapshot(tmp_path)
+    opener = NativeOpener()
+    receipt = native_run(tmp_path, opener)
+    assert receipt['protocol'] == 'native_tasks_v1'
+    assert receipt['task_id'] == NATIVE_ID and receipt['advisory_only']
+    assert receipt['model_verification'] == 'unavailable' and not receipt['execution_authority_granted']
+    assert [r.method for r in opener.calls] == ['GET', 'POST', 'GET', 'GET']
+    assert parse.parse_qs(parse.urlsplit(opener.calls[0].full_url).query)['audience'] == ['https://native.invalid/mcp']
+    assert opener.calls[1].get_header('Idempotency-key').startswith('monitor-diagnosis:')
+    assert opener.payload['mode'] == 'agent' and opener.payload['model'] == 'configured-dot'
+    assert 'Do not place orders' in opener.payload['objective']
+    assert native_run(tmp_path, NativeOpener()) == {'status': 'skipped', 'reason': 'daily_attempt_limit'}
+
+
+def test_native_lost_acknowledgement_does_not_submit_again(tmp_path):
+    snapshot(tmp_path)
+    opener = NativeOpener()
+    opener.lost_submit = True
+    with pytest.raises(TimeoutError):
+        native_run(tmp_path, opener)
+    retry = NativeOpener()
+    with pytest.raises(caller.Rejected, match='submit_outcome_unknown'):
+        native_run(tmp_path, retry)
+    assert not retry.calls
+
+
+def test_native_worker_cannot_return_another_project_receipt(tmp_path):
+    snapshot(tmp_path)
+    opener = NativeOpener()
+    opener.owner = 'OtherOwner/Private'
+    with pytest.raises(caller.Rejected, match='invalid_native_receipt'):
+        native_run(tmp_path, opener)
+    assert len(opener.calls) == 2
+
+
+def test_native_pending_expired_budget_reads_only_original_task_once(tmp_path):
+    snapshot(tmp_path)
+    opener = NativeOpener()
+    native_run(tmp_path, opener)
+    path = tmp_path / 'actions-state' / (NOW.date().isoformat() + '.json')
+    state = json.loads(path.read_text())
+    state.pop('receipt')
+    state['deadline'] = NOW.timestamp() - 1
+    path.write_text(json.dumps(state))
+    opener.calls = []
+    opener.status = 'running'
+    with pytest.raises(caller.Rejected, match='native_task_timeout'):
+        native_run(tmp_path, opener)
+    assert [r.method for r in opener.calls] == ['GET', 'GET']
+    assert opener.calls[1].full_url.endswith('/v1/tasks/' + NATIVE_ID)
+
+
+def test_enabling_native_route_preserves_existing_legacy_job_recovery(tmp_path):
+    state_dir = tmp_path / 'actions-state'
+    state_dir.mkdir()
+    state = {'job_id': ID, 'request_sha256': 'a' * 64, 'service_sha256': caller.digest('https://audit.invalid'),
+             'route': {k: job()[k] for k in ('provider', 'research_stage', 'model', 'reasoning_effort')},
+             'deadline': NOW.timestamp() - 1, 'observed_at': NOW.isoformat()}
+    (state_dir / (NOW.date().isoformat() + '.json')).write_text(json.dumps(state))
+    opener = Opener([{'value': 'synthetic-oidc'}, job('succeeded', output='legacy advice')])
+    result = native_run(tmp_path, opener)
+    assert result['job_id'] == ID
+    assert [r.method for r in opener.calls] == ['GET', 'GET']
+    assert opener.calls[1].full_url == 'https://audit.invalid' + caller.JOBS + '/' + ID
