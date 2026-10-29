@@ -150,9 +150,9 @@ try{
   const t=await worker.projectTask(secondProject,taskRequest);
   await until(()=>deliveries.some(d=>d.body.data.task_id===t.id));
   const read=await rpc('tools/call',{name:'get_task',arguments:{task_id:t.id,project:secondProject}});assert.equal(read.body.result.structuredContent.owner,secondProject);
-  assert.equal((await tool('get_task',{task_id:t.id})).body.error.code,-32602);
-  const claimed=await rpc('tools/call',{name:'claim_task',arguments:{task_id:t.id,project:secondProject,attempt_id:'second-project-attempt'}});assert.equal(claimed.body.result.structuredContent.status,'running');
-  const report=await rpc('tools/call',{name:'report_task_result',arguments:{task_id:t.id,project:secondProject,attempt_id:'second-project-attempt',revision:1,status:'completed',output:{source_id:'first-org-synthetic-v1',passed:1,failed:1,trade_authorized:false}}});assert.equal(report.body.result.structuredContent.status,'completed');
+  assert.equal((await tool('get_task',{task_id:t.id})).body.result.structuredContent.owner,secondProject);
+  const claimed=await rpc('tools/call',{name:'claim_task',arguments:{task_id:t.id,attempt_id:'second-project-attempt'}});assert.equal(claimed.body.result.structuredContent.status,'running');
+  const report=await rpc('tools/call',{name:'report_task_result',arguments:{task_id:t.id,attempt_id:'second-project-attempt',revision:1,status:'completed',output:{source_id:'first-org-synthetic-v1',passed:1,failed:1,trade_authorized:false}}});assert.equal(report.body.result.structuredContent.status,'completed');
 
   assert.equal((await rpc('tools/call',{name:'get_task',arguments:{task_id:'absent',project:'OtherOwner/Private'}})).body.error.code,-32602);
   await rpc('tools/call',{name:'delete_event_subscription',arguments:{subscription_id:subscription.body.result.id,project:secondProject}});

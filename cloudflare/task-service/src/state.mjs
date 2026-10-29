@@ -199,6 +199,13 @@ export class TaskStore extends DurableObject {
     return this.#record(row);
   }
 
+  projectForTask(projects,taskId) {
+    key(taskId,'task ID required');
+    const row=this.sql.exec('SELECT owner FROM tasks WHERE id=?',taskId).toArray()[0];
+    if(!row||!Array.isArray(projects)||!projects.includes(row.owner))missing();
+    this.#policy(row.owner);return row.owner;
+  }
+
   get(owner, taskId) {
     return this.#record(this.#row(owner, taskId));
   }
