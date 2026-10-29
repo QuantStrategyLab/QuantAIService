@@ -159,6 +159,16 @@ def test_http_failures_are_sanitized_and_never_resubmitted(tmp_path, monkeypatch
         run(tmp_path, Opener([]))
 
 
+def test_transport_identifies_application_without_changing_identity_or_payload():
+    opener = Opener([{"ok": True}])
+    caller.json_request(opener, "https://service.invalid/v1/tasks", "synthetic-token", {"objective": "synthetic"}, idempotency_key="synthetic-key")
+    req = opener.calls[0]
+    assert req.get_header("User-agent") == "quant-monitor-operational-diagnosis/1.0"
+    assert req.get_header("Authorization") == "Bearer synthetic-token"
+    assert req.get_header("Idempotency-key") == "synthetic-key"
+    assert json.loads(req.data) == {"objective": "synthetic"}
+
+
 def test_no_redirect_can_forward_identity():
     assert caller.NoRedirect().redirect_request(None, None, 302, "", {}, "https://other.invalid") is None
 

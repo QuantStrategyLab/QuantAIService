@@ -68,7 +68,8 @@ def https_url(value, *, base=False):
 def json_request(opener, url, token, payload=None, *, idempotency_key=None):
     req = request.Request(url, data=None if payload is None else json.dumps(payload).encode(),
                           headers={"Authorization": "Bearer " + token,
-                                   "Accept": "application/json", "Content-Type": "application/json"},
+                                   "Accept": "application/json", "Content-Type": "application/json",
+                                   "User-Agent": "quant-monitor-operational-diagnosis/1.0"},
                           method="GET" if payload is None else "POST")
     if idempotency_key is not None:
         req.add_header('Idempotency-Key', idempotency_key)
