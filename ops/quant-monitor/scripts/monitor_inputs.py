@@ -13,9 +13,61 @@ import shutil
 import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 from urllib.parse import urlsplit
 
 from monitor_cloud_state import DATA_PROJECTS, StateUnavailable, pack, restore
+
+
+_READER_REPOSITORIES = ('CnEquityStrategies', 'HkEquityStrategies', 'UsEquityStrategies',
+                        'CryptoStrategies', 'BinancePlatform')
+
+
+class _NoRedirect(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def mint_reader_token(app_id, installation_id, private_key, *, opener=None, now=None):
+    """Mint the existing reader App's bounded token without exposing key or response."""
+    import jwt
+
+    if not (re.fullmatch(r'[1-9][0-9]*', app_id or '')
+            and re.fullmatch(r'[1-9][0-9]*', installation_id or '') and private_key):
+        raise StateUnavailable('monitor_input_reader_unavailable')
+    now = int(datetime.now(timezone.utc).timestamp()) if now is None else int(now)
+    try:
+        assertion = jwt.encode({'iat': now - 60, 'exp': now + 540, 'iss': app_id},
+                               private_key, algorithm='RS256')
+        body = json.dumps({'repositories': list(_READER_REPOSITORIES),
+                           'permissions': {'actions': 'read'}}).encode()
+        request = Request('https://api.github.com/app/installations/' + installation_id + '/access_tokens',
+                          data=body, method='POST', headers={
+                              'Authorization': 'Bearer ' + assertion,
+                              'Accept': 'application/vnd.github+json',
+                              'Content-Type': 'application/json',
+                              'X-GitHub-Api-Version': '2022-11-28',
+                              'User-Agent': 'QuantStrategyLab-Monitor/1.0',
+                          })
+        with (opener or build_opener(_NoRedirect())).open(request, timeout=20) as response:
+            raw = response.read(65537)
+            if response.status != 201 or len(raw) > 65536:
+                raise ValueError('invalid response')
+            result = json.loads(raw)
+        token = result.get('token') if isinstance(result, dict) else None
+        permissions = result.get('permissions') if isinstance(result, dict) else None
+        repositories = result.get('repositories') if isinstance(result, dict) else None
+        if not isinstance(token, str) or not token or '\n' in token or '\r' in token:
+            raise ValueError('invalid token')
+        if (not isinstance(permissions, dict) or permissions.get('actions') != 'read'
+                or not isinstance(repositories, list)
+                or len(repositories) != len(_READER_REPOSITORIES)
+                or {item.get('full_name') for item in repositories if isinstance(item, dict)}
+                != {'QuantStrategyLab/' + name for name in _READER_REPOSITORIES}):
+            raise ValueError('invalid token scope')
+        return token
+    except Exception as exc:
+        raise StateUnavailable('monitor_input_reader_unavailable') from exc
 
 
 def input_member(name):
@@ -27,7 +79,7 @@ def input_member(name):
             or len(parts) >= 4 and parts[0] == 'projects' and parts[1] in DATA_PROJECTS and parts[2] == 'data')
 
 
-def input_archive(root, *, refreshed=False):
+def input_archive(root, *, refreshed=False, source_kind='github_actions'):
     """Flatten only explicit data roots and their managed artifact links."""
     from export_local_monitor_state import capture
 
@@ -43,7 +95,9 @@ def input_archive(root, *, refreshed=False):
             elif path.is_dir() and not any(path.iterdir()):
                 path.rmdir()
         if refreshed:
-            manifest.update(captured_at=datetime.now(timezone.utc).isoformat(), source_kind='github_actions')
+            if source_kind not in {'github_actions', 'cloud_run'}:
+                raise ValueError('monitor_input_source_invalid')
+            manifest.update(captured_at=datetime.now(timezone.utc).isoformat(), source_kind=source_kind)
         (target / 'manifest.json').write_text(json.dumps(manifest))
         return pack(target)
 
@@ -182,7 +236,7 @@ def refresh_inputs(root):
                 os.environ[key] = value
 
 
-def run_adapter(store, *, verify_only=False):
+def run_adapter(store, *, verify_only=False, execution_id=None, source_kind='github_actions'):
     if verify_only:
         raw, _ = store.read()
         with tempfile.TemporaryDirectory(prefix='monitor-input-verify-') as directory:
@@ -191,8 +245,12 @@ def run_adapter(store, *, verify_only=False):
             if any(not input_member(p.relative_to(root).as_posix()) for p in root.rglob('*') if p.is_file()):
                 raise StateUnavailable('monitor_inputs_scope_invalid')
         return {'status': 'verified', 'writes': 0, 'audit_requests': 0}
+    if execution_id is None:
+        execution_id = os.environ['GITHUB_RUN_ID'] + ':' + os.environ['GITHUB_RUN_ATTEMPT']
+    if not execution_id or source_kind not in {'github_actions', 'cloud_run'}:
+        raise ValueError('monitor_input_execution_identity_invalid')
     claim = store.claim({'schema_version': 'quant.monitor-input-claim.v1',
-                         'execution_id': os.environ['GITHUB_RUN_ID'] + ':' + os.environ['GITHUB_RUN_ATTEMPT']})
+                         'execution_id': execution_id})
     if claim is None:
         raise StateUnavailable('monitor_inputs_active_or_uncertain')
     try:
@@ -201,7 +259,7 @@ def run_adapter(store, *, verify_only=False):
             root = Path(directory)
             restore(raw, root)
             refresh_inputs(root)
-            prepared = input_archive(root, refreshed=True)
+            prepared = input_archive(root, refreshed=True, source_kind=source_kind)
     except Exception:
         # Source reads and local preparation have no external write to replay.
         # A known claim can be released so fresh inputs can recover next time.

@@ -11,7 +11,6 @@ from unittest.mock import Mock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 import monitor_cloud_state as state
 import monitor_inputs as inputs
-import sync_lifecycle_artifacts as sync
 
 NOW = datetime(2026, 10, 27, tzinfo=timezone.utc)
 
@@ -83,7 +82,7 @@ class InputBoundaryTests(unittest.TestCase):
                 self.assertFalse((root / 'projects/CryptoLivePoolPipelines/data/output').exists())
                 self.assertTrue(versions.exists())
                 self.assertTrue((root / 'monitor/data/lifecycle-store/live_runs/crypto/record.json').exists())
-            with patch.object(sync, 'main', side_effect=refresh), \
+            with patch('sync_lifecycle_artifacts.main', side_effect=refresh), \
                     patch('sync_binance_live_runs.run_from_environment', return_value={'status': 'disabled'}):
                 inputs.refresh_inputs(root)
 
@@ -109,6 +108,62 @@ class InputBoundaryTests(unittest.TestCase):
             inputs.run_adapter(store)
         store.release.assert_called_once_with(claim_generation=7)
         store.commit.assert_not_called()
+
+    def test_cloud_run_uses_real_execution_and_labels_refreshed_input(self):
+        with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as restored:
+            root = Path(directory)
+            fixture(root)
+            store = Mock()
+            store.claim.return_value = 7
+            store.read.return_value = (inputs.input_archive(root), 3)
+            with patch.object(inputs, 'refresh_inputs'):
+                result = inputs.run_adapter(store, execution_id='synthetic-execution', source_kind='cloud_run')
+            self.assertEqual(result['status'], 'refreshed')
+            self.assertEqual(store.claim.call_args.args[0]['execution_id'], 'synthetic-execution')
+            manifest = state.restore(store.commit.call_args.args[0], Path(restored))
+            self.assertEqual(manifest['source_kind'], 'cloud_run')
+            self.assertEqual(store.commit.call_args.kwargs, {'state_generation': 3, 'claim_generation': 7})
+
+    def test_cloud_run_rejects_missing_identity_before_claim(self):
+        store = Mock()
+        with self.assertRaises(ValueError):
+            inputs.run_adapter(store, execution_id='', source_kind='cloud_run')
+        store.claim.assert_not_called()
+
+    def test_app_token_requests_only_the_existing_reader_scope(self):
+        response = Mock()
+        response.status = 201
+        response.read.return_value = json.dumps({'token': 'synthetic-token', 'permissions': {'actions': 'read'},
+                                                  'repositories': [{'full_name': 'QuantStrategyLab/' + name}
+                                                                   for name in inputs._READER_REPOSITORIES]}).encode()
+        opener = Mock()
+        opener.open.return_value.__enter__ = Mock(return_value=response)
+        opener.open.return_value.__exit__ = Mock(return_value=False)
+        with patch('jwt.encode', return_value='synthetic-jwt') as sign:
+            token = inputs.mint_reader_token('12', '34', 'synthetic-key', opener=opener, now=1000)
+        request = opener.open.call_args.args[0]
+        self.assertEqual(token, 'synthetic-token')
+        self.assertEqual(json.loads(request.data), {'repositories': list(inputs._READER_REPOSITORIES),
+                                                   'permissions': {'actions': 'read'}})
+        self.assertEqual(request.full_url, 'https://api.github.com/app/installations/34/access_tokens')
+        self.assertEqual(sign.call_args.kwargs['algorithm'], 'RS256')
+
+    def test_app_token_errors_are_fixed_and_do_not_expose_response(self):
+        opener = Mock()
+        opener.open.side_effect = RuntimeError('synthetic-sensitive-response')
+        with patch('jwt.encode', return_value='synthetic-jwt'), self.assertRaises(state.StateUnavailable) as result:
+            inputs.mint_reader_token('12', '34', 'synthetic-key', opener=opener, now=1000)
+        self.assertEqual(str(result.exception), 'monitor_input_reader_unavailable')
+
+    def test_app_token_without_full_reader_scope_is_rejected(self):
+        response = Mock()
+        response.status = 201
+        response.read.return_value = b'{"token":"synthetic","permissions":{"actions":"read"},"repositories":[]}'
+        opener = Mock()
+        opener.open.return_value.__enter__ = Mock(return_value=response)
+        opener.open.return_value.__exit__ = Mock(return_value=False)
+        with patch('jwt.encode', return_value='synthetic-jwt'), self.assertRaises(state.StateUnavailable):
+            inputs.mint_reader_token('12', '34', 'synthetic-key', opener=opener, now=1000)
 
 
 if __name__ == '__main__':
@@ -165,7 +220,7 @@ def test_archive_failure_is_local_to_crypto_and_other_inputs_continue(tmp_path):
     env = {'BINANCE_REPORT_ARCHIVE_URI': 'gs://safe-bucket/reports',
            'BINANCE_REPORT_ARCHIVE_STREAM_ID': 'synthetic',
            'BINANCE_REPORT_ARCHIVE_ACCOUNT_SCOPE_SHA256': 'a' * 64}
-    with patch.dict(os.environ, env, clear=True), patch.object(sync, 'main'), \
+    with patch.dict(os.environ, env, clear=True), patch('sync_lifecycle_artifacts.main'), \
          patch('sync_binance_live_runs.run_from_environment'), patch.object(storage, 'Client'), \
          patch.object(inputs, 'refresh_binance_report_archive', side_effect=BinanceLiveRunsError('archive_read_failed')):
         inputs.refresh_inputs(tmp_path)
