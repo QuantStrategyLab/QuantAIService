@@ -9,7 +9,7 @@ const observed=Base=>class extends Base {
   async alarmStats(){const scheduled=await this.ctx.storage.getAlarm();return {count:this.testAlarmCount??0,scheduledDelayMs:scheduled===null?null:scheduled-Date.now()};}
   async subscriptionCount(){return this.sql.exec('SELECT COUNT(*) AS n FROM subscriptions').one().n;}
   async staleUnclaimed(owner,id){this.sql.exec("UPDATE tasks SET status='cancel_requested',error='deadline_exceeded',deadline=? WHERE id=? AND owner=?",Date.now()/1000-1,id,owner);await this.ctx.storage.setAlarm(Date.now()+10);}
-  async expireAPI(owner,id){this.sql.exec('UPDATE tasks SET deadline=? WHERE id=? AND owner=?',Date.now()/1000-0.01,id,owner);await this.ctx.storage.setAlarm(Date.now()+10);}
+  async expireAPI(owner,id){this.sql.exec('UPDATE tasks SET deadline=? WHERE id=? AND owner=?',Math.floor(Date.now()/1000)-1,id,owner);await this.ctx.storage.setAlarm(Date.now()+10);}
 };
 export class PersonalFixtureStore extends observed(PigbibiTaskStore){}
 export class QuantFixtureStore extends observed(QuantTaskStore){}
