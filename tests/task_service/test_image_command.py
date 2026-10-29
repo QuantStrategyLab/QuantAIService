@@ -1,6 +1,8 @@
 import base64
 import hashlib
-import pytest
+from pathlib import Path
+import tempfile
+import unittest
 from ai_service.image_command import execute
 from ai_service.transport import json_body
 
@@ -33,29 +35,33 @@ class Client:
                 'status': 'completed', 'result_kind': 'advisory', 'output': {'answer': '样例'}}
 
 
-def test_image_command_keeps_schema_and_actual_request_binding(tmp_path):
-    image = tmp_path / 'test.png'
-    image.write_bytes(base64.b64decode(PNG))
-    client = Client()
-    output = execute('测试图片', [image], {'type': 'object'}, state_path=tmp_path/'state',
-                     timeout=60, env=ENV, client=client)
-    assert output == {'answer': '样例'}
-    assert client.request['materials'] == [{'type': 'image', 'mime_type': 'image/png', 'base64': PNG}]
-    execute('测试图片', [image], {'type': 'object'}, state_path=tmp_path/'state', timeout=60, env=ENV, client=client)
-    assert len(client.posts) == 1
 
+class ImageCommandTests(unittest.TestCase):
+    def test_image_binding_and_same_id_replay(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            image = root / 'test.png'
+            image.write_bytes(base64.b64decode(PNG))
+            client = Client()
+            kwargs = dict(state_path=root/'state', timeout=60, env=ENV, client=client)
+            output = execute('测试图片', [image], {'type': 'object'}, **kwargs)
+            self.assertEqual(output, {'answer': '样例'})
+            self.assertEqual(client.request['materials'], [{'type': 'image', 'mime_type': 'image/png', 'base64': PNG}])
+            execute('测试图片', [image], {'type': 'object'}, **kwargs)
+            self.assertEqual(len(client.posts), 1)
 
-def test_image_command_unknown_uses_frozen_lookup_never_another_post(tmp_path):
-    client = Client()
-    client.lost = True
-    kwargs = dict(state_path=tmp_path/'state', timeout=60, env=ENV, client=client)
-    with pytest.raises(TimeoutError):
-        execute('中文测试', [], {'type': 'object'}, **kwargs)
-    execute('中文测试', [], {'type': 'object'}, **kwargs)
-    assert len(client.posts) == 1
-    assert client.lookups[0][1] == hashlib.sha256(json_body(client.request)).hexdigest()
-    client.owner = 'Other/Project'
-    with pytest.raises(ValueError, match='binding'):
-        execute('中文测试', [], {'type': 'object'}, **kwargs)
-    with pytest.raises(ValueError, match='changed'):
-        execute('other material', [], {'type': 'object'}, **kwargs)
+    def test_unknown_lookup_never_posts_again_and_binding_is_checked(self):
+        with tempfile.TemporaryDirectory() as directory:
+            client = Client()
+            client.lost = True
+            kwargs = dict(state_path=Path(directory)/'state', timeout=60, env=ENV, client=client)
+            with self.assertRaises(TimeoutError):
+                execute('中文测试', [], {'type': 'object'}, **kwargs)
+            execute('中文测试', [], {'type': 'object'}, **kwargs)
+            self.assertEqual(len(client.posts), 1)
+            self.assertEqual(client.lookups[0][1], hashlib.sha256(json_body(client.request)).hexdigest())
+            client.owner = 'Other/Project'
+            with self.assertRaisesRegex(ValueError, 'binding'):
+                execute('中文测试', [], {'type': 'object'}, **kwargs)
+            with self.assertRaisesRegex(ValueError, 'changed'):
+                execute('other material', [], {'type': 'object'}, **kwargs)
