@@ -14,6 +14,7 @@ export class PersonalFixtureStore extends observed(PigbibiTaskStore){}
 export class QuantFixtureStore extends observed(QuantTaskStore){}
 export default class Fixture extends WorkerEntrypoint {
   async subscriptionCount(){return this.env.TASK_STATE.get(this.env.TASK_STATE.idFromName(this.env.TASK_STORE_NAME)).subscriptionCount();}
+  async projectTask(owner,request){const store=this.env.TASK_STATE.get(this.env.TASK_STATE.idFromName(this.env.TASK_STORE_NAME));return store.submit(owner,'second-project-synthetic',JSON.stringify(request));}
   async nativeClaim(owner,id,provider){const store=this.env.TASK_STATE.get(this.env.TASK_STATE.idFromName(this.env.TASK_STORE_NAME));return store.claim(owner,id,provider,'synthetic-worker','synthetic-attempt');}
   async nativeReport(owner,id,provider,revision){const store=this.env.TASK_STATE.get(this.env.TASK_STATE.idFromName(this.env.TASK_STORE_NAME));return store.commitReport(owner,id,provider,'synthetic-worker','synthetic-attempt',{body:JSON.stringify({revision,status:'cancelled',output:null,artifacts:[]}),terminal_status:'cancelled'});}
   async alarmProbe(action,owner,id){const store=this.env.TASK_STATE.get(this.env.TASK_STATE.idFromName(this.env.TASK_STORE_NAME));if(action==='expire')await store.expireAPI(owner,id);else if(action==='tick')await store.probeTick();return store.alarmStats();}

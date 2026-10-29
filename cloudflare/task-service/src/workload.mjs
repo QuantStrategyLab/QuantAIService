@@ -31,14 +31,21 @@ export function githubWorkloadToken(request) {
   try {return decodeToken(token).claims.iss === ISSUER ? token : null;} catch {return null;}
 }
 
-function configuredGrant(env, config) {
+function configuredGrant(env, config, claims) {
   const audience = env.GITHUB_WORKLOAD_AUDIENCE;
   if (typeof audience !== 'string' || !audience || /\s/.test(audience)) rejected();
   const target = new URL(audience);
   if (target.protocol !== 'https:' || !target.hostname || target.username || target.password || target.search || target.hash) rejected();
   const grants = JSON.parse(env.GITHUB_WORKLOAD_GRANTS_JSON || '[]');
-  if (!Array.isArray(grants) || grants.length !== 1) rejected();
-  const grant = grants[0], context = env.PROJECT_CONTEXTS?.[config.projectId];
+  if (!Array.isArray(grants) || !grants.length || grants.length>100) rejected();
+  // Unverified claims select a candidate only. Signature and all constraints are checked below.
+  const candidates=grants.filter(g=>object(g)&&g.subject===claims.sub&&object(g.claims)&&Object.entries(g.claims).every(([k,v])=>claims[k]===v));
+  if(candidates.length!==1)rejected();
+  const grant=candidates[0],home=env.PROJECT_CONTEXTS?.[config.projectId];
+  if(!object(home)||home.organization!==config.organization)rejected();
+  const contexts=Object.entries(env.PROJECT_CONTEXTS??{}).filter(([,c])=>c.project===grant.project&&c.organization===config.organization);
+  if(contexts.length!==1||contexts[0][1].ownerId!==home.ownerId)rejected();
+  const [projectId,context]=contexts[0];
   if (!object(grant) || !object(context) || context.organization !== config.organization ||
       typeof context.project !== 'string' || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(context.project) ||
       context.project.split('/').some(part => ['.', '..'].includes(part)) ||
@@ -62,7 +69,7 @@ function configuredGrant(env, config) {
   const immutableSubject = numericID(constraints.repository_owner_id) && numericID(constraints.repository_id)
     ? `repo:${owner}@${constraints.repository_owner_id}/${repository}@${constraints.repository_id}:ref:${ref}` : null;
   if (grant.subject !== standardSubject && (immutableSubject === null || grant.subject !== immutableSubject)) rejected();
-  return {grant, context, audience};
+  return {grant, context, audience, projectId};
 }
 
 async function signingKey(kid) {
@@ -84,8 +91,8 @@ async function signingKey(kid) {
 
 /** Returns the existing service-binding identity shape; never a worker/provider identity. */
 export async function authenticateGitHubWorkload(token, env, config) {
-  const {grant, context, audience} = configuredGrant(env, config);
   const {parts, header, claims} = decodeToken(token);
+  const {grant, context, audience, projectId} = configuredGrant(env, config, claims);
   if (header.alg !== 'RS256' || typeof header.kid !== 'string' || !header.kid || header.kid.length > 256 ||
       header.typ !== undefined && header.typ !== 'JWT' || header.crit !== undefined || header.b64 !== undefined ||
       header.jku !== undefined || header.x5u !== undefined) rejected();
@@ -105,7 +112,7 @@ export async function authenticateGitHubWorkload(token, env, config) {
     if (typeof claims.scope !== 'string') rejected();
     scopes = scopes.filter(scope => claims.scope.split(/\s+/).includes(scope));
   }
-  return Object.freeze({organization: config.organization, projectId: config.projectId, ownerId: context.ownerId,
+  return Object.freeze({organization: config.organization, projectId, ownerId: context.ownerId,
     // Kept for the internal RPC shape only. The signed actor ID grants no authority.
     githubUserId: claims.actor_id, clientId: grant.identity, provider: null,
     scopes: Object.freeze(scopes), resource: config.origin + '/v1/tasks'});

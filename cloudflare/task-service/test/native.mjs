@@ -8,6 +8,7 @@ const production=(await build({entryPoints:['src/worker.mjs'],bundle:true,format
 const fixture=(await build({entryPoints:['test/fixture.mjs'],bundle:true,format:'esm',platform:'browser',write:false,external:['cloudflare:*'],plugins:[{name:'browser',setup(b){b.onResolve({filter:/^@hyperjump\/browser$/},()=>({path:resolve('node_modules/@hyperjump/browser/lib/index.browser.js')}));}}]})).outputFiles[0].text;
 const organization=process.argv.includes('--pigbibi')?'pigbibi':'quant',organizationId=organization==='quant'?'Quant':'Pigbibi';
 const origin='https://tasks.example.test',project=organizationId+'/SyntheticProject',projectId=organization+'-synthetic';
+const secondProject=organizationId+'/SecondSynthetic';
 const stateClass=organization==='quant'?'QuantFixtureStore':'PersonalFixtureStore';
 const policy={ORGANIZATION:organization,ORGANIZATION_ID:organizationId,PUBLIC_ORIGIN:origin,PROJECT_ID:projectId,TASK_STORE_NAME:'personal-tasks-v1',GITHUB_CLIENT_ID:'synthetic-client',GITHUB_CLIENT_SECRET:'synthetic-only-secret',AUTH_CLIENTS:{},ADMISSIONS_JSON:'[]',PROJECT_CONTEXTS:{[projectId]:{organization,ownerId:organizationId,project,providers:['dot']}},PROJECT_POLICIES:{[project]:{providers:{agent:'dot'},models:{dot:['configured-dot']},max_active:20,max_timeout_seconds:3600,max_request_bytes:2000000}}};
 policy.PROJECT_POLICIES[project].providers={agent:'dot','api:disabled':'disabled-api','api:no-authorization':'unapproved-api','api:no-key':'missing-key-api'};
@@ -20,6 +21,9 @@ for(const name of ['grok','claude','disabled-bot','missing-bot-key']){
 policy.SYNTHETIC_ROUTINE_KEY='synthetic-routine-key';
 policy.AGENT_PROVIDERS={grok:{type:'grok_webhook',enabled:true,url:'https://routine.example/trigger',key_env:'SYNTHETIC_ROUTINE_KEY'},claude:{type:'claude_routine',enabled:true,url:'https://api.anthropic.com/v1/claude_code/routines/trig_SYNTHETIC/fire',key_env:'SYNTHETIC_ROUTINE_KEY'},'disabled-bot':{type:'grok_webhook',enabled:false,url:'https://routine.example/trigger',key_env:'SYNTHETIC_ROUTINE_KEY'},'missing-bot-key':{type:'grok_webhook',enabled:true,url:'https://routine.example/trigger',key_env:'ABSENT_KEY'}};
 const nativeCalls=[];let nativeReply=200;
+policy.PROJECT_CONTEXTS[projectId+'-second']={organization,ownerId:organizationId,project:secondProject,providers:['dot']};
+policy.PROJECT_POLICIES[secondProject]={...policy.PROJECT_POLICIES[project]};
+
 const deliveries=[],key=randomBytes(32),secret='whsec_'+key.toString('base64');let failedOnce=false,githubUser=10001,outbound=0;
 const apiCalls=[];let apiReply='success',releaseAPI;
 const outboundService=async request=>{outbound++;const url=new URL(request.url);if(url.hostname==='routine.example'||url.hostname==='api.anthropic.com'){
@@ -63,6 +67,7 @@ try{
  await test('production bundle has no test issuance or out imports',async()=>{assert.ok(!production.includes('synthetic-github-token'));assert.ok(!production.includes('/__fixture__/'));assert.ok(!production.includes('abandonAPI'));assert.ok(!production.includes('/out/'));});
  ids={dot:(await worker.client('http://localhost:8989/callback')).clientId,caller:(await worker.client('http://localhost:8989/callback')).clientId};
  const clients={[ids.dot]:{provider:'dot',scopes:['tasks:read','tasks:work','events:subscribe'],resources:[origin+'/mcp']},[ids.caller]:{provider:null,scopes:['tasks:read','tasks:submit'],resources:[origin+'/v1/tasks']}};
+ clients[ids.dot].projects=[secondProject];
  const admission=[{organization,projectId,githubUserId:'10001',ownerId:organizationId,clientIds:Object.values(ids),providers:['dot'],scopes:['tasks:read','tasks:work','tasks:submit','events:subscribe']}];
  policy.AUTH_CLIENTS=clients;policy.ADMISSIONS_JSON=JSON.stringify(admission);
  // Apply identical configuration to auth and DO; existing Worker bindings are immutable.
@@ -132,6 +137,25 @@ try{
   const claim=await tool('claim_task',{task_id:task.id,attempt_id:'native-attempt'});assert.equal(claim.body.result.structuredContent.status,'running');
   const out={source_id:'first-org-synthetic-v1',passed:1,failed:1,trade_authorized:false};
   const reported=await tool('report_task_result',{task_id:task.id,attempt_id:'native-attempt',revision:1,status:'completed',output:out});assert.equal(reported.body.result.structuredContent.status,'completed');assert.deepEqual((await get(task.id)).output,out);
+ });
+ await test('explicit worker project selection preserves caller and owner isolation',async()=>{
+  const catalog=(await rpc('tools/list')).body.result.tools;
+  assert.ok(catalog[0].inputSchema.properties.project.enum.includes(secondProject));
+
+  const subscription=await rpc('events/subscribe',{name:'task.requested',arguments:{project:secondProject},delivery:{mode:'webhook',url:'https://dot-callback.example/events',secret},ttlMs:3600000});
+  assert.ok(subscription.body.result,JSON.stringify(subscription.body));
+  assert.equal((await rpc('events/subscribe',{name:'task.requested',arguments:{project:'OtherOwner/Private'},delivery:{mode:'webhook',url:'https://dot-callback.example/events',secret},ttlMs:3600000})).body.error.code,-32003);
+  const foreignRead=await request('/v1/tasks/absent?project='+encodeURIComponent(secondProject),{headers:auth(tokens.caller)});assert.equal(foreignRead.status,403);
+  const r=await rpc('tools/call',{name:'get_task',arguments:{task_id:'absent',project:secondProject}});assert.equal(r.body.error.code,-32602);
+  const t=await worker.projectTask(secondProject,taskRequest);
+  await until(()=>deliveries.some(d=>d.body.data.task_id===t.id));
+  const read=await rpc('tools/call',{name:'get_task',arguments:{task_id:t.id,project:secondProject}});assert.equal(read.body.result.structuredContent.owner,secondProject);
+  assert.equal((await tool('get_task',{task_id:t.id})).body.error.code,-32602);
+  const claimed=await rpc('tools/call',{name:'claim_task',arguments:{task_id:t.id,project:secondProject,attempt_id:'second-project-attempt'}});assert.equal(claimed.body.result.structuredContent.status,'running');
+  const report=await rpc('tools/call',{name:'report_task_result',arguments:{task_id:t.id,project:secondProject,attempt_id:'second-project-attempt',revision:1,status:'completed',output:{source_id:'first-org-synthetic-v1',passed:1,failed:1,trade_authorized:false}}});assert.equal(report.body.result.structuredContent.status,'completed');
+
+  assert.equal((await rpc('tools/call',{name:'get_task',arguments:{task_id:'absent',project:'OtherOwner/Private'}})).body.error.code,-32602);
+  await rpc('tools/call',{name:'delete_event_subscription',arguments:{subscription_id:subscription.body.result.id,project:secondProject}});
  });
  await test('same frozen intent finds same task after accepted response loss, no resubmit',async()=>{
   const digest=createHash('sha256').update((await import('../src/canonical.mjs')).serialize((await import('../src/canonical.mjs')).parseJson(JSON.stringify(taskRequest)))).digest('hex');
