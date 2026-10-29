@@ -84,8 +84,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--prompt-file', type=Path, required=True)
     parser.add_argument('--image', type=Path, action='append', default=[])
-    parser.add_argument('--output-schema', type=Path, required=True)
-    parser.add_argument('--out', type=Path, required=True)
+    parser.add_argument('--output-schema', type=Path)
+    parser.add_argument('--out', type=Path)
     parser.add_argument('--timeout-seconds', type=int, default=60)
     parser.add_argument('--sandbox', choices=['read-only'], default='read-only')
     parser.add_argument('--ask-for-approval', choices=['never'], default='never')
@@ -96,11 +96,26 @@ def main():
     parser.add_argument('--providers')
     args = parser.parse_args()
     try:
-        output = execute(args.prompt_file.read_text(), args.image,
-                         json.loads(args.output_schema.read_text()),
-                         state_path=Path(str(args.out) + '.state.json'),
+        prompt = args.prompt_file.read_text()
+        raw_stdout = args.output_schema is None
+        schema = (json.loads(args.output_schema.read_text()) if not raw_stdout else
+                  {'type': 'object', 'properties': {'text': {'type': 'string'}},
+                   'required': ['text'], 'additionalProperties': False})
+        if raw_stdout:
+            prompt = 'Put the response, preserving any requested JSON, inside the text field.\n' + prompt
+        identity = {'operation': os.environ.get('AI_SERVICE_OPERATION_ID') or os.environ.get('GITHUB_RUN_ID'),
+                    'prompt': prompt, 'schema': schema,
+                    'images': [hashlib.sha256(p.read_bytes()).hexdigest() for p in args.image]}
+        state_path = (Path(str(args.out) + '.state.json') if args.out else
+                      Path(os.environ.get('AI_SERVICE_STATE_DIR') or
+                           str(Path(tempfile.gettempdir()) / ('ai-service-command-' + str(os.getuid()))))
+                      / (digest(identity) + '.json'))
+        output = execute(prompt, args.image, schema, state_path=state_path,
                          timeout=args.timeout_seconds, env=os.environ)
-        save(args.out, output)
+        if args.out:
+            save(args.out, output)
+        else:
+            print(output['text'] if raw_stdout else json.dumps(output, ensure_ascii=False))
     except Exception:
         parser.exit(3, 'AI image task unavailable; retain its state and reuse its original identity.\n')
 
