@@ -6,6 +6,7 @@ import argparse
 from datetime import datetime, timezone
 import json
 import os
+from urllib.error import HTTPError
 from pathlib import Path
 from unittest.mock import patch
 
@@ -52,7 +53,7 @@ def main():
         result = verify(args.workspace, env=os.environ)
         code = 0
     except Exception as exc:
-        result = {'status': 'failed', 'reason': type(exc).__name__,
+        result = {'status': 'failed', 'reason': ('http_status_' + str(exc.code)) if isinstance(exc, HTTPError) else type(exc).__name__,
                   'synthetic_only': True, 'business_access': False,
                   'production_ledger_access': False}
         code = 3
