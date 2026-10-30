@@ -190,6 +190,17 @@ The input identity needs read-only list and generation-specific object access.
 Archive read failures mark the Binance live profile unavailable; unrelated profiles
 and paper runs are skipped. Reports and account values remain in the protected input bundle.
 Archive import does not establish current coverage or enable trading.
+After a successful input-bundle write, the adapter's `refreshed` result also
+includes `source_counts` (ready, error, unknown) and `source_readiness` (ready,
+unavailable, unknown). These summarize the current lifecycle source statuses and
+the archive source status; missing, invalid, stale, or partially configured source
+evidence is unknown. An archive read error makes the summary unavailable. A
+missing archive status, including when the legacy source is used, is unknown.
+This summary does not qualify the live coverage window, returns, drift, or
+notification delivery, and does not change the adapter's exit or write behavior.
+The in-cycle Cloud Run refresh emits the same bounded counts and readiness in a
+`monitor_input_refresh` / `source_summary` structured log with scope
+`source_reads_only`; a logging failure does not stop input consumption.
 Set `VERIFY_BINANCE_REPORT_ARCHIVE_ONLY=true` to check the archive with the
 current identity in an isolated temporary directory, without reading or writing
 the input bundle. The result contains only a status, count or fixed error code.
