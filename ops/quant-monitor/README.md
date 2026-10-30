@@ -203,7 +203,16 @@ The in-cycle Cloud Run refresh emits the same bounded counts and readiness in a
 `source_reads_only`; a logging failure does not stop input consumption.
 Set `VERIFY_BINANCE_REPORT_ARCHIVE_ONLY=true` to check the archive with the
 current identity in an isolated temporary directory, without reading or writing
-the input bundle. The result contains only a status, count or fixed error code.
+the input bundle. The result includes a bounded archive-only return-segment summary
+from the pinned QPK live return calculation: date bounds, projected record count,
+normalized and segment interval counts, segment return count and fixed gap reasons.
+It does not return amounts, returns, account identity, source locations or stream ID.
+The isolated archive is not the monitor input bundle. Its segment is not the current
+monitor checkpoint window, a qualified count for that window or evidence of health;
+those fields remain unknown. Excluded record counts are also unknown because the QPK
+result does not classify every excluded record and records and returns use different units.
+If segment analysis fails, the archive read result remains separate and the segment
+status is unavailable without printing an exception.
 This mode does not run the existing input-bundle verification or refresh.
 In the hosted workflow, select `verify_binance_report_archive_only`; neither GitHub
 App token nor Issue delivery is used. Supply the corresponding protected repository secrets
