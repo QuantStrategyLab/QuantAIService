@@ -973,6 +973,100 @@ class MonitorFailClosedTests(unittest.TestCase):
         self.assertIn("data/evidence or optimization-record delivery", body)
         self.assertNotIn("strategy_lifecycle", body)
 
+    def test_shared_status_failure_distinguishes_missing_invalid_stale_and_future(self) -> None:
+        now = HEALTH_CYCLE.datetime(2026, 10, 1, 12, tzinfo=HEALTH_CYCLE.timezone.utc)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "data/lifecycle-artifacts/status.json"
+            domains = ("us_equity", "crypto")
+            def check(reason):
+                expected, revisions, stamp, errors, not_configured = HEALTH_CYCLE._load_expected_coverage(
+                    root, domains=domains, now=now,
+                )
+                self.assertEqual((expected, revisions, stamp, not_configured), ({}, {}, None, set()))
+                self.assertEqual(set(errors), set(domains))
+                self.assertEqual({e["reason_code"] for e in errors.values()}, {reason})
+                lines, identities = HEALTH_CYCLE._format_data_error_alerts(list(errors.values()))
+                self.assertEqual(len(lines), 1)
+                self.assertEqual(len(identities), 2)
+                self.assertEqual(set(identities), {
+                    f"data_error:{domain}:artifact_sync_status_unavailable:{errors[domain]['error_type']}"
+                    for domain in domains
+                })
+                self.assertIn("domains=crypto,us_equity", lines[0])
+                self.assertIn(reason, HEALTH_CYCLE._build_alert_body(lines))
+            check("artifact_status_missing")
+            with mock.patch.object(Path, "read_text", side_effect=PermissionError("private detail")):
+                check("artifact_status_read_failed")
+            path.parent.mkdir(parents=True)
+            path.write_text("{bad", encoding="utf-8")
+            check("artifact_status_invalid")
+            payload = {"schema_version": HEALTH_CYCLE._ARTIFACT_STATUS_SCHEMA, "domains": {}}
+            for stamp, reason in (("2026-10-01T09:59:00+00:00", "artifact_status_stale"),
+                                  ("2026-10-01T12:06:00+00:00", "artifact_status_future")):
+                path.write_text(json.dumps({**payload, "as_of": stamp}), encoding="utf-8")
+                check(reason)
+
+    def test_live_failure_message_preserves_both_evidence_gaps_in_plain_text(self) -> None:
+        errors = [
+            HEALTH_CYCLE._artifact_status_error("crypto", code="monitor_data_unavailable",
+                reason_code="live_coverage_configuration_missing"),
+            HEALTH_CYCLE._artifact_status_error("crypto", code="drift_data_unavailable",
+                reason_code="live_drift_snapshot_unavailable"),
+        ]
+        lines, identities = HEALTH_CYCLE._format_data_error_alerts(errors)
+        body = HEALTH_CYCLE._build_alert_body(lines, locale="zh-CN")
+        self.assertEqual(len(identities), 2)
+        self.assertIn("实时覆盖配置缺失", body)
+        self.assertIn("当前实时快照不可用，无法计算漂移", body)
+        self.assertEqual(body.count("\n• "), 2)  # Scope plus one related-failure line.
+        self.assertIn("[crypto]", body)
+        self.assertNotIn("&#91;", body)
+        self.assertNotIn("monitor\\_data", body)
+
+    def test_alert_locale_env_and_duplicate_evidence(self) -> None:
+        lines = ["[crypto] monitor_data_unavailable reason=live_coverage_configuration_missing (RuntimeError)",
+                 "[crypto] drift_data_unavailable reason=live_drift_snapshot_unavailable (RuntimeError)"]
+        with mock.patch.dict(os.environ, {}, clear=True):
+            default = HEALTH_CYCLE._build_alert_body(lines)
+        with mock.patch.dict(os.environ, {"QSL_NOTIFY_LANG": "en"}, clear=True):
+            english = HEALTH_CYCLE._build_alert_body(lines)
+        with mock.patch.dict(os.environ, {"QSL_NOTIFY_LANG": "zh-CN"}, clear=True):
+            chinese = HEALTH_CYCLE._build_alert_body(lines)
+        self.assertEqual(default, english)
+        self.assertIn("Live coverage configuration is missing", english)
+        self.assertNotIn("实时覆盖", english)
+        self.assertIn("实时覆盖配置缺失", chinese)
+        self.assertIn("drift_data_unavailable", chinese)
+        self.assertIn("🚨 量化监控｜运行告警", chinese)
+        self.assertNotIn("data/evidence or optimization-record delivery", chinese)
+        self.assertNotIn("：", english)
+        self.assertNotIn("；", english)
+        duplicates = HEALTH_CYCLE._build_alert_body([lines[0], lines[0], lines[1]], locale="en")
+        self.assertEqual(duplicates.count("monitor_data_unavailable"), 2)
+        self.assertEqual(duplicates.count("drift_data_unavailable"), 1)
+        unknown = HEALTH_CYCLE._build_alert_body(["[crypto] monitor_data_unavailable reason=new_code (RuntimeError)"], locale="en")
+        self.assertIn("Monitoring data or evidence is unavailable", unknown)
+        self.assertIn("new_code", unknown)
+
+    def test_telegram_transport_sends_plain_text_without_extra_escaping(self) -> None:
+        from urllib.parse import parse_qs
+        from quant_monitor_domain import briefing_dispatch
+
+        body = HEALTH_CYCLE._build_alert_body([
+            "[crypto] monitor_data_unavailable reason=live_coverage_configuration_missing (RuntimeError)"
+        ])
+        response = mock.MagicMock()
+        response.status = 200
+        response.read.return_value = b'{"ok":true}'
+        with mock.patch.object(briefing_dispatch.urllib.request, "urlopen") as urlopen:
+            urlopen.return_value.__enter__.return_value = response
+            outcome = briefing_dispatch.telegram_target_outcome(text=body, token="synthetic", chat_id="1")
+        payload = parse_qs(urlopen.call_args.args[0].data.decode("utf-8"))
+        self.assertEqual(outcome, "sent")
+        self.assertEqual(payload["text"], [body])
+        self.assertNotIn("parse_mode", payload)
+
     def test_health_cycle_non_object_alert_state_is_a_cache_miss(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

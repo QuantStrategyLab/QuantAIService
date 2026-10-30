@@ -154,10 +154,14 @@ jobs:
           suite = unittest.defaultTestLoader.loadTestsFromNames([
               "MonitorFailClosedTests.test_health_cycle_nonempty_finding_reaches_fake_issue_and_json_readback",
               "MonitorFailClosedTests.test_health_cycle_nonempty_finding_query_failure_blocks_create_and_reports_error",
+              "MonitorFailClosedTests.test_shared_status_failure_distinguishes_missing_invalid_stale_and_future",
+              "MonitorFailClosedTests.test_live_failure_message_preserves_both_evidence_gaps_in_plain_text",
+              "MonitorFailClosedTests.test_alert_locale_env_and_duplicate_evidence",
+              "MonitorFailClosedTests.test_telegram_transport_sends_plain_text_without_extra_escaping",
           ], module)
           result = unittest.TextTestRunner(verbosity=2).run(suite)
           print({"tests_run": result.testsRun, "skips": len(result.skipped), "blocked": len(blocked)})
-          if not (result.wasSuccessful() and result.testsRun == 2 and not result.skipped and not blocked):
+          if not (result.wasSuccessful() and result.testsRun == 6 and not result.skipped and not blocked):
               raise SystemExit(1)
           path = "ops/quant-monitor/tests/test_lifecycle_artifact_sync.py"
           spec = importlib.util.spec_from_file_location("artifact_failure_ci_tests", path)
