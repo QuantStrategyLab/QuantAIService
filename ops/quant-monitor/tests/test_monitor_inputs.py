@@ -237,6 +237,7 @@ def test_archive_failure_is_local_to_crypto_and_other_inputs_continue(tmp_path):
     status = tmp_path / 'monitor/data/lifecycle-artifacts/status.json'
     status.parent.mkdir(parents=True)
     status.write_text(json.dumps({'schema_version': 'quant_monitor_lifecycle_artifact_status.v1',
+                                  'as_of': datetime.now(timezone.utc).isoformat(),
                                   'domains': {'us_equity': {'status': 'ready'}, 'crypto': {'status': 'ready'}}}))
     env = {'BINANCE_REPORT_ARCHIVE_URI': 'gs://safe-bucket/reports',
            'BINANCE_REPORT_ARCHIVE_STREAM_ID': 'synthetic',
@@ -251,6 +252,105 @@ def test_archive_failure_is_local_to_crypto_and_other_inputs_continue(tmp_path):
     source = json.loads((status.parent / 'binance-report-source.json').read_text())
     assert source['status'] == 'error'
     assert source['reason'] == 'archive_read_failed'
+    summary = inputs._source_readiness_summary(tmp_path)
+    assert summary['source_counts']['error'] == 1
+    assert summary['source_readiness'] == 'unavailable'
+    assert 'archive_read_failed' not in json.dumps(summary)
+
+
+def test_adapter_summary_treats_missing_or_partial_source_status_as_unknown():
+    store = Mock()
+    store.claim.return_value = 7
+    store.read.return_value = (b'input', 3)
+    def refresh(root):
+        path = root / 'monitor/data/lifecycle-artifacts/status.json'
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps({'schema_version': 'quant_monitor_lifecycle_artifact_status.v1',
+                                    'as_of': datetime.now(timezone.utc).isoformat(),
+                                    'domains': {'crypto': {'status': 'ready'}}}))
+    with patch.object(inputs, 'restore'), patch.object(inputs, 'refresh_inputs', side_effect=refresh), \
+         patch.object(inputs, 'input_archive', return_value=b'prepared'):
+        result = inputs.run_adapter(store, execution_id='test')
+    assert result['status'] == 'refreshed'
+    assert result['audit_requests'] == 0
+    assert result['source_readiness'] == 'unknown'
+    assert result['source_counts'] == {'ready': 1, 'error': 0, 'unknown': 4}
+    store.commit.assert_called_once_with(b'prepared', state_generation=3, claim_generation=7)
+
+
+class SourceSummaryTests(unittest.TestCase):
+    def test_partial_and_missing_source_are_unknown_after_commit(self):
+        test_adapter_summary_treats_missing_or_partial_source_status_as_unknown()
+
+    def test_ready_requires_fresh_status_and_complete_matching_archive_binding(self):
+        import sync_lifecycle_artifacts
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / 'monitor/data/lifecycle-artifacts'
+            path.mkdir(parents=True)
+            now = datetime.now(timezone.utc)
+            lifecycle = {'schema_version': 'quant_monitor_lifecycle_artifact_status.v1',
+                         'as_of': now.isoformat(),
+                         'domains': {name: {'status': 'ready'} for name in sync_lifecycle_artifacts.DOMAIN_CONFIGS}}
+            archive = {'schema_version': 'quant_monitor_binance_report_source.v1',
+                       'as_of': now.isoformat(), 'status': 'ready', 'stream_id': 'test'}
+            (path / 'status.json').write_text(json.dumps(lifecycle))
+            (path / 'binance-report-source.json').write_text(json.dumps(archive))
+            env = {'BINANCE_REPORT_ARCHIVE_URI': 'gs://example/test',
+                   'BINANCE_REPORT_ARCHIVE_STREAM_ID': 'test',
+                   'BINANCE_REPORT_ARCHIVE_ACCOUNT_SCOPE_SHA256': 'a' * 64}
+            with patch.dict(os.environ, env, clear=True):
+                self.assertEqual(inputs._source_readiness_summary(root)['source_readiness'], 'ready')
+                archive['stream_id'] = 'other'
+                (path / 'binance-report-source.json').write_text(json.dumps(archive))
+                self.assertEqual(inputs._source_readiness_summary(root)['source_readiness'], 'unknown')
+                archive['stream_id'] = 'test'
+                archive['as_of'] = (now - timedelta(hours=3)).isoformat()
+                (path / 'binance-report-source.json').write_text(json.dumps(archive))
+                self.assertEqual(inputs._source_readiness_summary(root)['source_readiness'], 'unknown')
+                (path / 'binance-report-source.json').write_text('{invalid')
+                self.assertEqual(inputs._source_readiness_summary(root)['source_readiness'], 'unknown')
+            with patch.dict(os.environ, {'BINANCE_REPORT_ARCHIVE_STREAM_ID': 'test'}, clear=True):
+                archive['as_of'] = now.isoformat()
+                (path / 'binance-report-source.json').write_text(json.dumps(archive))
+                self.assertEqual(inputs._source_readiness_summary(root)['source_readiness'], 'unknown')
+
+    def test_archive_failure_is_visible_after_refresh_and_commit(self):
+        import types
+        from sync_binance_live_runs import BinanceLiveRunsError
+
+        store = Mock()
+        store.claim.return_value = 7
+        store.read.return_value = (b'input', 3)
+        def lifecycle(_args):
+            root = Path(os.environ['QUANT_MONITOR_ROOT'])
+            path = root / 'data/lifecycle-artifacts/status.json'
+            path.parent.mkdir(parents=True, exist_ok=True)
+            import sync_lifecycle_artifacts
+            path.write_text(json.dumps({'schema_version': 'quant_monitor_lifecycle_artifact_status.v1',
+                'as_of': datetime.now(timezone.utc).isoformat(),
+                'domains': {name: {'status': 'ready'} for name in sync_lifecycle_artifacts.DOMAIN_CONFIGS}}))
+        storage = types.ModuleType('google.cloud.storage')
+        storage.Client = Mock()
+        cloud = types.ModuleType('google.cloud')
+        cloud.storage = storage
+        google = types.ModuleType('google')
+        google.cloud = cloud
+        env = {'BINANCE_REPORT_ARCHIVE_URI': 'gs://private/path',
+               'BINANCE_REPORT_ARCHIVE_STREAM_ID': 'private-stream',
+               'BINANCE_REPORT_ARCHIVE_ACCOUNT_SCOPE_SHA256': 'a' * 64}
+        with patch.dict(os.environ, env, clear=True), \
+             patch.dict(sys.modules, {'google': google, 'google.cloud': cloud, 'google.cloud.storage': storage}), \
+             patch('sync_lifecycle_artifacts.main', side_effect=lifecycle), \
+             patch.object(inputs, 'refresh_binance_report_archive',
+                          side_effect=BinanceLiveRunsError('archive_read_failed')), \
+             patch.object(inputs, 'restore'), patch.object(inputs, 'input_archive', return_value=b'prepared'):
+            result = inputs.run_adapter(store, execution_id='test')
+        self.assertEqual(result, {'status': 'refreshed', 'audit_requests': 0,
+            'source_readiness': 'unavailable', 'source_counts': {'ready': 4, 'error': 1, 'unknown': 0}})
+        self.assertNotIn('private', json.dumps(result))
+        self.assertNotIn('archive_read_failed', json.dumps(result))
+        store.commit.assert_called_once_with(b'prepared', state_generation=3, claim_generation=7)
 
 
 def test_archive_verification_mode_does_not_access_input_store_or_write(tmp_path, capsys):

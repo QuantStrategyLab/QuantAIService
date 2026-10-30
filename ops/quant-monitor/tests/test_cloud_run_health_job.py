@@ -102,6 +102,60 @@ class CloudJobTests(unittest.TestCase):
         refresh.assert_called_once_with(input_store, execution_id='synthetic-execution', source_kind='cloud_run')
         apply.assert_called_once_with(root, b'synthetic')
 
+    def test_cloud_refresh_logs_safe_source_summary_from_adapter(self):
+        from datetime import datetime, timezone
+        import monitor_inputs
+        import sync_lifecycle_artifacts
+
+        input_store, root = Mock(), Mock()
+        input_store.claim.return_value = 7
+        input_store.read.return_value = (b'synthetic', 3)
+        config = {'private_key': 'private-key', 'archive_uri': 'gs://private/path',
+                  'stream_id': 'private-stream', 'account_scope_sha256': 'a' * 64,
+                  'app_id': '1', 'installation_id': '2'}
+        env = {'MONITOR_INPUT_REFRESH_IN_CYCLE': 'true', 'MONITOR_INPUT_READER_CONFIG_JSON': json.dumps(config),
+               'CLOUD_RUN_EXECUTION': 'synthetic-execution'}
+        def refresh(workspace):
+            path = workspace / 'monitor/data/lifecycle-artifacts'
+            path.mkdir(parents=True)
+            stamp = datetime.now(timezone.utc).isoformat()
+            (path / 'status.json').write_text(json.dumps({
+                'schema_version': 'quant_monitor_lifecycle_artifact_status.v1', 'as_of': stamp,
+                'domains': {name: {'status': 'ready'} for name in sync_lifecycle_artifacts.DOMAIN_CONFIGS}}))
+            (path / 'binance-report-source.json').write_text(json.dumps({
+                'schema_version': 'quant_monitor_binance_report_source.v1', 'as_of': stamp,
+                'status': 'error', 'reason': 'private-error', 'stream_id': 'private-stream'}))
+        output = io.StringIO()
+        with patch.dict(os.environ, env, clear=True), patch('shutil.which', return_value='/synthetic/gh'), \
+             patch('monitor_inputs.mint_reader_token', return_value='private-token'), \
+             patch.object(monitor_inputs, 'restore'), patch.object(monitor_inputs, 'refresh_inputs', side_effect=refresh), \
+             patch.object(monitor_inputs, 'input_archive', return_value=b'prepared'), \
+             patch.object(monitor_inputs, '_stage'), patch.object(monitor_inputs, 'apply_inputs') as apply, \
+             patch('sys.stdout', output):
+            job.refresh_cycle_inputs(input_store, root, mode='run')
+        receipt = json.loads(output.getvalue())
+        self.assertEqual(receipt, {'component': 'monitor_input_refresh', 'stage': 'source_summary',
+            'scope': 'source_reads_only', 'source_readiness': 'unavailable',
+            'source_counts': {'ready': 4, 'error': 1, 'unknown': 0}})
+        self.assertNotIn('private', output.getvalue())
+        input_store.commit.assert_called_once_with(b'prepared', state_generation=3, claim_generation=7)
+        apply.assert_called_once_with(root, b'synthetic')
+
+    def test_source_summary_log_failure_does_not_block_input_consumption(self):
+        input_store, root = Mock(), Mock()
+        input_store.read.return_value = (b'synthetic', 3)
+        config = {'private_key': 'key', 'archive_uri': 'uri', 'stream_id': 'stream',
+                  'account_scope_sha256': 'scope', 'app_id': '1', 'installation_id': '2'}
+        env = {'MONITOR_INPUT_REFRESH_IN_CYCLE': 'true', 'MONITOR_INPUT_READER_CONFIG_JSON': json.dumps(config),
+               'CLOUD_RUN_EXECUTION': 'synthetic-execution'}
+        summary = {'source_readiness': 'unavailable', 'source_counts': {'ready': 4, 'error': 1, 'unknown': 0}}
+        with patch.dict(os.environ, env, clear=True), patch('shutil.which', return_value='/synthetic/gh'), \
+             patch('monitor_inputs.mint_reader_token', return_value='synthetic-token'), \
+             patch('monitor_inputs.run_adapter', return_value=summary), \
+             patch('monitor_inputs.apply_inputs') as apply, patch('builtins.print', side_effect=OSError('closed')):
+            job.refresh_cycle_inputs(input_store, root, mode='run')
+        apply.assert_called_once_with(root, b'synthetic')
+
     def test_refresh_without_reader_fails_before_input_read(self):
         input_store = Mock()
         with patch.dict(os.environ, {'MONITOR_INPUT_REFRESH_IN_CYCLE': 'true'}, clear=True), \

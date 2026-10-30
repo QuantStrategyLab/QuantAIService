@@ -222,7 +222,19 @@ def refresh_cycle_inputs(input_store, root, *, mode):
         previous = {name: os.environ.get(name) for name in values}
         os.environ.update(values)
         try:
-            run_adapter(input_store, execution_id=os.environ['CLOUD_RUN_EXECUTION'], source_kind='cloud_run')
+            summary = run_adapter(input_store, execution_id=os.environ['CLOUD_RUN_EXECUTION'], source_kind='cloud_run')
+            if isinstance(summary, dict):
+                readiness = summary.get('source_readiness')
+                counts = summary.get('source_counts')
+                if (readiness in ('ready', 'unavailable', 'unknown') and isinstance(counts, dict)
+                        and set(counts) == {'ready', 'error', 'unknown'}
+                        and all(type(counts[key]) is int and 0 <= counts[key] <= 100 for key in counts)):
+                    try:
+                        print(json.dumps({'component': 'monitor_input_refresh', 'stage': 'source_summary',
+                            'scope': 'source_reads_only', 'source_readiness': readiness,
+                            'source_counts': {key: counts[key] for key in ('ready', 'error', 'unknown')}}), flush=True)
+                    except (OSError, ValueError):
+                        pass  # Logging must not affect refresh or delivery.
         finally:
             for name, value in previous.items():
                 if value is None:

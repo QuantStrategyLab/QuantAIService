@@ -279,6 +279,50 @@ def _stage(stage, event, elapsed=None):
     print(json.dumps(value, separators=(',', ':')), flush=True)
 
 
+def _source_readiness_summary(root):
+    """Summarize source read statuses, not coverage or strategy health."""
+    from binance_report_input import valid_stream_id
+    from sync_lifecycle_artifacts import DOMAIN_CONFIGS
+
+    now = datetime.now(timezone.utc)
+
+    def read_status(path, schema):
+        try:
+            value = json.loads(path.read_text(encoding='utf-8'))
+            stamp = datetime.fromisoformat(value['as_of'].replace('Z', '+00:00'))
+            if (value.get('schema_version') != schema or stamp.tzinfo is None
+                    or not -timedelta(minutes=5) <= now - stamp <= timedelta(hours=2)):
+                return {}
+            return value
+        except (OSError, UnicodeDecodeError, ValueError, TypeError, KeyError, AttributeError):
+            return {}
+
+    root = root / 'monitor/data/lifecycle-artifacts'
+    lifecycle = read_status(root / 'status.json', 'quant_monitor_lifecycle_artifact_status.v1')
+    domains = lifecycle.get('domains')
+    domains = domains if isinstance(domains, dict) else {}
+    archive = read_status(root / 'binance-report-source.json', 'quant_monitor_binance_report_source.v1')
+    stream = os.environ.get('BINANCE_REPORT_ARCHIVE_STREAM_ID', '').strip()
+    scope = os.environ.get('BINANCE_REPORT_ARCHIVE_ACCOUNT_SCOPE_SHA256', '').strip()
+    try:
+        uri = urlsplit(os.environ.get('BINANCE_REPORT_ARCHIVE_URI', '').strip())
+        valid_uri = (uri.scheme == 'gs' and uri.netloc and uri.path.strip('/')
+                     and not (uri.query or uri.fragment or uri.username or uri.password))
+    except ValueError:
+        valid_uri = False
+    if archive.get('status') == 'ready' and not (
+            valid_uri and valid_stream_id(stream) and re.fullmatch(r'[0-9a-f]{64}', scope)
+            and archive.get('stream_id') == stream):
+        archive = {}
+    counts = {'ready': 0, 'error': 0, 'unknown': 0}
+    for value in [*(domains.get(domain) for domain in DOMAIN_CONFIGS), archive]:
+        status = value.get('status') if isinstance(value, dict) else None
+        counts[status if status in ('ready', 'error') else 'unknown'] += 1
+    readiness = ('unavailable' if counts['error'] else
+                 'unknown' if counts['unknown'] else 'ready')
+    return {'source_readiness': readiness, 'source_counts': counts}
+
+
 def run_adapter(store, *, verify_only=False, execution_id=None, source_kind='github_actions'):
     if verify_only:
         raw, _ = store.read()
@@ -302,6 +346,7 @@ def run_adapter(store, *, verify_only=False, execution_id=None, source_kind='git
             root = Path(directory)
             restore(raw, root)
             refresh_inputs(root)
+            source_summary = _source_readiness_summary(root)
             pack_start = time.monotonic()
             _stage('input_pack', 'started')
             prepared = input_archive(root, refreshed=True, source_kind=source_kind)
@@ -314,7 +359,7 @@ def run_adapter(store, *, verify_only=False, execution_id=None, source_kind='git
     # Once a conditional write is attempted its outcome may be unknown. Keep
     # the claim on failure, as in the computing/diagnosis state adapters.
     store.commit(prepared, state_generation=generation, claim_generation=claim)
-    return {'status': 'refreshed', 'audit_requests': 0}
+    return {'status': 'refreshed', 'audit_requests': 0, **source_summary}
 
 
 def _archive_error_details(exc):
