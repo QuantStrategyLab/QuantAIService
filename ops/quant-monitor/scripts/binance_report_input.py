@@ -5,6 +5,7 @@ import hashlib
 import json
 import re
 from collections.abc import Mapping
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from sync_binance_live_runs import (
@@ -84,62 +85,67 @@ def prepare_archive_records(
     pending = {}
     tokens = set()
     token = None
-    for _ in range(max_pages):
-        try:
-            objects, next_token = list_page(token)
-        except Exception as exc:
-            raise BinanceLiveRunsError("archive_list_failed") from exc
-        if not isinstance(objects, list) or (next_token is not None and not isinstance(next_token, str)):
-            raise BinanceLiveRunsError("archive_page_invalid")
-        for item in objects:
-            if (not isinstance(item, Mapping) or not isinstance(item.get("name"), str)
-                    or not item["name"].startswith(prefix) or not item["name"].endswith(".json")
-                    or not isinstance(item.get("generation"), str)
-                    or not item["generation"].isdigit()):
-                raise BinanceLiveRunsError("archive_object_invalid")
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        for _ in range(max_pages):
             try:
-                raw = read_object(item["name"], item["generation"])
+                objects, next_token = list_page(token)
             except Exception as exc:
-                raise BinanceLiveRunsError("archive_read_failed") from exc
-            if not isinstance(raw, bytes) or not raw or len(raw) > 2 * 1024 * 1024:
-                raise BinanceLiveRunsError("archive_report_invalid")
-            try:
-                report = json.loads(raw)
-            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-                raise BinanceLiveRunsError("archive_report_invalid") from exc
-            if not isinstance(report, Mapping):
-                raise BinanceLiveRunsError("archive_report_invalid")
-            # A selected archive prefix may contain other profiles or paper runs.
-            if (report.get("platform") not in (None, "binance")
-                    or report.get("strategy_profile") not in (None, STRATEGY_PROFILE)
-                    or report.get("strategy_domain") not in (None, DOMAIN)
-                    or report.get("dry_run") is True):
-                continue
-            interval = report.get("external_cash_flow_interval")
-            scope = interval.get("account_scope_sha256") if isinstance(interval, Mapping) else None
-            if (isinstance(scope, str) and re.fullmatch(r"[0-9a-f]{64}", scope)
-                    and scope != account_scope_sha256):
-                continue
-            digest = hashlib.sha256(raw).hexdigest()
-            record = report_to_live_record(report, stream_id=stream_id,
-                                           account_scope_sha256=account_scope_sha256,
-                                           source_sha256=digest)
-            record["_source"]["object_name_sha256"] = hashlib.sha256(item["name"].encode()).hexdigest()
-            record["_source"]["object_generation"] = item["generation"]
-            identity = record["recorded_at"]
-            previous = pending.get(identity)
-            if previous is not None and _record_core(previous) != _record_core(record):
-                raise BinanceLiveRunsError("archive_record_conflict")
-            if previous is None:
-                pending[identity] = record
-        if next_token is None:
-            break
-        if not next_token or next_token in tokens:
-            raise BinanceLiveRunsError("archive_pagination_invalid")
-        tokens.add(next_token)
-        token = next_token
-    else:
-        raise BinanceLiveRunsError("archive_pagination_incomplete")
+                raise BinanceLiveRunsError("archive_list_failed") from exc
+            if not isinstance(objects, list) or (next_token is not None and not isinstance(next_token, str)):
+                raise BinanceLiveRunsError("archive_page_invalid")
+            for batch_start in range(0, len(objects), 4):
+                batch = objects[batch_start:batch_start + 4]
+                for item in batch:
+                    if (not isinstance(item, Mapping) or not isinstance(item.get("name"), str)
+                            or not item["name"].startswith(prefix) or not item["name"].endswith(".json")
+                            or not isinstance(item.get("generation"), str)
+                            or not item["generation"].isdigit()):
+                        raise BinanceLiveRunsError("archive_object_invalid")
+                futures = [executor.submit(read_object, item["name"], item["generation"]) for item in batch]
+                for item, future in zip(batch, futures):
+                    try:
+                        raw = future.result()
+                    except Exception as exc:
+                        raise BinanceLiveRunsError("archive_read_failed") from exc
+                    if not isinstance(raw, bytes) or not raw or len(raw) > 2 * 1024 * 1024:
+                        raise BinanceLiveRunsError("archive_report_invalid")
+                    try:
+                        report = json.loads(raw)
+                    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                        raise BinanceLiveRunsError("archive_report_invalid") from exc
+                    if not isinstance(report, Mapping):
+                        raise BinanceLiveRunsError("archive_report_invalid")
+                    # A selected archive prefix may contain other profiles or paper runs.
+                    if (report.get("platform") not in (None, "binance")
+                            or report.get("strategy_profile") not in (None, STRATEGY_PROFILE)
+                            or report.get("strategy_domain") not in (None, DOMAIN)
+                            or report.get("dry_run") is True):
+                        continue
+                    interval = report.get("external_cash_flow_interval")
+                    scope = interval.get("account_scope_sha256") if isinstance(interval, Mapping) else None
+                    if (isinstance(scope, str) and re.fullmatch(r"[0-9a-f]{64}", scope)
+                            and scope != account_scope_sha256):
+                        continue
+                    digest = hashlib.sha256(raw).hexdigest()
+                    record = report_to_live_record(report, stream_id=stream_id,
+                                                   account_scope_sha256=account_scope_sha256,
+                                                   source_sha256=digest)
+                    record["_source"]["object_name_sha256"] = hashlib.sha256(item["name"].encode()).hexdigest()
+                    record["_source"]["object_generation"] = item["generation"]
+                    identity = record["recorded_at"]
+                    previous = pending.get(identity)
+                    if previous is not None and _record_core(previous) != _record_core(record):
+                        raise BinanceLiveRunsError("archive_record_conflict")
+                    if previous is None:
+                        pending[identity] = record
+            if next_token is None:
+                break
+            if not next_token or next_token in tokens:
+                raise BinanceLiveRunsError("archive_pagination_invalid")
+            tokens.add(next_token)
+            token = next_token
+        else:
+            raise BinanceLiveRunsError("archive_pagination_incomplete")
     existing = {}
     for record in existing_records:
         if (not isinstance(record, Mapping) or record.get("schema_version") != LIFECYCLE_SCHEMA

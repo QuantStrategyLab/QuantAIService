@@ -11,6 +11,7 @@ import os
 import re
 import shutil
 import tempfile
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.request import HTTPRedirectHandler, Request, build_opener
@@ -26,6 +27,33 @@ _READER_REPOSITORIES = ('CnEquityStrategies', 'HkEquityStrategies', 'UsEquityStr
 class _NoRedirect(HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None
+
+
+def reader_installation_id(app_id, private_key, *, opener=None, now=None):
+    """Resolve the existing organization's installation using the App identity."""
+    import jwt
+
+    if not re.fullmatch(r'[1-9][0-9]*', app_id or '') or not private_key:
+        raise StateUnavailable('monitor_input_reader_unavailable')
+    now = int(datetime.now(timezone.utc).timestamp()) if now is None else int(now)
+    try:
+        assertion = jwt.encode({'iat': now - 60, 'exp': now + 540, 'iss': app_id}, private_key, algorithm='RS256')
+        request = Request('https://api.github.com/orgs/QuantStrategyLab/installation', headers={
+            'Authorization': 'Bearer ' + assertion, 'Accept': 'application/vnd.github+json',
+            'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'QuantStrategyLab-Monitor/1.0'})
+        with (opener or build_opener(_NoRedirect())).open(request, timeout=20) as response:
+            raw = response.read(65537)
+            if response.status != 200 or len(raw) > 65536:
+                raise ValueError('invalid response')
+            result = json.loads(raw)
+        installation = result.get('id') if isinstance(result, dict) else None
+        if (type(installation) is not int or installation <= 0 or result.get('app_id') != int(app_id)
+                or not isinstance(result.get('account'), dict)
+                or result['account'].get('login', '').lower() != 'quantstrategylab'):
+            raise ValueError('invalid installation')
+        return str(installation)
+    except Exception as exc:
+        raise StateUnavailable('monitor_input_reader_unavailable') from exc
 
 
 def mint_reader_token(app_id, installation_id, private_key, *, opener=None, now=None):
@@ -205,13 +233,18 @@ def refresh_inputs(root):
         stream = os.environ.get('BINANCE_REPORT_ARCHIVE_STREAM_ID', '').strip()
         scope = os.environ.get('BINANCE_REPORT_ARCHIVE_ACCOUNT_SCOPE_SHA256', '').strip()
         configured = bool(uri or stream or scope)
+        lifecycle_start = time.monotonic()
+        _stage('lifecycle_reads', 'started')
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             sync_lifecycle_artifacts.main([])
             if not configured:
                 sync_binance_live_runs.run_from_environment()
+        _stage('lifecycle_reads', 'finished', time.monotonic() - lifecycle_start)
         status_path = root / 'monitor/data/lifecycle-artifacts/binance-report-source.json'
         if uri or stream or scope:
             from google.cloud import storage
+            archive_start = time.monotonic()
+            _stage('archive_reads', 'started')
             try:
                 try:
                     client = storage.Client()
@@ -223,6 +256,7 @@ def refresh_inputs(root):
                 source_status = {'status': 'error', 'reason': exc.reason}
             else:
                 source_status = {'status': 'ready'}
+            _stage('archive_reads', 'finished', time.monotonic() - archive_start)
             source_status.update(schema_version='quant_monitor_binance_report_source.v1',
                                  stream_id=stream, as_of=datetime.now(timezone.utc).isoformat())
             sync_binance_live_runs._write_json(status_path, source_status)
@@ -234,6 +268,15 @@ def refresh_inputs(root):
                 os.environ.pop(key, None)
             else:
                 os.environ[key] = value
+
+
+def _stage(stage, event, elapsed=None):
+    if os.environ.get('MONITOR_INPUT_REFRESH_IN_CYCLE') != 'true':
+        return
+    value = {'component': 'monitor_input_refresh', 'stage': stage, 'event': event}
+    if elapsed is not None:
+        value['elapsed_seconds'] = round(elapsed, 3)
+    print(json.dumps(value, separators=(',', ':')), flush=True)
 
 
 def run_adapter(store, *, verify_only=False, execution_id=None, source_kind='github_actions'):
@@ -259,7 +302,10 @@ def run_adapter(store, *, verify_only=False, execution_id=None, source_kind='git
             root = Path(directory)
             restore(raw, root)
             refresh_inputs(root)
+            pack_start = time.monotonic()
+            _stage('input_pack', 'started')
             prepared = input_archive(root, refreshed=True, source_kind=source_kind)
+            _stage('input_pack', 'finished', time.monotonic() - pack_start)
     except Exception:
         # Source reads and local preparation have no external write to replay.
         # A known claim can be released so fresh inputs can recover next time.

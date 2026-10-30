@@ -1,4 +1,5 @@
 """Offline input scope and refresh checks. No real data or external calls."""
+import io
 import json
 import os
 import sys
@@ -32,6 +33,14 @@ def fixture(root):
 
 
 class InputBoundaryTests(unittest.TestCase):
+    def test_cloud_stage_log_contains_only_fixed_stage_and_duration(self):
+        output = io.StringIO()
+        with patch.dict(os.environ, {'MONITOR_INPUT_REFRESH_IN_CYCLE': 'true'}), \
+             patch('sys.stdout', output):
+            inputs._stage('archive_reads', 'finished', 1.23456)
+        self.assertEqual(json.loads(output.getvalue()), {'component': 'monitor_input_refresh',
+                         'stage': 'archive_reads', 'event': 'finished', 'elapsed_seconds': 1.235})
+
     def test_roundtrip_preserves_live_and_snapshot_data_but_not_core_ledger(self):
         with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as other:
             root, target = Path(directory), Path(other)
@@ -147,6 +156,18 @@ class InputBoundaryTests(unittest.TestCase):
                                                    'permissions': {'actions': 'read'}})
         self.assertEqual(request.full_url, 'https://api.github.com/app/installations/34/access_tokens')
         self.assertEqual(sign.call_args.kwargs['algorithm'], 'RS256')
+
+    def test_reader_installation_matches_the_original_app_and_organization(self):
+        response = Mock()
+        response.status = 200
+        response.read.return_value = b'{"id":34,"app_id":12,"account":{"login":"QuantStrategyLab"}}'
+        opener = Mock()
+        opener.open.return_value.__enter__ = Mock(return_value=response)
+        opener.open.return_value.__exit__ = Mock(return_value=False)
+        with patch('jwt.encode', return_value='synthetic-jwt'):
+            self.assertEqual(inputs.reader_installation_id('12', 'synthetic-key', opener=opener, now=1000), '34')
+            with self.assertRaises(state.StateUnavailable):
+                inputs.reader_installation_id('13', 'synthetic-key', opener=opener, now=1000)
 
     def test_app_token_errors_are_fixed_and_do_not_expose_response(self):
         opener = Mock()

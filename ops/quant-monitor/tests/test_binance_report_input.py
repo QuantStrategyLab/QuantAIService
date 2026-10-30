@@ -1,6 +1,7 @@
 """Synthetic conversion checks; no archive, network or production writes."""
 import json
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -91,6 +92,31 @@ def test_pagination_failure_and_wrong_source_fail_closed():
         prepare({None: ([{"name": "elsewhere/report.json", "generation": "1"}], None)}, {})
     with pytest.raises(BinanceLiveRunsError, match="archive_read_failed"):
         prepare({None: ([{"name": "protected/profile/one.json", "generation": "1"}], None)}, {})
+
+
+def test_archive_reads_use_at_most_four_workers_and_keep_all_generations():
+    barrier = threading.Barrier(4, timeout=5)
+    lock = threading.Lock()
+    active = 0
+    peak = 0
+    seen = []
+    items = [{'name': f'protected/profile/{i}.json', 'generation': str(i)} for i in range(1, 5)]
+    def read(name, generation):
+        nonlocal active, peak
+        with lock:
+            active += 1
+            peak = max(peak, active)
+            seen.append((name, generation))
+        barrier.wait()
+        with lock:
+            active -= 1
+        return json.dumps(report()).encode()
+    result = prepare_archive_records(lambda _token: (items, None), read, prefix='protected/profile/',
+                                     stream_id='synthetic', account_scope_sha256='a' * 64,
+                                     existing_records=[])
+    assert peak == 4
+    assert sorted(seen) == sorted((item['name'], item['generation']) for item in items)
+    assert len(result) == 1
 
 
 def test_duplicate_identity_with_different_content_rejected():

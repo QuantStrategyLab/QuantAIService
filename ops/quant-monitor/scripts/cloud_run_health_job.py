@@ -204,18 +204,17 @@ def refresh_cycle_inputs(input_store, root, *, mode):
     from monitor_inputs import apply_inputs, mint_reader_token, run_adapter
     if mode == 'run' and os.environ.get('MONITOR_INPUT_REFRESH_IN_CYCLE') == 'true':
         raw_config = os.environ.pop('MONITOR_INPUT_READER_CONFIG_JSON', '')
-        required = ('MONITOR_READER_APP_ID', 'MONITOR_READER_INSTALLATION_ID', 'CLOUD_RUN_EXECUTION')
+        required = ('CLOUD_RUN_EXECUTION',)
         try:
             config = json.loads(raw_config)
         except (TypeError, ValueError):
             raise StateUnavailable('monitor_input_reader_unavailable') from None
-        fields = {'private_key', 'archive_uri', 'stream_id', 'account_scope_sha256'}
+        fields = {'private_key', 'archive_uri', 'stream_id', 'account_scope_sha256', 'app_id', 'installation_id'}
         if (not isinstance(config, dict) or set(config) != fields
                 or any(not isinstance(config[k], str) or not config[k] for k in fields)
                 or any(not os.environ.get(name) for name in required) or not shutil.which('gh')):
             raise StateUnavailable('monitor_input_reader_unavailable')
-        token = mint_reader_token(os.environ['MONITOR_READER_APP_ID'],
-                                  os.environ['MONITOR_READER_INSTALLATION_ID'], config['private_key'])
+        token = mint_reader_token(config['app_id'], config['installation_id'], config['private_key'])
         values = {'GH_TOKEN': token, 'NO_COLOR': '1',
                   'BINANCE_REPORT_ARCHIVE_URI': config['archive_uri'],
                   'BINANCE_REPORT_ARCHIVE_STREAM_ID': config['stream_id'],
