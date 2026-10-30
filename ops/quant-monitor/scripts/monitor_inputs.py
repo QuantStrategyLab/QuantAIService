@@ -160,7 +160,7 @@ def apply_inputs(root, raw, *, now=None):
         (root / 'manifest.json').write_text(json.dumps(current))
 
 
-def refresh_binance_report_archive(root, *, client, uri, stream_id, account_scope_sha256, write=True):
+def refresh_binance_report_archive(root, *, client, uri, stream_id, account_scope_sha256, write=True, inspect=None):
     """Read the bound archive into the claimed temporary local input store."""
     from binance_report_input import prepare_archive_records, valid_stream_id
     from quant_platform_kit.strategy_lifecycle.performance_store import PerformanceStore
@@ -203,6 +203,10 @@ def refresh_binance_report_archive(root, *, client, uri, stream_id, account_scop
 
     additions = prepare_archive_records(list_page, read_object, prefix=prefix, stream_id=stream_id,
                                        account_scope_sha256=account_scope_sha256, existing_records=existing)
+    if inspect is not None:
+        if write:
+            raise ValueError('inspection_requires_read_only')
+        inspect(additions)
     if write:
         store = PerformanceStore(local_root=local_root)
         for record in additions:
@@ -376,6 +380,41 @@ def _archive_error_details(exc):
     return result
 
 
+def archive_return_segment(records):
+    """Project only the pinned QPK collector's archive segment, without returns or amounts."""
+    try:
+        return _archive_return_segment(records)
+    except Exception:
+        return {'monitor_window_status': 'unknown', 'qualified_return_count': None,
+                'excluded_count': None, 'archive_projected_records': len(records),
+                'segment_status': 'unavailable'}
+
+
+def _archive_return_segment(records):
+    from quant_platform_kit.strategy_lifecycle.contracts import resolve_return_observation_contract
+    from quant_platform_kit.strategy_lifecycle.live_equity import live_run_records_to_return_series_result
+
+    outcome = live_run_records_to_return_series_result(
+        records, observation_contract=resolve_return_observation_contract('crypto'))
+    coverage = outcome.coverage
+    result = {'monitor_window_status': 'unknown', 'qualified_return_count': None,
+              'excluded_count': None, 'archive_projected_records': len(records)}
+    if not isinstance(coverage, dict):
+        return {**result, 'segment_status': 'interval_coverage_unavailable'}
+    from quant_platform_kit.strategy_lifecycle.contracts import normalize_interval_return_coverage
+    coverage = normalize_interval_return_coverage(coverage)
+    def date_only(name):
+        value = coverage[name]
+        return datetime.fromisoformat(value.replace('Z', '+00:00')).date().isoformat() if value else None
+    return {**result, 'segment_status': coverage['coverage_status'],
+            'segment_start_date': date_only('available_return_start_at'),
+            'segment_end_date': date_only('available_return_end_at'),
+            'normalized_interval_count': coverage['normalized_interval_count'],
+            'segment_interval_count': coverage['segment_interval_count'],
+            'segment_return_count': coverage['return_count'],
+            'reasons': coverage['truncation_reasons']}
+
+
 def main():
     from google.cloud import storage
     from monitor_cloud_state import CloudState
@@ -384,14 +423,15 @@ def main():
         from sync_binance_live_runs import BinanceLiveRunsError
         try:
             with tempfile.TemporaryDirectory(prefix='binance-report-verify-') as directory:
+                segment = []
                 count = refresh_binance_report_archive(
                     Path(directory), client=storage.Client(),
                     uri=os.environ.get('BINANCE_REPORT_ARCHIVE_URI', ''),
                     stream_id=os.environ.get('BINANCE_REPORT_ARCHIVE_STREAM_ID', ''),
                     account_scope_sha256=os.environ.get('BINANCE_REPORT_ARCHIVE_ACCOUNT_SCOPE_SHA256', ''),
-                    write=False,
+                    write=False, inspect=lambda records: segment.append(archive_return_segment(records)),
                 )
-            print(json.dumps({'status': 'verified', 'records': count}))
+            print(json.dumps({'status': 'verified', 'records': count, 'archive_return_segment': segment[0]}))
             return 0
         except BinanceLiveRunsError as exc:
             reason = exc.reason if re.fullmatch(r'[a-z_]{1,64}', exc.reason) else 'archive_verification_failed'

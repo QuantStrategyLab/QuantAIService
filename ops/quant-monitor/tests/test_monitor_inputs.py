@@ -358,12 +358,20 @@ def test_archive_verification_mode_does_not_access_input_store_or_write(tmp_path
     env = {'VERIFY_BINANCE_REPORT_ARCHIVE_ONLY': 'true', 'BINANCE_REPORT_ARCHIVE_URI': 'gs://safe/reports',
            'BINANCE_REPORT_ARCHIVE_STREAM_ID': 'synthetic',
            'BINANCE_REPORT_ARCHIVE_ACCOUNT_SCOPE_SHA256': 'a' * 64}
+    segment = {'monitor_window_status': 'unknown', 'qualified_return_count': None,
+               'excluded_count': None, 'archive_projected_records': 2,
+               'segment_status': 'interval_coverage_unavailable'}
+    def read_archive(*_args, **kwargs):
+        kwargs['inspect']([{}, {}])
+        return 2
     with patch.dict(os.environ, env, clear=True), patch.object(storage, 'Client'), \
          patch.object(inputs, 'run_adapter', side_effect=AssertionError('must not access input store')), \
-         patch.object(inputs, 'refresh_binance_report_archive', return_value=2) as read:
+         patch.object(inputs, 'archive_return_segment', return_value=segment), \
+         patch.object(inputs, 'refresh_binance_report_archive', side_effect=read_archive) as read:
         assert inputs.main() == 0
     assert read.call_args.kwargs['write'] is False
-    assert json.loads(capsys.readouterr().out) == {'status': 'verified', 'records': 2}
+    assert json.loads(capsys.readouterr().out) == {'status': 'verified', 'records': 2,
+                                                  'archive_return_segment': segment}
 
 
 def test_stream_key_alias_cannot_overwrite_existing_record(tmp_path):

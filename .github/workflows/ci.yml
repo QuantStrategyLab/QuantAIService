@@ -135,6 +135,8 @@ jobs:
           import importlib.util
           import sys
           import unittest
+          # Load the pinned native-backed QPK dependency before denying ctypes loads.
+          import quant_platform_kit.strategy_lifecycle.live_equity
 
           blocked = []
           def audit(event, _args):
@@ -164,6 +166,14 @@ jobs:
           if not (result.wasSuccessful() and result.testsRun == 6 and not result.skipped and not blocked):
               raise SystemExit(1)
           for path, names in [
+              ("ops/quant-monitor/tests/test_archive_return_segment_readonly.py", [
+                  "ArchiveSegmentTest.test_actual_archive_path_uses_qpk_without_writes_or_amounts",
+                  "ArchiveSegmentTest.test_no_interval_does_not_invent_window_or_returns",
+                  "ArchiveSegmentTest.test_qpk_reports_missing_interval_without_qualifying_window",
+                  "ArchiveSegmentTest.test_failure_is_fixed_output_and_does_not_expose_exception",
+                  "ArchiveSegmentTest.test_main_archive_only_reports_summary_without_input_state",
+                  "ArchiveSegmentTest.test_write_mode_cannot_use_inspection_callback",
+              ]),
               ("ops/quant-monitor/tests/test_monitor_inputs.py", [
                   "SourceSummaryTests.test_partial_and_missing_source_are_unknown_after_commit",
                   "SourceSummaryTests.test_ready_requires_fresh_status_and_complete_matching_archive_binding",
