@@ -1,0 +1,8 @@
+
+
+# Risk-sensitive changes require the repository owner.
+/.github/CODEOWNERS @Pigbibi
+/.github/workflows/ @Pigbibi
+/deploy/ @Pigbibi
+/ops/quant-monitor/scripts/deploy_to_vps.sh @Pigbibi
+/ops/quant-monitor/scripts/sync_sentinel_secret.py @Pigbibi
