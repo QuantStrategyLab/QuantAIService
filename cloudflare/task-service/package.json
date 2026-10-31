@@ -14,7 +14,7 @@
     "@hyperjump/json-schema": "1.18.0"
   },
   "devDependencies": {
-    "esbuild": "0.28.1",
+    "esbuild": "0.28.2",
     "miniflare": "4.20260730.0"
   }
 }
