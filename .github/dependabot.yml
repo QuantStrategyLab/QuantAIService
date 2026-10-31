@@ -1,13 +1,21 @@
 version: 2
 updates:
-# The repository has no tracked Python dependency manifest. Keeping a pip entry
-# causes Dependabot to fail every scheduled update with "No files found in /".
-- package-ecosystem: "github-actions"
-  directory: "/"
+- package-ecosystem: github-actions
+  directory: /
   schedule:
-    interval: "weekly"
+    interval: weekly
   open-pull-requests-limit: 5
   ignore:
-  - dependency-name: "*"
+  - dependency-name: '*'
     update-types:
-    - "version-update:semver-major"
+    - version-update:semver-major
+- package-ecosystem: npm
+  directory: /cloudflare/task-service
+  schedule:
+    interval: weekly
+  open-pull-requests-limit: 5
+- package-ecosystem: pip
+  directory: /
+  schedule:
+    interval: weekly
+  open-pull-requests-limit: 5
