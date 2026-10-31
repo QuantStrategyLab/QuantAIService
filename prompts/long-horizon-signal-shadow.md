@@ -45,7 +45,7 @@ If `Mode` is `review_and_fix`, you may update only:
 - `data/output/latest_signal.manifest.json`
 - `data/output/signal_history/*.json`
 
-Do not edit source code, workflow files, strategy rules, or docs from this task.
+Do not edit source code, workflow files, strategy rules, or docs while running this prompt.
 If the repository is missing required tooling or schema, report that as a finding
 instead of creating a broader scaffold.
 

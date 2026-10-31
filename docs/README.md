@@ -4,7 +4,7 @@
 
 ## Current task runtime
 
-- [Independent runtime: English overview](runtime-baseline.en.md) · [完整中文基线](runtime-baseline.zh-CN.md): this repository owns the runtime and wheel; no cross-owner core installation.
+- [Independent runtime: English overview](runtime-baseline.md) · [完整中文基线](runtime-baseline.zh-CN.md): this repository owns the runtime and wheel; no cross-owner core installation.
 - [Worker project and owner scope](worker-project-scoping.md): exact projects, explicit service owner, token scopes and connection boundaries. Read the version-specific owner-wide section together with the earlier project-list section.
 - [Scenario contracts](scenario-contracts.md): offline schemas, templates, defaults and producer binding.
 - [V2 guide index](upgrade-v2/README.md): current configuration references versus dated migration material.

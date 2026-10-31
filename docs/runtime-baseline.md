@@ -1,9 +1,13 @@
-# Independent runtime baseline
+# Independent task runtime — English overview
 
-QuantAIService owns the complete task runtime under `src/ai_service`, its dependency declarations, and its eight scenario templates validated by the offline scenario SDK ([scenario contracts](scenario-contracts.md)). It no longer installs or downloads `personal-ai-service`. The `ai_service.client` import is retained for existing consumers; it is delivered by this wheel, not a cross-owner shared package. Install the two services in separate virtual environments because both independently provide this compatibility namespace.
+[完整中文基线](runtime-baseline.zh-CN.md) · [Documentation index](README.md)
 
-The initial runtime and service regression tests were copied, with the owner's authorization, from PersonalAIService commit `f9bdf0fb55e7195d459520155bfa01652e793a5e` (including PR #31 safe MCP logging). Attribution and the MIT terms are in `LICENSE.task-service`. Subsequent maintenance belongs to this repository; there is no synchronization job or runtime dependency on PersonalAIService. Server discovery reports this distribution's name and version.
+QuantAIService owns its `src/ai_service` runtime, dependencies and eight scenario templates. The offline SDK validates templates under the [scenario contracts](scenario-contracts.md). The Quant wheel supplies the compatible `ai_service.client` import; it does not install or download a PersonalAIService core package. Use separate virtual environments for the services because their compatibility namespace is the same.
 
-CI builds and installs this wheel in a clean environment, checks dependency consistency, and runs the task service suite and Quant admission tests. The logging suite checks anonymous authentication denials and excludes tokens, task material, raw exceptions and private identifiers. Deployment-specific Personal tests and configs are not copied.
+The initial runtime/tests were copied with owner authorization from revision `f9bdf0fb55e7195d459520155bfa01652e793a5e`, including the safe MCP logging change. Preserve the provenance and MIT terms in [LICENSE.task-service](../LICENSE.task-service). Subsequent maintenance belongs to this repository; there is no synchronization task or cross-owner runtime dependency. Service discovery reports the Quant package and version.
 
-No production configuration, grants, identity, provider, deployment or trading logic is changed. Unpublished wheels and local synthetic tests do not demonstrate runtime login or business recovery. Roll back code and compatible configuration together; do not rewrite state.
+Configure the service `owner` explicitly and apply the version-specific [worker project/owner constraints](worker-project-scoping.md#quant-service-configuration). The example service configuration is disabled and contains placeholders; preparing documentation does not activate it or qualify any connection. Task read/work scopes transport tasks and advisory results; they do not grant trading, account, risk-budget, merge or deployment authority. Product-side provider and tool access remains separate.
+
+The baseline describes wheel installation, dependency checks, service/Quant admission tests and safe logging. Logs exclude tokens, task material, raw exceptions and private identifiers. It does not copy Personal deployment configuration. A rollback restores matching code and configuration without rewriting the state database.
+
+Local checks, CI and historical migration records cannot establish current deployment, login, subscription or business readiness. This summary preserves the complete baseline and both repository [MIT licenses](../LICENSE).
