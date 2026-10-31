@@ -64,6 +64,8 @@ jobs:
             try {
               const { data: pr } = await github.rest.pulls.get({ ...repo, pull_number: number });
               sha = pr.head.sha;
+              // Dependabot bodies use their own template; the risk-gate path check still applies below.
+              const isDependabot = pr.user?.login === 'dependabot[bot]';
               await status('risk-gate', 'pending', 'Evaluating changed paths and owner approval');
               await status('pr-template', 'pending', 'Checking AI, change and verification fields');
               const files = await github.paginate(github.rest.pulls.listFiles, { ...repo, pull_number: number, per_page: 100 });
@@ -86,9 +88,10 @@ jobs:
               const allowed = !risky || approved;
               await status('risk-gate', allowed ? 'success' : 'failure', !risky ? 'Low-risk paths: no owner approval needed'
                 : approved ? 'High-risk paths: owner-approved label verified' : 'High-risk paths: needs-owner-approval; owner must add owner-approved');
-              const templateOK = completeTemplate(pr.body);
-              await status('pr-template', templateOK ? 'success' : 'failure', templateOK
-                ? 'AI, change and verification fields are filled in' : 'Fill in AI assistance, What changed and How verified sections');
+              const templateOK = isDependabot ? true : completeTemplate(pr.body);
+              await status('pr-template', templateOK ? 'success' : 'failure', isDependabot
+                ? 'Automated dependency update: PR template not required'
+                : templateOK ? 'AI, change and verification fields are filled in' : 'Fill in AI assistance, What changed and How verified sections');
               if (!allowed || !templateOK) core.setFailed('Required PR governance checks did not pass');
             } catch (error) {
               if (sha) {
