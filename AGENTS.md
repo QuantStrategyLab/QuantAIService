@@ -75,6 +75,8 @@ Organization documentation rules are checked by `python scripts/check_style.py`,
 
 ## Do not
 
+- Only the owner, or a reviewer explicitly authorized by the owner, may apply the `owner-approved` label; coding agents must never apply it to their own PRs.
+
 - Do not call a real model provider, notification channel or cloud project from a
   local check; use the offline fixtures.
 - Do not store API keys, tokens or real conversation data in the repository.
