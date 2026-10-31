@@ -62,7 +62,7 @@ distinct ledgers: one cannot substitute for another. Cross-day records and
 the approved data roots cause rejection. It never copies `.git`, a venv,
 credentials or a local advisory lock. The archive goes directly from that host
 to protected GCS through its existing client, with generation-zero creation.
-Refreshing this task's unused staging capture requires its exact observed
+Refreshing the unused staging capture requires its exact observed
 generation; it is never an unconditional overwrite or an empty replacement.
 Private bodies must not transit a developer workstation or public CI artifact.
 

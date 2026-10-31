@@ -1,10 +1,10 @@
 # V2 connection and migration index
 
-[Documentation index](../README.md) · [English runtime overview](../runtime-baseline.en.md)
+[Documentation index](../README.md) · [English runtime overview](../runtime-baseline.md)
 
 ## Current configuration references
 
-1. Start with the [independent runtime baseline](../runtime-baseline.zh-CN.md) ([English overview](../runtime-baseline.en.md)). Quant owns its runtime; do not install a cross-owner core from the old wrapper design.
+1. Start with the [independent runtime baseline](../runtime-baseline.zh-CN.md) ([English overview](../runtime-baseline.md)). Quant owns its runtime; do not install a cross-owner core from the old wrapper design.
 2. Follow [worker project/owner scoping](../worker-project-scoping.md), including the explicit service-owner configuration for 2.0.9 and later. Projects and owner-wide grants have distinct version-specific rules.
 3. Use [scenario contracts](../scenario-contracts.md) for offline task templates and producer-bound inputs. Configure a separately approved HTTPS/identity/provider connection; source changes or examples do not create one.
 

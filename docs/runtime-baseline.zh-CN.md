@@ -1,6 +1,6 @@
 # 独立运行时基线
 
-[English overview](runtime-baseline.en.md) · [文档索引](README.md)
+[English overview](runtime-baseline.md) · [文档索引](README.md)
 
 QuantAIService 自带 `src/ai_service` 运行时、依赖和八个场景模板，模板由离线场景 SDK 校验（见[场景契约](scenario-contracts.md)），不再安装或下载 Personal 的包。保留 `ai_service.client` 导入兼容；此模块由 Quant wheel 自己提供。两服务各用独立虚拟环境，避免相同兼容命名空间冲突。
 
