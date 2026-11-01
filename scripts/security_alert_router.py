@@ -242,8 +242,30 @@ class Telegram:
 
     def send(self, text):
         time.sleep(max(0, 1.1 - (time.monotonic() - self.last_send)))
-        self.call("sendMessage", {"chat_id": self.chat, "text": text,
-                                  "link_preview_options": {"is_disabled": True}})
+        from quant_platform_kit.notifications import (
+            NotificationIntent, send_notification_intent, send_telegram_message,
+        )
+        intent = NotificationIntent(text=text, run_id="security-alert-router", chat_ids=(self.chat,))
+        observed_status = None
+        def opener(request, *, timeout):
+            nonlocal observed_status
+            try:
+                return self.opener.open(request, timeout=timeout)
+            except error.HTTPError as exc:
+                observed_status = int(exc.code)
+                raise
+        if self.token == os.environ.get("TG_TOKEN"):
+            receipt = send_notification_intent(intent, bot_token_env="TG_TOKEN", opener=opener, timeout=30)
+            ok = receipt["ok"]
+            observed_status = receipt["http_status"]
+        else:
+            ok = send_telegram_message(bot_token=self.token, chat_ids=intent.chat_ids, text=intent.text,
+                                       opener=opener, timeout=30,
+                                       printer=lambda *_args, **_kwargs: None)
+        if not ok:
+            if observed_status is not None and 400 <= observed_status < 500:
+                raise DeliveryNotSent("Telegram rejected the request; not delivered")
+            raise SafeError("Telegram delivery outcome unknown; no automatic retry")
         self.last_send = time.monotonic()
 
 
@@ -288,6 +310,8 @@ def route(alerts, state, now, path, sender):
 
 
 def main(argv=None):
+    from quant_platform_kit.notifications import install_log_redaction
+    install_log_redaction(wrap_streams=True)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dry-run", action="store_true", help="counts only; no sends or state writes")
     parser.add_argument("--code-scanning", action="store_true", help="also poll code scanning; 404 is disabled")
@@ -301,6 +325,7 @@ def main(argv=None):
     LOG.handlers = [handler]
     LOG.propagate = False
     LOG.setLevel(logging.INFO)
+    install_log_redaction(wrap_streams=True)
     try:
         state = load_state(args.state)
         if args.fixture:

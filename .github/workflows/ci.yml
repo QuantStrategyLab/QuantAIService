@@ -27,6 +27,12 @@ jobs:
           python -I scripts/verify_release_install.py --version "$version"
           python -m unittest discover -s tests/task_service -v
           python -m unittest discover -s tests -p test_quant_service_v2.py -v
+      - name: Install the existing pinned notification SDK for offline tests
+        run: |
+          pin=$(cat ops/quant-monitor/qpk-runtime.sha)
+          [[ "$pin" =~ ^[0-9a-f]{40}$ ]]
+          python -m pip install "quant-platform-kit @ git+https://github.com/QuantStrategyLab/QuantPlatformKit.git@$pin"
+
       - name: Validate the synthetic briefing summary caller without external access
         env:
           PYTHONPATH: .:ops/quant-monitor
@@ -223,7 +229,7 @@ jobs:
                   != hashlib.sha256((qpk / "src" / relative).read_bytes()).digest()):
               raise ValueError("installed atomic writer provenance mismatch")
           print({"atomic_writer_module_checked": 1})
-          spec = importlib.util.spec_from_file_location("atomic_writer_ci_tests", qpk / "tests/test_lifecycle_atomic_json.py")
+          spec = importlib.util.spec_from_file_location("atomic_writer_ci_tests", Path("ops/quant-monitor/tests/test_sdk_atomic_json.py"))
           assert spec is not None and spec.loader is not None
           module = importlib.util.module_from_spec(spec)
           spec.loader.exec_module(module)

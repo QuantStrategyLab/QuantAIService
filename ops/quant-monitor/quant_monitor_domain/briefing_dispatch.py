@@ -8,8 +8,6 @@ import json
 import os
 import re
 import subprocess
-import urllib.error
-import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -159,36 +157,12 @@ def _telegram_body_status(raw: bytes) -> str:
 
 def telegram_target_outcome(*, text: str, token: str, chat_id: str) -> str:
     """Classify one Telegram send without collapsing other targets into one bool."""
-    payload = urllib.parse.urlencode(
-        {
-            "chat_id": chat_id,
-            "text": text,
-            "disable_web_page_preview": "true",
-        }
-    ).encode("utf-8")
-    url = f"https://api.telegram.org/bot{token}/sendMessage"
-    request = urllib.request.Request(url, data=payload, method="POST")
-    try:
-        with urllib.request.urlopen(request, timeout=15) as response:
-            status_value = getattr(response, "status", None)
-            if status_value is None and callable(getattr(response, "getcode", None)):
-                status_value = response.getcode()
-            status = 200 if status_value is None else int(status_value)
-            raw = response.read()
-    except urllib.error.HTTPError as exc:
-        raw = exc.read() if callable(getattr(exc, "read", None)) else b""
-        if _telegram_body_status(raw) == "failed" or 400 <= int(exc.code) < 500:
-            return "failed"
-        return "unknown"
-    except TimeoutError:
-        return "unknown"
-    except urllib.error.URLError:
-        return "unknown"
-    except Exception:
-        return "unknown"
-    if status < 200 or status >= 300:
-        return "unknown"
-    return _telegram_body_status(raw)
+    from .telegram_intent import deliver
+    token_env = next((name for name in ("TELEGRAM_TOKEN", "TG_TOKEN",
+                      "STRATEGY_PLUGIN_ALERT_TELEGRAM_BOT_TOKEN")
+                      if os.environ.get(name) == token), "TG_TOKEN")
+    return deliver(text, token=token, chat_id=chat_id, token_env=token_env,
+                   opener=urllib.request.urlopen)["delivery"]
 
 
 def send_telegram_alert(*, text: str, token: str, chat_ids: tuple[str, ...]) -> bool:
