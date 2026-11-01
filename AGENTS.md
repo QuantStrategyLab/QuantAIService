@@ -116,5 +116,9 @@ cloud/IAM/secret changes, real notifications or billing.
 
 Use the [PR evidence contract](.github/governance/README.md) for R0/R1/R2 and
 primary/fallback reviewer routes. Do not substitute labels, bot summaries or
-free-form summaries for current-head AI evidence and a structured Grok approval
-comment from an allowlisted actor. Labels alone never pass the gate.
+free-form summaries for current-head AI evidence and a structured approval
+comment from an enabled allowlisted actor. Labels alone never pass the gate.
+
+R2 also accepts the owner's own current-head `owner-override/v1` comment,
+validated and audited under the evidence contract. Agents must not post it
+on behalf of the owner. Only dot review provenance qualifies for the AI route.
