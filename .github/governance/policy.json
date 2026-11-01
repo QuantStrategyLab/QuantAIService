@@ -1,0 +1,15 @@
+{
+  "version": "pr-governance/v1",
+  "repository": "QuantStrategyLab/QuantAIService",
+  "r0_paths": ["README.md", "docs/prose/"],
+  "r2_paths": ["src/ai_service/auth.py", "src/ai_service/worker_tools.py", "src/ai_service/worker_projects.py", "src/quant_ai_service/server.py", "cloudflare/", "deploy/", "ops/", "scripts/", "config/"],
+  "reviewers": {
+    "R0": {"primary": "deterministic-prose", "fallback": "independent-maintainer"},
+    "R1": {"primary": "independent-maintainer", "fallback": "independent-admin"},
+    "R2": {"primary": "independent-maintainer", "fallback": "independent-admin"}
+  },
+  "providers": {"codex": "observe", "coderabbit": "second-opinion", "quantaiservice": "shadow"},
+  "owner_keys": [],
+  "owner_approval_max_hours": 24,
+  "dependabot_template_exemption": true
+}

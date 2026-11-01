@@ -70,3 +70,11 @@ commit, merge, release, deployment or real-trading authority.
 - Unknown, stale and read-failure states stay distinct. A green check, an
   existing artifact or a filled configuration field is not evidence that a live
   account, deployment or business result is current.
+
+## Pull request review evidence
+
+Follow the [risk and evidence contract](governance/README.md). R1 requires an
+independent current-head review; R2 also needs the isolated owner decision.
+CodeRabbit is a second opinion, QuantAIService is non-blocking shadow, and Codex
+is observation-only until completion can be verified. A coding agent cannot
+provide its own independent review, sign for the owner or add approval labels.
