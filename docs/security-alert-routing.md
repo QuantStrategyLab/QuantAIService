@@ -74,6 +74,12 @@ first-report time set to the confirmed delivery time. If confirmed not sent,
 remove only that initial pending entry or clear only that reminder's pending
 flag before retrying. Never download state into a public artifact for repair.
 
+A Telegram HTTP 4xx response (including 429 rate limiting) is definitive: the
+message was not delivered, so that batch's pending marks are rolled back
+automatically and the next scheduled run retries without manual repair. HTTP 5xx,
+timeouts and other transport errors remain uncertain and keep the pending
+checkpoint for operator reconciliation.
+
 Cache eviction or a runner crash before cache save can lose state. A missing
 cache starts another single bootstrap summary; it cannot preserve exactly-once
 delivery across state loss. Telegram offers no idempotency key for sendMessage.

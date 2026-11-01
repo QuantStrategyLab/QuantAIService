@@ -88,6 +88,41 @@ class RouterTests(unittest.TestCase):
             self.route(now=NOW + timedelta(days=2))
         self.assertEqual(self.sent, [])
 
+    def test_definitive_rejection_rolls_back_pending_so_next_run_retries(self):
+        def reject(_text):
+            raise router.DeliveryNotSent("rejected")
+        with self.assertRaises(router.DeliveryNotSent):
+            self.route(sender=reject)
+        self.state = router.load_state(self.path)
+        self.assertEqual(self.state["alerts"], {})
+        self.route(now=NOW + timedelta(hours=1))
+        self.assertEqual(len(self.sent), 1)
+
+    def test_rejected_reminder_clears_only_pending_flag(self):
+        self.route()
+        self.state = router.load_state(self.path)
+        def reject(_text):
+            raise router.DeliveryNotSent("rejected")
+        with self.assertRaises(router.DeliveryNotSent):
+            self.route(now=NOW + timedelta(hours=25), sender=reject)
+        self.state = router.load_state(self.path)
+        self.assertFalse(any(e["pending"] or e["reminded"] for e in self.state["alerts"].values()))
+        self.route(now=NOW + timedelta(hours=26))
+        self.assertEqual(len(self.sent), 3)
+
+    def test_http_4xx_is_not_sent_but_5xx_and_timeout_stay_uncertain(self):
+        telegram = object.__new__(router.Telegram)
+        telegram.token, telegram.chat = "synthetic", "synthetic-chat"
+        telegram.last_send = 0.0
+        for code, expected in ((400, router.DeliveryNotSent), (429, router.DeliveryNotSent),
+                               (502, router.SafeError), ):
+            with patch.object(router.request, "build_opener") as opener:
+                telegram.opener = opener.return_value
+                telegram.opener.open.side_effect = HTTPError("x", code, "x", {}, None)
+                with self.assertRaises(expected) as caught:
+                    telegram.send("synthetic alert")
+                self.assertEqual(type(caught.exception) is router.DeliveryNotSent, expected is router.DeliveryNotSent)
+
     def test_state_contains_only_opaque_ids_and_delivery_timing(self):
         self.route()
         value = json.loads(self.path.read_text())

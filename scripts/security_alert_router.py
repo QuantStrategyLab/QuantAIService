@@ -26,6 +26,10 @@ class SafeError(Exception):
     """Only fixed diagnostic text belongs here."""
 
 
+class DeliveryNotSent(SafeError):
+    """Telegram definitively rejected the request (HTTP 4xx incl. 429): not delivered."""
+
+
 class RedactionFilter(logging.Filter):
     def filter(self, record):
         text = record.getMessage()
@@ -224,6 +228,10 @@ class Telegram:
                 body = json.load(response)
         except error.HTTPError as exc:
             LOG.error("Telegram HTTP status=%d", exc.code)
+            if 400 <= exc.code < 500:
+                # Client errors and rate limits are rejected before delivery, so the
+                # pending checkpoint can be rolled back safely. 5xx stays uncertain.
+                raise DeliveryNotSent("Telegram rejected the request; not delivered") from None
             raise SafeError("Telegram request failed") from None
         except (error.URLError, TimeoutError, OSError):
             # Never print the exception: it can contain the bot URL/token.
@@ -256,7 +264,19 @@ def route(alerts, state, now, path, sender):
                 else:
                     state["alerts"][key]["pending"] = True
             save_state(path, state)
-            sender(messages(batch, now, title, summary=summary)[0])
+            try:
+                sender(messages(batch, now, title, summary=summary)[0])
+            except DeliveryNotSent:
+                # Definitely not delivered: undo only this batch's pending marks so the
+                # next scheduled run retries. Uncertain outcomes stay pending.
+                for alert in batch:
+                    key = identity(alert)
+                    if reminder:
+                        state["alerts"][key]["pending"] = False
+                    else:
+                        state["alerts"].pop(key, None)
+                save_state(path, state)
+                raise
             for alert in batch:
                 key = identity(alert)
                 state["alerts"][key]["pending"] = False
