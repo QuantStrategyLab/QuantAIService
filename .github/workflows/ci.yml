@@ -229,7 +229,7 @@ jobs:
                   != hashlib.sha256((qpk / "src" / relative).read_bytes()).digest()):
               raise ValueError("installed atomic writer provenance mismatch")
           print({"atomic_writer_module_checked": 1})
-          spec = importlib.util.spec_from_file_location("atomic_writer_ci_tests", qpk / "tests/test_lifecycle_atomic_json.py")
+          spec = importlib.util.spec_from_file_location("atomic_writer_ci_tests", Path("ops/quant-monitor/tests/test_sdk_atomic_json.py"))
           assert spec is not None and spec.loader is not None
           module = importlib.util.module_from_spec(spec)
           spec.loader.exec_module(module)
