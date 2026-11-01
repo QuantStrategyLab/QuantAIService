@@ -2,7 +2,7 @@ name: Security alert routing
 
 on:
   schedule:
-    - cron: '17 1 * * *'
+    - cron: '17 * * * *'
   workflow_dispatch:
     inputs:
       dry_run:
@@ -44,6 +44,7 @@ jobs:
       github.event_name != 'pull_request' &&
       github.repository == 'QuantStrategyLab/QuantAIService' &&
       github.ref == 'refs/heads/main' && vars.SECURITY_ALERT_ROUTING_READY == 'true' &&
+      vars.SECURITY_ALERTS_APP_ID != '' &&
       vars.QUANT_SENTINEL_EXPECTED_BOT_ID_SHA256 != ''
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -60,6 +61,26 @@ jobs:
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: '3.12'
+      - name: Mint read-only alert token for QuantStrategyLab
+        id: qsl_alerts
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
+        with:
+          app-id: ${{ vars.SECURITY_ALERTS_APP_ID }}
+          private-key: ${{ secrets.SECURITY_ALERTS_APP_PRIVATE_KEY }}
+          owner: QuantStrategyLab
+          permission-metadata: read
+          permission-secret-scanning-alerts: read
+          permission-vulnerability-alerts: read
+      - name: Mint read-only alert token for Pigbibi
+        id: pigbibi_alerts
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
+        with:
+          app-id: ${{ vars.SECURITY_ALERTS_APP_ID }}
+          private-key: ${{ secrets.SECURITY_ALERTS_APP_PRIVATE_KEY }}
+          owner: Pigbibi
+          permission-metadata: read
+          permission-secret-scanning-alerts: read
+          permission-vulnerability-alerts: read
       - name: Restore opaque delivery state
         id: restore
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
@@ -69,8 +90,8 @@ jobs:
           restore-keys: security-alert-routing-v1-
       - name: Poll with owner-scoped tokens and existing Telegram bindings
         env:
-          QSL_SECURITY_ALERTS_TOKEN: ${{ secrets.QSL_SECURITY_ALERTS_TOKEN }}
-          PIGBIBI_SECURITY_ALERTS_TOKEN: ${{ secrets.PIGBIBI_SECURITY_ALERTS_TOKEN }}
+          QSL_SECURITY_ALERTS_TOKEN: ${{ steps.qsl_alerts.outputs.token }}
+          PIGBIBI_SECURITY_ALERTS_TOKEN: ${{ steps.pigbibi_alerts.outputs.token }}
           TG_TOKEN: ${{ secrets.TG_TOKEN }}
           GLOBAL_TELEGRAM_CHAT_ID: ${{ secrets.GLOBAL_TELEGRAM_CHAT_ID }}
           QUANT_SENTINEL_EXPECTED_BOT_ID_SHA256: ${{ vars.QUANT_SENTINEL_EXPECTED_BOT_ID_SHA256 }}
