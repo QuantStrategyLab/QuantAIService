@@ -27,13 +27,25 @@
       "enabled": false,
       "url": "https://api.anthropic.com/v1/claude_code/routines/trig_CONFIGURE/fire",
       "key_env": "AI_SERVICE_CLAUDE_ROUTINE_TOKEN"
+    },
+    "grokbot": {
+      "type": "grok_webhook",
+      "enabled": true,
+      "url": "https://CONFIGURE_GROKBOT_ROUTINE_HOST/trigger",
+      "key_env": "AI_SERVICE_GROKBOT_WEBHOOK_KEY"
+    },
+    "claudeduet": {
+      "type": "claudeduet",
+      "enabled": false
     }
   },
   "projects": {
     "example-org/ExampleResearch": {
       "providers": {
         "agent": "dot",
-        "agent:second-opinion": "grok"
+        "agent:second-opinion": "grok",
+        "agent:grokbot": "grokbot",
+        "agent:claudeduet": "claudeduet"
       },
       "models": {
         "dot": [
@@ -41,6 +53,12 @@
         ],
         "grok": [
           "configured-grok"
+        ],
+        "grokbot": [
+          "configured-grokbot"
+        ],
+        "claudeduet": [
+          "configured-claudeduet"
         ]
       },
       "max_active": 2,
@@ -75,6 +93,34 @@
       "owner": "example-org",
       "claims": {
         "azp": "CONFIGURE_GROK_CLIENT"
+      }
+    },
+    {
+      "issuer": "https://CONFIGURE_IDENTITY_PROVIDER",
+      "subject": "CONFIGURE_GROKBOT_CONNECTION_SUBJECT",
+      "identity": "quant-grokbot",
+      "provider": "grokbot",
+      "scopes": [
+        "tasks:read",
+        "tasks:work"
+      ],
+      "owner": "example-org",
+      "claims": {
+        "azp": "CONFIGURE_GROKBOT_CLIENT"
+      }
+    },
+    {
+      "issuer": "https://CONFIGURE_IDENTITY_PROVIDER",
+      "subject": "CONFIGURE_CLAUDEDUET_CONNECTION_SUBJECT",
+      "identity": "quant-claudeduet",
+      "provider": "claudeduet",
+      "scopes": [
+        "tasks:read",
+        "tasks:work"
+      ],
+      "owner": "example-org",
+      "claims": {
+        "azp": "CONFIGURE_CLAUDEDUET_CLIENT"
       }
     },
     {

@@ -1921,7 +1921,7 @@ def _send_health_telegram_target(text: str, token: str, chat_id: str) -> str:
 
 def main(*, effects_enabled: bool = True, emit_summary: bool = True,
          on_summary: Callable[[dict[str, Any]], None] | None = None,
-         findings_dispatch=None, diagnosis_enabled: bool = True) -> int:
+         findings_dispatch=None, diagnosis_enabled: bool = True, operational_errors=()) -> int:
     root = Path(os.environ.get("QUANT_MONITOR_ROOT") or Path(__file__).resolve().parents[1])
     out_dir = root / "data" / "health"
     dash_dir = out_dir / "dashboard"
@@ -2102,6 +2102,12 @@ def main(*, effects_enabled: bool = True, emit_summary: bool = True,
         collector_payload_invalid = True
 
     data_error_lines, data_alert_identities = _format_data_error_alerts(data_errors)
+    # Operational heartbeat failures alert through the existing durable sender,
+    # without invalidating otherwise usable strategy measurements.
+    for code in operational_errors:
+        if code in {'paper_watchdog_heartbeat_missing', 'paper_watchdog_heartbeat_unavailable'}:
+            data_error_lines.append(f"[observation] {code}")
+            data_alert_identities.append(f"observation:{code}")
     alert_identities: list[str] = list(data_alert_identities)
     current_drift_identities = {
         (domain, drift.strategy_profile)

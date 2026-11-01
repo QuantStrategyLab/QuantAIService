@@ -91,14 +91,15 @@ class ScenarioContractTests(unittest.TestCase):
         self.assertEqual(loaded['stages'][0]['worker_type'], 'grok')
         self.assertEqual(loaded['stages'][0]['limits']['monthly_budget_usd'], 2)
 
-    def test_claude_compiles_all_templates_without_enabling_instances(self):
-        for template in FIELDS:
-            with self.subTest(template=template):
-                value = instance(template, 'claude')
-                self.assertFalse(load_instance(value)['enabled'])
-                task = compile_example(active(template, 'claude'))
-                validate_task_spec(task)
-                self.assertEqual(task['worker_type'], 'claude')
+    def test_optional_agents_compile_all_templates_without_enabling_instances(self):
+        for worker in ('claude', 'grokbot', 'claudeduet'):
+            for template in FIELDS:
+                with self.subTest(template=template, worker=worker):
+                    value = instance(template, worker)
+                    self.assertFalse(load_instance(value)['enabled'])
+                    task = compile_example(active(template, worker))
+                    validate_task_spec(task, instance=active(template, worker))
+                    self.assertEqual(task['worker_type'], worker)
 
     def test_long_templates_reject_api_in_both_published_schemas(self):
         for template in set(FIELDS) - {'report_audit', 'bounded_transform', 'protocol_probe'}:

@@ -97,6 +97,22 @@ failures and do not present them as strategy or trading anomalies.
 
 ## Configuration
 
+The cloud health job optionally checks a PAPER observation watchdog heartbeat.
+Set `PAPER_WATCHDOG_BUCKET` and an aware ISO timestamp in
+`PAPER_WATCHDOG_ACTIVATED_AT` through protected deployment configuration. Without
+the bucket setting, this check is disabled. After a 45-minute activation grace
+period, it reads at most four exact `alerts/watch-heartbeat/<UTC-slot>.json`
+objects, with bounded size, fixed generations and no retries or listing.
+Grant the existing monitor identity object-get only on that prefix. It needs no
+financial-object, broker, collector-invocation or new Secret access.
+
+Missing, malformed or inaccessible heartbeats join the existing durable Telegram
+alert path. They do not invalidate strategy measurements. Preview performs no
+heartbeat reads. Validate both fresh and missing-heartbeat cases before enabling
+the observation schedules; retain sender acknowledgment and receiver receipt as
+separate evidence. Rollback removes only these two settings and their exact
+prefix IAM binding, preserving the monitor's existing schedule and state.
+
 | Variable | Required | Default | Purpose |
 |---|---|---|---|
 | `QUANT_MONITOR_ROOT` | Yes | none | This directory. |
