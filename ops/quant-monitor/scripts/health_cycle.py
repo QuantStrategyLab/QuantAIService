@@ -1922,6 +1922,8 @@ def _send_health_telegram_target(text: str, token: str, chat_id: str) -> str:
 def main(*, effects_enabled: bool = True, emit_summary: bool = True,
          on_summary: Callable[[dict[str, Any]], None] | None = None,
          findings_dispatch=None, diagnosis_enabled: bool = True, operational_errors=()) -> int:
+    from quant_platform_kit.notifications import install_log_redaction
+    install_log_redaction(wrap_streams=True)
     root = Path(os.environ.get("QUANT_MONITOR_ROOT") or Path(__file__).resolve().parents[1])
     out_dir = root / "data" / "health"
     dash_dir = out_dir / "dashboard"

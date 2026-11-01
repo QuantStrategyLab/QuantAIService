@@ -27,6 +27,12 @@ jobs:
           python -I scripts/verify_release_install.py --version "$version"
           python -m unittest discover -s tests/task_service -v
           python -m unittest discover -s tests -p test_quant_service_v2.py -v
+      - name: Install the existing pinned notification SDK for offline tests
+        run: |
+          pin=$(cat ops/quant-monitor/qpk-runtime.sha)
+          [[ "$pin" =~ ^[0-9a-f]{40}$ ]]
+          python -m pip install "quant-platform-kit @ git+https://github.com/QuantStrategyLab/QuantPlatformKit.git@$pin"
+
       - name: Validate the synthetic briefing summary caller without external access
         env:
           PYTHONPATH: .:ops/quant-monitor

@@ -168,6 +168,8 @@ def _invoke(source_root: Path, mode: str, uri: str, day: str, targets: list[str]
 
 
 def main(argv: list[str] | None = None) -> int:
+    from quant_platform_kit.notifications import install_log_redaction
+    install_log_redaction(wrap_streams=True)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source-root", type=Path, required=True)
     parser.add_argument("--mode", choices=("preview", "send"), default="preview")
