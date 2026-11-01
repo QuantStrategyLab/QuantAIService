@@ -73,8 +73,10 @@ commit, merge, release, deployment or real-trading authority.
 
 ## Pull request review evidence
 
-Follow the [risk and evidence contract](governance/README.md). R1 requires an
-independent current-head review; R2 also needs the isolated owner decision.
-CodeRabbit is a second opinion, QuantAIService is non-blocking shadow, and Codex
-is observation-only until completion can be verified. A coding agent cannot
-provide its own independent review, sign for the owner or add approval labels.
+Follow the [risk and evidence contract](governance/README.md). R1 requires
+SHA-bound AI review evidence. R2 additionally requires a structured Grok approval
+comment from an allowlisted actor, bound to the same head and AI evidence.
+Labels alone never pass. QuantAIService remains non-blocking shadow. Record the
+actual AI provider, execution and review mode; never fabricate a Grok decision
+or describe self-review as independent. Publish approval records and labels only
+within the user's explicit authorization.

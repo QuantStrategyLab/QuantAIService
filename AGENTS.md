@@ -116,4 +116,5 @@ cloud/IAM/secret changes, real notifications or billing.
 
 Use the [PR evidence contract](.github/governance/README.md) for R0/R1/R2 and
 primary/fallback reviewer routes. Do not substitute labels, bot summaries or
-shared-account activity for current-head review and an isolated owner decision.
+free-form summaries for current-head AI evidence and a structured Grok approval
+comment from an allowlisted actor. Labels alone never pass the gate.
