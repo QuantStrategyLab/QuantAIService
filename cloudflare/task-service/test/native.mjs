@@ -129,6 +129,14 @@ try{
   }
   tokens.caller=await mint(null,origin+'/v1/tasks',['tasks:read','tasks:submit'],ids.caller);
  });
+ await test('admission changes apply immediately and restore on switch-back',async()=>{
+  const narrowed=[{organization,projectId,githubUserId:'10001',ownerId:organizationId,clientIds:Object.values(ids),providers:['dot','grokbot'],scopes:['tasks:work']}];
+  await worker.policy({ADMISSIONS_JSON:JSON.stringify(narrowed)});
+  const denied=await request('/v1/tasks/nonexistent',{headers:auth(tokens.caller)});
+  assert.equal(denied.status,403);assert.equal((await denied.json()).error,'admission_required');
+  await worker.policy({ADMISSIONS_JSON:JSON.stringify(admission)});
+  assert.equal((await request('/v1/tasks/nonexistent',{headers:auth(tokens.caller)})).status,404);
+ });
  await test('official upstream consent state needs cookie; real callback route exchanges mocked GitHub only in harness',async()=>{
   const verifier=randomBytes(48).toString('base64url'),q=new URLSearchParams({response_type:'code',client_id:ids.caller,redirect_uri:'http://localhost:8989/callback',state:'browser-bound-test',scope:'tasks:read tasks:submit',resource:origin+'/v1/tasks',code_challenge:createHash('sha256').update(verifier).digest('base64url'),code_challenge_method:'S256'});
   const page=await request('/authorize?'+q);assert.equal(page.status,200);const cookie=page.headers.get('set-cookie').split(';')[0],html=await page.text(),handle=html.match(/name="handle" value="([^"]+)"/)[1];

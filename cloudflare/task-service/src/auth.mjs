@@ -37,20 +37,28 @@ export function configuration(env) {
 }
 
 /** Admission is provisioned explicitly. Empty or missing configuration authorizes nobody. */
+let admissionsCache;
 function admissions(env, config) {
-  const values = JSON.parse(env.ADMISSIONS_JSON || '[]');
-  if (!Array.isArray(values)) throw new TypeError('ADMISSIONS_JSON must be an array');
-  const seen = new Set();
-  for (const item of values) {
-    if (!item || item.organization !== config.organization || item.projectId !== config.projectId ||
-        typeof item.githubUserId !== 'string' || !/^[1-9][0-9]*$/.test(item.githubUserId) || typeof item.ownerId !== 'string' || !item.ownerId ||
-        !Array.isArray(item.clientIds) || !item.clientIds.length || !item.clientIds.every((v) => typeof v === 'string' && v.length) ||
-        !Array.isArray(item.providers) || !item.providers.length || !item.providers.every(v=>v!==null&&validProvider(v)) ||
-        !Array.isArray(item.scopes) || !item.scopes.length || !item.scopes.every((v) => SCOPES.includes(v)) ||
-        seen.has(item.githubUserId)) throw new TypeError('Invalid or ambiguous admission');
-    seen.add(item.githubUserId);
+  const source = env.ADMISSIONS_JSON || '[]';
+  if (!admissionsCache || admissionsCache.source !== source ||
+      admissionsCache.organization !== config.organization || admissionsCache.projectId !== config.projectId) {
+    const values = JSON.parse(source);
+    if (!Array.isArray(values)) throw new TypeError('ADMISSIONS_JSON must be an array');
+    const seen = new Set();
+    for (const item of values) {
+      if (!item || item.organization !== config.organization || item.projectId !== config.projectId ||
+          typeof item.githubUserId !== 'string' || !/^[1-9][0-9]*$/.test(item.githubUserId) || typeof item.ownerId !== 'string' || !item.ownerId ||
+          !Array.isArray(item.clientIds) || !item.clientIds.length || !item.clientIds.every((v) => typeof v === 'string' && v.length) ||
+          !Array.isArray(item.providers) || !item.providers.length || !item.providers.every(v=>v!==null&&validProvider(v)) ||
+          !Array.isArray(item.scopes) || !item.scopes.length || !item.scopes.every((v) => SCOPES.includes(v)) ||
+          seen.has(item.githubUserId)) throw new TypeError('Invalid or ambiguous admission');
+      seen.add(item.githubUserId);
+    }
+    // Parsed once per binding content; callers only read, so freeze the snapshot.
+    admissionsCache = {source, organization: config.organization, projectId: config.projectId,
+      values: Object.freeze(values.map((item) => Object.freeze(item)))};
   }
-  return values;
+  return admissionsCache.values;
 }
 
 function consentPage(description, handle, organization) {
@@ -92,9 +100,9 @@ export function createAuthApplication(config, { taskHandler } = {}) {
     return env.TASK_SERVICE.handleAuthenticated(cleanRequest, identity);
   }
 
-  async function workload(request, env, token) {
+  async function workload(request, env, token, decoded) {
     let identity;
-    try {identity = await authenticateGitHubWorkload(token, env, config);}
+    try {identity = await authenticateGitHubWorkload(token, env, config, decoded);}
     catch {return deny('workload_token_rejected', 401);}
     const scope = workloadOperation(request);
     if (!scope || !identity.scopes.includes(scope)) return deny('workload_operation_denied');
@@ -231,8 +239,8 @@ export function createAuthApplication(config, { taskHandler } = {}) {
         if (url.pathname === '/authorize') return await authorize(request, env);
         if (url.pathname === '/callback' && request.method==='GET') return callback(request,env);
         if (url.pathname === '/v1/tasks' || url.pathname.startsWith('/v1/tasks/')) {
-          const token = githubWorkloadToken(request);
-          if (token !== null) return await workload(request, env, token);
+          const parsed = githubWorkloadToken(request);
+          if (parsed !== null) return await workload(request, env, parsed.token, parsed.decoded);
         }
         for (let index = 0; index < resources.length; index++) {
           const path = new URL(resources[index]).pathname;

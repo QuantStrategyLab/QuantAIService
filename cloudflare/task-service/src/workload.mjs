@@ -6,6 +6,8 @@ const object = value => value !== null && typeof value === 'object' && !Array.is
 const numericID = value => typeof value === 'string' && /^[1-9][0-9]*$/.test(value);
 const rejected = () => {throw new Error('workload_token_rejected');};
 let cachedKeys;
+let refreshingKeys;
+let grantsCache;
 
 function decodePart(part) {
   if (!/^[A-Za-z0-9_-]+$/.test(part)) rejected();
@@ -23,12 +25,22 @@ function decodeToken(token) {
   return {parts, header, claims};
 }
 
-/** Unverified issuer is only a selector; it never authorizes a request or selects a key URL. */
+/** Returns the token and its unverified decode when the bearer claims the GitHub issuer; otherwise null. Unverified issuer is only a selector; it never authorizes a request or selects a key URL. */
 export function githubWorkloadToken(request) {
   const authorization = request.headers.get('authorization');
   if (!authorization?.startsWith('Bearer ')) return null;
   const token = authorization.slice(7);
-  try {return decodeToken(token).claims.iss === ISSUER ? token : null;} catch {return null;}
+  try {
+    const decoded = decodeToken(token);
+    return decoded.claims.iss === ISSUER ? {token, decoded} : null;
+  } catch {return null;}
+}
+
+/** Grants are server-controlled configuration; parse only when the raw binding changes. */
+function parsedGrants(env) {
+  const source = env.GITHUB_WORKLOAD_GRANTS_JSON || '[]';
+  if (!grantsCache || grantsCache.source !== source) grantsCache = {source, values: JSON.parse(source)};
+  return grantsCache.values;
 }
 
 function configuredGrant(env, config, claims) {
@@ -36,7 +48,7 @@ function configuredGrant(env, config, claims) {
   if (typeof audience !== 'string' || !audience || /\s/.test(audience)) rejected();
   const target = new URL(audience);
   if (target.protocol !== 'https:' || !target.hostname || target.username || target.password || target.search || target.hash) rejected();
-  const grants = JSON.parse(env.GITHUB_WORKLOAD_GRANTS_JSON || '[]');
+  const grants = parsedGrants(env);
   if (!Array.isArray(grants) || !grants.length || grants.length>100) rejected();
   // Unverified claims select a candidate only. Signature and all constraints are checked below.
   const candidates=grants.filter(g=>object(g)&&g.subject===claims.sub&&object(g.claims)&&Object.entries(g.claims).every(([k,v])=>claims[k]===v));
@@ -74,24 +86,39 @@ function configuredGrant(env, config, claims) {
 
 async function signingKey(kid) {
   if (!cachedKeys || cachedKeys.until <= Date.now()) {
-    const response = await fetch(JWKS_URL, {method: 'GET', redirect: 'manual', signal: AbortSignal.timeout(5000)});
-    if (response.status !== 200) rejected();
-    const body = await response.json();
-    if (!object(body) || !Array.isArray(body.keys) || !body.keys.length) rejected();
-    cachedKeys = {keys: body.keys, until: Date.now() + 300000};
+    if (!refreshingKeys) refreshingKeys = (async () => {
+      const response = await fetch(JWKS_URL, {method: 'GET', redirect: 'manual', signal: AbortSignal.timeout(5000)});
+      if (response.status !== 200) rejected();
+      const body = await response.json();
+      if (!object(body) || !Array.isArray(body.keys) || !body.keys.length) rejected();
+      // Imported keys live exactly as long as the JWKS snapshot they came from,
+      // so a rotated key set re-imports on the same five-minute refresh as today.
+      cachedKeys = {keys: body.keys, until: Date.now() + 300000, imported: new Map()};
+    })();
+    const pending = refreshingKeys;
+    try { await pending; } finally { if (refreshingKeys === pending) refreshingKeys = undefined; }
   }
-  const matches = cachedKeys.keys.filter(key => object(key) && key.kid === kid && key.kty === 'RSA' &&
-    (key.alg === undefined || key.alg === 'RS256') && (key.use === undefined || key.use === 'sig') &&
-    (key.key_ops === undefined || Array.isArray(key.key_ops) && key.key_ops.includes('verify')));
-  if (matches.length !== 1) rejected();
-  const {n, e} = matches[0];
-  return crypto.subtle.importKey('jwk', {kty: 'RSA', n, e, alg: 'RS256', ext: true, key_ops: ['verify']},
-    {name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256'}, false, ['verify']);
+  const snapshot = cachedKeys;
+  let key = snapshot.imported.get(kid);
+  if (key === undefined) {
+    const matches = snapshot.keys.filter(key => object(key) && key.kid === kid && key.kty === 'RSA' &&
+      (key.alg === undefined || key.alg === 'RS256') && (key.use === undefined || key.use === 'sig') &&
+      (key.key_ops === undefined || Array.isArray(key.key_ops) && key.key_ops.includes('verify')));
+    if (matches.length !== 1) rejected();
+    const {n, e} = matches[0];
+    key = crypto.subtle.importKey('jwk', {kty: 'RSA', n, e, alg: 'RS256', ext: true, key_ops: ['verify']},
+      {name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256'}, false, ['verify']);
+    snapshot.imported.set(kid, key);
+    // An import belongs to this exact JWKS snapshot, even if refresh completes
+    // while it is pending. A rejected import must be retryable.
+    key.catch(() => { if (snapshot.imported.get(kid) === key) snapshot.imported.delete(kid); });
+  }
+  return key;
 }
 
 /** Returns the existing service-binding identity shape; never a worker/provider identity. */
-export async function authenticateGitHubWorkload(token, env, config) {
-  const {parts, header, claims} = decodeToken(token);
+export async function authenticateGitHubWorkload(token, env, config, decoded) {
+  const {parts, header, claims} = decoded ?? decodeToken(token);
   const {grant, context, audience, projectId} = configuredGrant(env, config, claims);
   if (header.alg !== 'RS256' || typeof header.kid !== 'string' || !header.kid || header.kid.length > 256 ||
       header.typ !== undefined && header.typ !== 'JWT' || header.crit !== undefined || header.b64 !== undefined ||
