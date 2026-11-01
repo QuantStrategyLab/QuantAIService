@@ -14,7 +14,19 @@
     "AUTH_CLIENTS": {},
     "ADMISSIONS_JSON": "[]",
     "PROJECT_CONTEXTS": {},
-    "PROJECT_POLICIES": {}
+    "PROJECT_POLICIES": {},
+    "AGENT_PROVIDERS": {
+      "grokbot": {
+        "type": "grok_webhook",
+        "enabled": true,
+        "url": "https://CONFIGURE_GROKBOT_ROUTINE_HOST/trigger",
+        "key_env": "AI_SERVICE_GROKBOT_WEBHOOK_KEY"
+      },
+      "claudeduet": {
+        "type": "claudeduet",
+        "enabled": false
+      }
+    }
   },
   "kv_namespaces": [
     {

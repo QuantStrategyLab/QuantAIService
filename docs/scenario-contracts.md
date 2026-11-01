@@ -49,16 +49,16 @@ The `data_use_ref` and `cost_ref` checks run when the instance is enabled. A dis
 
 | template | allowed phases | worker types | required `inputs.fields` |
 | --- | --- | --- | --- |
-| `backtest` | `author`, `request`, `review` | `dot`, `grok`, `claude` | `study_ref`, `data_manifest_ref`, `parameters_ref`, `windows_ref`, `cost_model_ref`, `initial_state_ref` |
-| `forward_observation` | `request`, `review` | `dot`, `grok`, `claude` | `registration_ref`, `calendar_ref`, `sessions_ref`, `initial_state_ref`, `ledger_ref`, `finality_policy_ref` |
-| `compliance_watch` | `discover`, `review` | `dot`, `grok`, `claude` | `targets_ref`, `coverage_ref`, `sources_ref`, `rules_ref`, `window_ref` |
-| `report_audit` | `review`, `confirm` | `dot`, `grok`, `claude`, `api` | `materials_ref`, `checklist_ref` (with `small_review`, see below) |
-| `bounded_transform` | `run` | `dot`, `grok`, `claude`, `api` | `source_ref`, `operation`, `invariants_ref` |
-| `investigation` | `analyze`, `confirm` | `dot`, `grok`, `claude` | `symptoms_ref`, `code_revision`, `read_allowlist_ref`, `checklist_ref` |
-| `content_pipeline` | `select`, `group`, `history_match`, `draft` | `dot`, `grok`, `claude` | `media_manifest_ref`, `history_ref`, `privacy_policy_ref`, `language` |
-| `protocol_probe` | `agent` (`dot`/`grok`), `api` (`api`) | `dot`, `grok`, `claude`, `api` | `fixture_ref`, `assertions_ref`, `cleanup_ref`, `ttl_seconds` |
+| `backtest` | `author`, `request`, `review` | `dot`, `grok`, `claude`, `grokbot`, `claudeduet` | `study_ref`, `data_manifest_ref`, `parameters_ref`, `windows_ref`, `cost_model_ref`, `initial_state_ref` |
+| `forward_observation` | `request`, `review` | `dot`, `grok`, `claude`, `grokbot`, `claudeduet` | `registration_ref`, `calendar_ref`, `sessions_ref`, `initial_state_ref`, `ledger_ref`, `finality_policy_ref` |
+| `compliance_watch` | `discover`, `review` | `dot`, `grok`, `claude`, `grokbot`, `claudeduet` | `targets_ref`, `coverage_ref`, `sources_ref`, `rules_ref`, `window_ref` |
+| `report_audit` | `review`, `confirm` | `dot`, `grok`, `claude`, `grokbot`, `claudeduet`, `api` | `materials_ref`, `checklist_ref` (with `small_review`, see below) |
+| `bounded_transform` | `run` | `dot`, `grok`, `claude`, `grokbot`, `claudeduet`, `api` | `source_ref`, `operation`, `invariants_ref` |
+| `investigation` | `analyze`, `confirm` | `dot`, `grok`, `claude`, `grokbot`, `claudeduet` | `symptoms_ref`, `code_revision`, `read_allowlist_ref`, `checklist_ref` |
+| `content_pipeline` | `select`, `group`, `history_match`, `draft` | `dot`, `grok`, `claude`, `grokbot`, `claudeduet` | `media_manifest_ref`, `history_ref`, `privacy_policy_ref`, `language` |
+| `protocol_probe` | `agent` (agent workers), `api` (`api`) | `dot`, `grok`, `claude`, `grokbot`, `claudeduet`, `api` | `fixture_ref`, `assertions_ref`, `cleanup_ref`, `ttl_seconds` |
 
-Five templates require `dot`, `grok` or `claude`: `backtest`, `forward_observation`, `compliance_watch`, `investigation` and `content_pipeline`. `backtest` and `forward_observation` also require a non-null `executor_ref`. `protocol_probe` accepts only `public` or `synthetic` inputs, and its `ttl_seconds` is bounded to 1..900.
+Five templates require `dot`, `grok`, `claude`, `grokbot` or `claudeduet`: `backtest`, `forward_observation`, `compliance_watch`, `investigation` and `content_pipeline`. `backtest` and `forward_observation` also require a non-null `executor_ref`. `protocol_probe` accepts only `public` or `synthetic` inputs, and its `ttl_seconds` is bounded to 1..900.
 
 For `report_audit`, `inputs.fields.small_review` is optional for `dot` and `grok` stages, but must be explicitly `true` when any stage uses the `api` worker.
 
@@ -166,3 +166,5 @@ This loader is opt-in SDK only and is not wired into the server CLI. Do not pass
 Not implemented in this module: an endpoint or schedule engine, dispatcher, workflow DSL, auth or grant changes, live API enforcement, budget reservation, V2 envelope integration and result contracts. The current V2 seven-field submission contract is unchanged; compile output is a `TaskSpec`, not a submit-ready V2 envelope. Domain reference resolution and numeric execution stay in caller-owned adapters.
 
 Claude and Grok Routine adapters are disabled by default. Configure their project policy, worker OAuth admission and provider separately; see [Worker configuration](../cloudflare/task-service/README.zh-CN.md). Trigger receipts never prove task completion or the model identity.
+
+`grokbot` uses the existing Grok Bot webhook adapter and is enabled in the provider examples; the enclosing Python service stays disabled. `claudeduet` is a disabled registration scaffold, not a Claude Code Routine alias. Accepting either worker type in an offline contract does not admit a connection or enable execution. See [agent configuration](agent-providers.md).

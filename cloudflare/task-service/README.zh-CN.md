@@ -92,3 +92,7 @@ worker 默认保持原项目。要访问其他项目，在对应 `AUTH_CLIENTS[c
 ## 未领取 Dot 任务的取消
 
 Dot agent 在 worker 领取前仅有持久化事件，没有正在执行的工作。显式取消或期限到达时，未领取任务直接进入 cancelled，释放并发名额；旧版本留下的同类 cancel_requested 会由 alarm 完成取消，保留原请求和错误原因。已经领取的任务仍须原 worker 确认停止，已有终态不会被取消请求改写。其他 provider 的未知提交和取消规则保持不变。
+
+### Grok Bot 与 Claude Duet
+
+新增名称、配置和准入步骤见 [agent providers](../../docs/agent-providers.md)。`grokbot` 在 provider 示例中为 `enabled: true`，仍需有效 endpoint、Secret 绑定和完整项目/worker 准入；`claudeduet` 默认关闭，尚无已核验的触发协议，误设启用也会拒绝。Claude Duet 不复用 Claude Code Routine token。

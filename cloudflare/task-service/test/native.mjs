@@ -3,23 +3,27 @@ import {Miniflare} from 'miniflare';
 import {build} from 'esbuild';
 import {createHash,createHmac,randomBytes} from 'node:crypto';
 import {resolve} from 'node:path';
-import {mkdir,writeFile} from 'node:fs/promises';
+import {mkdir,readFile,writeFile} from 'node:fs/promises';
+import {nativeConfiguration} from '../src/native.mjs';
 const production=(await build({entryPoints:['src/worker.mjs'],bundle:true,format:'esm',platform:'browser',write:false,external:['cloudflare:*'],plugins:[{name:'browser',setup(b){b.onResolve({filter:/^@hyperjump\/browser$/},()=>({path:resolve('node_modules/@hyperjump/browser/lib/index.browser.js')}));}}]})).outputFiles[0].text;
 const fixture=(await build({entryPoints:['test/fixture.mjs'],bundle:true,format:'esm',platform:'browser',write:false,external:['cloudflare:*'],plugins:[{name:'browser',setup(b){b.onResolve({filter:/^@hyperjump\/browser$/},()=>({path:resolve('node_modules/@hyperjump/browser/lib/index.browser.js')}));}}]})).outputFiles[0].text;
 const organization=process.argv.includes('--pigbibi')?'pigbibi':'quant',organizationId=organization==='quant'?'Quant':'Pigbibi';
 const origin='https://tasks.example.test',project=organizationId+'/SyntheticProject',projectId=organization+'-synthetic';
 const secondProject=organizationId+'/SecondSynthetic';
 const stateClass=organization==='quant'?'QuantFixtureStore':'PersonalFixtureStore';
-const policy={ORGANIZATION:organization,ORGANIZATION_ID:organizationId,PUBLIC_ORIGIN:origin,PROJECT_ID:projectId,TASK_STORE_NAME:'personal-tasks-v1',GITHUB_CLIENT_ID:'synthetic-client',GITHUB_CLIENT_SECRET:'synthetic-only-secret',AUTH_CLIENTS:{},ADMISSIONS_JSON:'[]',PROJECT_CONTEXTS:{[projectId]:{organization,ownerId:organizationId,project,providers:['dot']}},PROJECT_POLICIES:{[project]:{providers:{agent:'dot'},models:{dot:['configured-dot']},max_active:20,max_timeout_seconds:3600,max_request_bytes:2000000}}};
+const policy={ORGANIZATION:organization,ORGANIZATION_ID:organizationId,PUBLIC_ORIGIN:origin,PROJECT_ID:projectId,TASK_STORE_NAME:'personal-tasks-v1',GITHUB_CLIENT_ID:'synthetic-client',GITHUB_CLIENT_SECRET:'synthetic-only-secret',AUTH_CLIENTS:{},ADMISSIONS_JSON:'[]',PROJECT_CONTEXTS:{[projectId]:{organization,ownerId:organizationId,project,providers:['dot','grokbot']}},PROJECT_POLICIES:{[project]:{providers:{agent:'dot'},models:{dot:['configured-dot']},max_active:20,max_timeout_seconds:3600,max_request_bytes:2000000}}};
 policy.PROJECT_POLICIES[project].providers={agent:'dot','api:disabled':'disabled-api','api:no-authorization':'unapproved-api','api:no-key':'missing-key-api'};
 for(const name of ['disabled-api','unapproved-api','missing-key-api'])policy.PROJECT_POLICIES[project].models[name]=['synthetic-fixed'];
 policy.API_PROVIDERS={'disabled-api':{type:'gemini_api',enabled:false,api_usage_authorized:true,model:'synthetic-fixed',key_env:'SYNTHETIC_API_KEY'},'unapproved-api':{type:'gemini_api',enabled:true,api_usage_authorized:false,model:'synthetic-fixed',key_env:'SYNTHETIC_API_KEY'},'missing-key-api':{type:'gemini_api',enabled:true,api_usage_authorized:true,model:'synthetic-fixed',key_env:'MISSING_KEY'}};
-for(const name of ['grok','claude','disabled-bot','missing-bot-key']){
+for(const name of ['grok','claude','grokbot','claudeduet','duet-enabled','disabled-bot','missing-bot-key']){
  policy.PROJECT_POLICIES[project].providers['agent:'+name]=name;
  policy.PROJECT_POLICIES[project].models[name]=['configured-bot'];
 }
 policy.SYNTHETIC_ROUTINE_KEY='synthetic-routine-key';
 policy.AGENT_PROVIDERS={grok:{type:'grok_webhook',enabled:true,url:'https://routine.example/trigger',key_env:'SYNTHETIC_ROUTINE_KEY'},claude:{type:'claude_routine',enabled:true,url:'https://api.anthropic.com/v1/claude_code/routines/trig_SYNTHETIC/fire',key_env:'SYNTHETIC_ROUTINE_KEY'},'disabled-bot':{type:'grok_webhook',enabled:false,url:'https://routine.example/trigger',key_env:'SYNTHETIC_ROUTINE_KEY'},'missing-bot-key':{type:'grok_webhook',enabled:true,url:'https://routine.example/trigger',key_env:'ABSENT_KEY'}};
+policy.AGENT_PROVIDERS.grokbot={...policy.AGENT_PROVIDERS.grok};
+policy.AGENT_PROVIDERS.claudeduet={type:'claudeduet',enabled:false};
+policy.AGENT_PROVIDERS['duet-enabled']={type:'claudeduet',enabled:true};
 const nativeCalls=[];let nativeReply=200;
 policy.PROJECT_CONTEXTS[projectId+'-second']={organization,ownerId:organizationId,project:secondProject,providers:['dot']};
 policy.PROJECT_POLICIES[secondProject]={...policy.PROJECT_POLICIES[project]};
@@ -64,11 +68,24 @@ const submit=async(key,body=taskRequest)=>{const r=await request('/v1/tasks',{me
 const get=async id=>{const r=await request('/v1/tasks/'+id,{headers:auth(tokens.caller)});assert.equal(r.status,200,r.status===200?'':await r.clone().text());return r.json();};
 const until=async(fn,ms=10000)=>{const end=Date.now()+ms;while(Date.now()<end){const v=await fn();if(v)return v;await new Promise(r=>setTimeout(r,50));}throw Error('bounded wait expired');};
 try{
+ await test('named Worker example requires credentials and rejects Duet enablement',async()=>{
+  const config=JSON.parse(await readFile('wrangler.example.jsonc','utf8')).vars;
+  assert.deepEqual(config.AUTH_CLIENTS,{});assert.equal(config.ADMISSIONS_JSON,'[]');
+  assert.deepEqual(config.PROJECT_CONTEXTS,{});assert.deepEqual(config.PROJECT_POLICIES,{});
+  const agents=config.AGENT_PROVIDERS;
+  assert.equal(agents.grokbot.enabled,true);assert.equal(agents.grokbot.key_env,'AI_SERVICE_GROKBOT_WEBHOOK_KEY');
+  assert.equal(agents.claudeduet.enabled,false);assert.equal(agents.claudeduet.type,'claudeduet');
+  assert.throws(()=>nativeConfiguration(config,'grokbot'));
+  assert.throws(()=>nativeConfiguration(config,'claudeduet'));
+  const enabled={AGENT_PROVIDERS:{claudeduet:{type:'claudeduet',enabled:true}}};
+  assert.throws(()=>nativeConfiguration(enabled,'claudeduet'));
+ });
  await test('production bundle has no test issuance or out imports',async()=>{assert.ok(!production.includes('synthetic-github-token'));assert.ok(!production.includes('/__fixture__/'));assert.ok(!production.includes('abandonAPI'));assert.ok(!production.includes('/out/'));});
- ids={dot:(await worker.client('http://localhost:8989/callback')).clientId,caller:(await worker.client('http://localhost:8989/callback')).clientId};
+ ids={grokbot:(await worker.client('http://localhost:8989/callback')).clientId,dot:(await worker.client('http://localhost:8989/callback')).clientId,caller:(await worker.client('http://localhost:8989/callback')).clientId};
  const clients={[ids.dot]:{provider:'dot',scopes:['tasks:read','tasks:work','events:subscribe'],resources:[origin+'/mcp']},[ids.caller]:{provider:null,scopes:['tasks:read','tasks:submit'],resources:[origin+'/v1/tasks']}};
+ clients[ids.grokbot]={provider:'grokbot',scopes:['tasks:read','tasks:work'],resources:[origin+'/mcp']};
  clients[ids.dot].projects=[secondProject];
- const admission=[{organization,projectId,githubUserId:'10001',ownerId:organizationId,clientIds:Object.values(ids),providers:['dot'],scopes:['tasks:read','tasks:work','tasks:submit','events:subscribe']}];
+ const admission=[{organization,projectId,githubUserId:'10001',ownerId:organizationId,clientIds:Object.values(ids),providers:['dot','grokbot'],scopes:['tasks:read','tasks:work','tasks:submit','events:subscribe']}];
  policy.AUTH_CLIENTS=clients;policy.ADMISSIONS_JSON=JSON.stringify(admission);
  // Apply identical configuration to auth and DO; existing Worker bindings are immutable.
  await worker.policy({AUTH_CLIENTS:clients,ADMISSIONS_JSON:JSON.stringify(admission)});
@@ -260,10 +277,25 @@ try{
   }
   apiReply='success';const t=await submit('api-after-unknown',apiRequest);await until(async()=> (await get(t.id)).status==='completed');assert.equal(apiCalls.length,15);
  });
- for(const provider of ['grok','claude']){
+ await test('grokbot OAuth admission cannot impersonate legacy workers or cross projects',async()=>{
+  nativeReply=200;
+  const token=await mint('grokbot',origin+'/mcp',['tasks:read','tasks:work'],ids.grokbot);
+  const t=await submit('grokbot-oauth',{...taskRequest,profile:'grokbot',model:'configured-bot'});
+  await until(async()=> (await get(t.id)).status==='running');
+  const call=(name,args,credential=token)=>rpc('tools/call',{name,arguments:args},credential);
+  assert.ok((await call('get_task',{task_id:t.id},tokens.dot)).body.error);
+  assert.ok((await call('claim_task',{task_id:t.id,attempt_id:'forged'},tokens.dot)).body.error);
+  assert.ok((await call('get_task',{project:'OtherOwner/Private',task_id:t.id})).body.error);
+  assert.equal((await request('/v1/tasks',{method:'POST',headers:auth(token),body:'{}'})).status,401);
+  assert.equal((await call('claim_task',{task_id:t.id,attempt_id:'grokbot-oauth'})).body.result.structuredContent.status,'running');
+  const output={source_id:'first-org-synthetic-v1',passed:1,failed:1,trade_authorized:false};
+  assert.equal((await call('report_task_result',{task_id:t.id,attempt_id:'grokbot-oauth',revision:1,status:'completed',output})).body.result.structuredContent.status,'completed');
+  assert.deepEqual((await get(t.id)).output,output);
+ });
+ for(const provider of ['grok','claude','grokbot']){
   await test(provider+' routine disabled and missing credentials reject before outbound',async()=>{
    const before=nativeCalls.length;
-   for(const profile of ['disabled-bot','missing-bot-key']){const r=await request('/v1/tasks',{method:'POST',headers:{...auth(tokens.caller),'Idempotency-Key':provider+profile},body:JSON.stringify({...taskRequest,profile,model:'configured-bot'})});assert.equal(r.status,403);}
+   for(const profile of ['disabled-bot','missing-bot-key','claudeduet','duet-enabled']){const r=await request('/v1/tasks',{method:'POST',headers:{...auth(tokens.caller),'Idempotency-Key':provider+profile},body:JSON.stringify({...taskRequest,profile,model:'configured-bot'})});assert.equal(r.status,403);}
    assert.equal(nativeCalls.length,before);
   });
   await test(provider+' routine starts once, messages and cancellation notify once, MCP confirms stop',async()=>{

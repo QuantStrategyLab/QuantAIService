@@ -3,6 +3,7 @@ import {callbackURL} from './webhooks.mjs';
 const rejected=()=>{throw Object.assign(new Error('routine rejected'),{name:'SubmissionRejected'});};
 export function nativeConfiguration(env,name){
   const c=env.AGENT_PROVIDERS?.[name];
+  // claudeduet is a disabled scaffold, not a claude_routine protocol alias.
   if(!c||c.enabled!==true||!['grok_webhook','claude_routine'].includes(c.type)||
      typeof c.key_env!=='string'||!/^[A-Z][A-Z0-9_]{0,127}$/.test(c.key_env))rejected();
   let url;try{url=new URL(callbackURL(c.url));}catch{rejected();}

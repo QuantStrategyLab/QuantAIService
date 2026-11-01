@@ -72,10 +72,11 @@ class ProtocolProbeTests(unittest.TestCase):
         instance['stages'][0]['worker_type'] = 'api'
         with self.assertRaises(ContractError):
             prepared(instance=instance)
-        instance = approved()
-        instance['stages'][0]['worker_type'] = 'grok'
-        with self.assertRaises(ContractError):
-            prepared(instance=instance)
+        for worker in ('grok', 'grokbot', 'claudeduet'):
+            instance = approved()
+            instance['stages'][0]['worker_type'] = worker
+            with self.subTest(worker=worker), self.assertRaises(ContractError):
+                prepared(instance=instance)
 
     def test_disabled_cli_dry_run_is_offline_and_not_dispatchable(self):
         from ai_service.scenarios import pilot_cli

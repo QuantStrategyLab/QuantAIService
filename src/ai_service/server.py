@@ -287,6 +287,10 @@ def validate_configuration(config):
             # A synthetic key validates static constructor arguments only.
             provider_class = ClaudeRoutineProvider if kind == 'claude_routine' else GrokWebhookProvider
             provider_class(item['url'], 'configuration-check', config['resource'])
+        elif kind == 'claudeduet':
+            # Duet is not Claude Code Routines; no verified invocation protocol yet.
+            if item.get('enabled') is True:
+                raise ValueError('Claude Duet invocation is not configured')
         elif kind == 'chatgpt_plan_oauth':
             item['token_env']
             ChatGPTPlanProvider(lambda: None, plan_usage_authorized=item.get('plan_usage_authorized', False))
@@ -355,6 +359,9 @@ def build_application(config, *, github_key_loader=None, github_transport=None):
             key = os.environ.get(item['key_env'])
             provider_class = ClaudeRoutineProvider if item['type'] == 'claude_routine' else GrokWebhookProvider
             providers[name] = provider_class(item['url'], key, config['resource'])
+        elif item['type'] == 'claudeduet':
+            # validate_configuration rejects enablement before reading credentials.
+            continue
         elif item['type'] == 'dot_events':
             if events is not None:
                 raise ValueError('one Dot event provider per service deployment')
