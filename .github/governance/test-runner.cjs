@@ -250,3 +250,11 @@ test('failed error status publication does not abort later PRs in a sweep', asyn
   assert.deepEqual([...evaluated], [42, 43]); assert.equal(m.failures.length, 2);
   assert.equal(m.statuses.filter(s => s.state === 'error').length, 4);
 });
+
+
+test('native review presentation metadata is excluded from publication races', () => {
+  const f = fixture(); const r = approve(f); const before = snapshotVersion(f.snapshot, f.policy);
+  r.user.avatar_url = 'https://example.invalid/avatar';
+  assert.equal(snapshotVersion(f.snapshot, f.policy), before);
+  r.state = 'DISMISSED'; assert.notEqual(snapshotVersion(f.snapshot, f.policy), before);
+});

@@ -269,3 +269,17 @@ test('reactions do not invalidate SHA-bound AI and owner evidence', () => {
   for (const c of f.snapshot.issueComments) c.reactions = { '+1': 1, total_count: 1 };
   assert.deepEqual(evaluate(f), before);
 });
+
+
+for (const field of ['review', 'thread']) test(`R0 retains ${field} blockers`, () => {
+  const f = fixture('README.md');
+  if (field === 'review') f.snapshot.reviews.push({ id: 99, user: { id: 2, login: 'reviewer', type: 'User' },
+    state: 'CHANGES_REQUESTED', commit_id: HEAD, submitted_at: '2033-05-18T03:33:20Z' });
+  else f.snapshot.threads.push({ id: 'thread', isResolved: false });
+  assert.equal(evaluate(f).allowed, false);
+});
+test('native review profile decoration does not stale its receipt', () => {
+  const f = fixture(); const r = approve(f); const before = evaluate(f);
+  r.user.avatar_url = 'https://example.invalid/avatar'; r.reactions = { '+1': 1 };
+  assert.deepEqual(evaluate(f), before);
+});

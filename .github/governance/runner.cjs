@@ -77,10 +77,10 @@ async function collect(github, context, number, policyCommit, policy) {
 
 function snapshotVersion(snapshot, policy) {
   // Compare security-relevant fields, not changing mergeability/cache fields.
-  const { pr, issueComments, reviewComments, ...rest } = snapshot;
+  const { pr, issueComments, reviewComments, reviews, ...rest } = snapshot;
   const secondOpinions = issueComments.filter(c => c.user?.type === 'Bot' && c.user?.login === 'coderabbitai[bot]').map(gate.stableComment);
   const approvals = gate.evidenceComments(snapshot, [...(policy?.owner_actors || []), ...(policy?.ai_review_actors || []), ...(policy?.owner_override_actor ? [policy.owner_override_actor] : [])]).map(gate.stableComment);
-  return gate.digest({ ...rest, reviewComments: reviewComments.map(gate.stableComment), secondOpinions, approvals, pr: { state: pr.state, number: pr.number, body: pr.body,
+  return gate.digest({ ...rest, reviews: reviews.map(gate.stableReview), reviewComments: reviewComments.map(gate.stableComment), secondOpinions, approvals, pr: { state: pr.state, number: pr.number, body: pr.body,
     head: pr.head.sha, base: pr.base.sha, baseRef: pr.base.ref, baseRepo: pr.base.repo.id,
     author: pr.user.id, changed_files: pr.changed_files, commits: pr.commits } });
 }

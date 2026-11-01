@@ -88,11 +88,15 @@ function stableComment(comment) {
     user: { id: comment.user?.id, login: comment.user?.login, type: comment.user?.type } };
 }
 
+function stableReview(review) {
+  return { ...stableComment(review), state: review.state, submitted_at: review.submitted_at };
+}
+
 function discussion(snapshot) {
   // Review receipts are excluded to avoid a circular digest. Their exact bodies
   // are separately bound into the owner approval. QAS shadow output is advisory.
   const reviews = snapshot.reviews.filter(r => r.state === 'CHANGES_REQUESTED'
-    || (!receipt(r.body, 'pr-review/v1') && !receipt(r.body, 'owner-approval/v1')));
+    || (!receipt(r.body, 'pr-review/v1') && !receipt(r.body, 'owner-approval/v1'))).map(stableReview);
   const secondOpinions = snapshot.issueComments.filter(c => c.user?.type === 'Bot' && c.user?.login === 'coderabbitai[bot]').map(stableComment);
   return { reviews, comments: snapshot.reviewComments.map(stableComment), threads: snapshot.threads, secondOpinions };
 }
@@ -200,11 +204,11 @@ function evaluate(snapshot, policy, policySha, now = Math.floor(Date.now() / 100
   const discussionSha = digest(discussion(snapshot));
   const result = { ...risk, binding: expected, discussion_sha256: discussionSha, allowed: false,
     reason: 'current_commit_review_required', providers: policy.providers };
-  if (risk.tier === 'R0') return { ...result, allowed: true, reason: 'review_not_required', reviewer: policy.reviewers.R0.primary };
   const latest = latestReviews(snapshot.reviews);
   const authorized = r => ['write', 'maintain', 'admin'].includes(snapshot.permissions[r.user.login]);
   if (latest.some(r => authorized(r) && r.state === 'CHANGES_REQUESTED')) return { ...result, reason: 'changes_requested' };
   if (snapshot.threads.some(t => !t.isResolved)) return { ...result, reason: 'unresolved_review_thread' };
+  if (risk.tier === 'R0') return { ...result, allowed: true, reason: 'review_not_required', reviewer: policy.reviewers.R0.primary };
   const override = risk.tier === 'R2' ? ownerOverride(snapshot, policy) : null;
   if (override) return { ...result, allowed: true, reason: 'owner_override', route: 'owner-override',
     reviewer: override.user.login, override_comment_id: override.id,
@@ -247,7 +251,7 @@ function evaluate(snapshot, policy, policySha, now = Math.floor(Date.now() / 100
         || !validDispositions(value, snapshot)) continue;
       if (route === 'fallback' && (snapshot.permissions[review.user.login] !== 'admin'
         || typeof value.fallback_reason !== 'string' || value.fallback_reason.trim().length < 8)) continue;
-      const evidenceSha = digest({ binding: expected, discussion_sha256: discussionSha, review });
+      const evidenceSha = digest({ binding: expected, discussion_sha256: discussionSha, review: stableReview(review) });
       const approved = risk.tier !== 'R2' || ownerApproved(snapshot, policy, expected, evidenceSha, now);
       return { ...result, evidence_sha256: evidenceSha, review_id: review.id,
         reviewer: value.reviewer, route, allowed: approved,
@@ -274,4 +278,4 @@ function completeTemplate(body) {
     && present(/how verified|verif|validat|test(?:ing| plan)?|验证|测试/i);
 }
 
-module.exports = { stableComment, canonical, digest, classify, pathTier, receipt, binding, discussion, evaluate, completeTemplate, evidenceComments };
+module.exports = { stableReview, stableComment, canonical, digest, classify, pathTier, receipt, binding, discussion, evaluate, completeTemplate, evidenceComments };
