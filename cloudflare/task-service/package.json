@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "build": "node scripts/build.mjs",
-    "test": "node test/native.mjs && node test/native.mjs --pigbibi",
+    "test": "node test/native.mjs && node test/native.mjs --pigbibi && node test/workload-cache.mjs",
     "deploy": "echo \"Build first; deploy with explicit wrangler --config private path as documented\" && exit 1"
   },
   "dependencies": {
