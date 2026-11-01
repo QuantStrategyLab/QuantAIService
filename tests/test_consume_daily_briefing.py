@@ -297,10 +297,10 @@ def test_native_briefing_three_independent_roles_and_original_schema(tmp_path, c
     assert context["state_path"].stat().st_mode & 0o777 == 0o600
 
 
-@pytest.mark.parametrize("provider", ["grokbot", "claudeduet"])
-def test_native_briefing_named_agent_route_requires_actual_worker_readback(tmp_path, capsys, provider):
+def test_native_briefing_named_agent_route_requires_actual_worker_readback(tmp_path, capsys):
+    provider = "grokbot"
     context, transport = _native_briefing_context(tmp_path)
-    # Explicit synthetic adapter only; this does not enable a live Duet connection.
+    # Explicit synthetic adapter only; this does not enable a live provider connection.
     transport.runtime.providers[provider] = _BriefingTrigger()
     policy = transport.runtime.policies[transport.project]
     policy.providers["agent:secondary"] = provider
@@ -311,6 +311,15 @@ def test_native_briefing_named_agent_route_requires_actual_worker_readback(tmp_p
     assert payload["review"]["status"] == "completed"
     assert payload["execution_authority_granted"] is False
     assert {r["provider"] for r in transport.claims} == {"dot", provider}
+
+
+def test_native_briefing_rejects_claudeduet_until_adapter_exists(tmp_path, capsys):
+    context, transport = _native_briefing_context(tmp_path)
+    context["roles"]["secondary"]["provider"] = "claudeduet"
+    assert _call_native_briefing(tmp_path, context) != 0
+    capsys.readouterr()
+    assert not [c for c in transport.calls if c[:2] == ("POST", "/v1/tasks")]
+    assert transport.claims == []
 
 
 @pytest.mark.parametrize("field,value", [
