@@ -1,0 +1,6 @@
+[
+  {"repo":"example-org/example-repo","kind":"secret-scanning","number":1,
+   "type":"synthetic_credential","severity":"unknown","created_at":"2026-01-01T00:00:00+00:00"},
+  {"repo":"example-org/example-repo","kind":"dependabot","number":2,
+   "type":"dependency","severity":"high","created_at":"2026-01-01T00:00:00+00:00"}
+]
