@@ -70,3 +70,17 @@ commit, merge, release, deployment or real-trading authority.
 - Unknown, stale and read-failure states stay distinct. A green check, an
   existing artifact or a filled configuration field is not evidence that a live
   account, deployment or business result is current.
+
+## Pull request review evidence
+
+Follow the [risk and evidence contract](governance/README.md). R1 requires
+SHA-bound dot AI review evidence. R2 additionally requires a structured approval
+comment from an enabled allowlisted actor, bound to the same head and AI evidence.
+Labels alone never pass. QuantAIService remains non-blocking shadow. Record the
+actual AI provider, execution and review mode; never fabricate a dot decision
+or describe self-review as independent. Publish approval records and labels only
+within the user's explicit authorization.
+
+R2 also accepts the owner's own current-head `owner-override/v1` comment,
+validated and audited under the evidence contract. Agents must not post it
+on behalf of the owner. Only dot review provenance qualifies for the AI route.
