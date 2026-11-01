@@ -626,7 +626,7 @@ def _native_briefing_review(material, operation_id, context):
         for role in roles:
             route = routes[role]
             if (set(route) != {"provider", "model", "profile", "worker"}
-                    or route["provider"] not in {"dot", "grok"}
+                    or route["provider"] not in {"dot", "grok", "grokbot", "claudeduet"}
                     or any(not isinstance(value, str) or not value or len(value) > 200
                            for value in route.values())):
                 return unavailable

@@ -57,3 +57,5 @@ and verify state access before restoring its hourly schedule.
 - [AI autonomy draft](ai-autonomy-architecture.md): **HISTORICAL_DRAFT_NOT_CURRENT_QSL_AUTHORITY**. Earlier audit/repair ideas do not define current runtime qualification, automatic merge permission or P0–P6 authority.
 
 Source documentation and migration history do not establish deployed state, OAuth validity, event delivery or real-business acceptance. Provider/tool rights remain independently controlled. See [LICENSE](../LICENSE) and [task-service MIT license](../LICENSE.task-service).
+
+- [Named agent providers](agent-providers.md): Grok Bot enablement, Claude Duet scaffolding and scoped admission.
