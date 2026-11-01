@@ -93,6 +93,51 @@ try {
     assert.equal(githubWorkloadToken(foreign), null);
     assert.equal(githubWorkloadToken(new Request(origin + '/v1/tasks')), null);
   });
+  await test('concurrent workload verifications share fetch/import and spend zero OAuth KV ops', async () => {
+    const {authenticateGitHubWorkload: freshAuth} = await import('../src/workload.mjs?single-flight');
+    let fetches = 0, imports = 0, kvOps = 0;
+    globalThis.fetch = async () => {fetches++; await Promise.resolve(); return Response.json({keys:[jwk]});};
+    subtlePrototype.importKey = function(...args) {imports++; return originalImportKey.apply(this,args);};
+    const kv = new Proxy({}, {get() {kvOps++; throw Error('unexpected_oauth_kv');}});
+    await Promise.all(Array.from({length:20},()=>freshAuth(token(), {...baseEnv,OAUTH_KV:kv}, config)));
+    assert.equal(fetches,1); assert.equal(imports,1); assert.equal(kvOps,0);
+    const {authenticateGitHubWorkload: retryAuth} = await import('../src/workload.mjs?retry-import');
+    let failed = false;
+    subtlePrototype.importKey = function(...args) {
+      if (!failed) {failed=true; return Promise.reject(Error('synthetic_import_failure'));}
+      return originalImportKey.apply(this,args);
+    };
+    await assert.rejects(retryAuth(token(),baseEnv,config),/synthetic_import_failure/);
+    assert.equal((await retryAuth(token(),baseEnv,config)).organization,organization);
+  });
+  await test('an old in-flight import cannot poison a refreshed JWKS snapshot', async () => {
+    const {authenticateGitHubWorkload: freshAuth} = await import('../src/workload.mjs?rotation-race');
+    const rotated = generateKeyPairSync('rsa', {modulusLength: 2048});
+    const rotatedJwk = {...rotated.publicKey.export({format: 'jwk'}), kid: jwk.kid, alg: 'RS256', use: 'sig'};
+    let releaseOld, notifyStarted;
+    const started = new Promise(resolve => {notifyStarted = resolve;});
+    const blocked = new Promise(resolve => {releaseOld = resolve;});
+    const oldBearer = token();
+    const parts = token().split('.');
+    const rotatedBearer = parts.slice(0, 2).join('.') + '.' +
+      sign('RSA-SHA256', Buffer.from(parts.slice(0, 2).join('.')), rotated.privateKey).toString('base64url');
+    let served = jwk;
+    globalThis.fetch = async () => Response.json({keys: [served]});
+    subtlePrototype.importKey = async function(...args) {
+      if (args[1].n === jwk.n) {notifyStarted(); await blocked;}
+      return originalImportKey.apply(this, args);
+    };
+    const oldRequest = freshAuth(oldBearer, baseEnv, config);
+    await started;
+    fakeNow += 300001;
+    served = rotatedJwk;
+    await freshAuth(rotatedBearer, baseEnv, config);
+    releaseOld();
+    await oldRequest;
+    await freshAuth(rotatedBearer, baseEnv, config);
+    await assert.rejects(freshAuth(oldBearer, baseEnv, config), /workload_token_rejected/);
+    subtlePrototype.importKey = originalImportKey;
+  });
   console.log(JSON.stringify({status: 'PASS', cases: cases.length, synthetic: true}));
 } catch (error) {
   console.error(error); process.exitCode = 1;

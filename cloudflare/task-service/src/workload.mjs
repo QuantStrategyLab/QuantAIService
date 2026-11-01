@@ -6,6 +6,7 @@ const object = value => value !== null && typeof value === 'object' && !Array.is
 const numericID = value => typeof value === 'string' && /^[1-9][0-9]*$/.test(value);
 const rejected = () => {throw new Error('workload_token_rejected');};
 let cachedKeys;
+let refreshingKeys;
 let grantsCache;
 
 function decodePart(part) {
@@ -85,24 +86,32 @@ function configuredGrant(env, config, claims) {
 
 async function signingKey(kid) {
   if (!cachedKeys || cachedKeys.until <= Date.now()) {
-    const response = await fetch(JWKS_URL, {method: 'GET', redirect: 'manual', signal: AbortSignal.timeout(5000)});
-    if (response.status !== 200) rejected();
-    const body = await response.json();
-    if (!object(body) || !Array.isArray(body.keys) || !body.keys.length) rejected();
-    // Imported keys live exactly as long as the JWKS snapshot they came from,
-    // so a rotated key set re-imports on the same five-minute refresh as today.
-    cachedKeys = {keys: body.keys, until: Date.now() + 300000, imported: new Map()};
+    if (!refreshingKeys) refreshingKeys = (async () => {
+      const response = await fetch(JWKS_URL, {method: 'GET', redirect: 'manual', signal: AbortSignal.timeout(5000)});
+      if (response.status !== 200) rejected();
+      const body = await response.json();
+      if (!object(body) || !Array.isArray(body.keys) || !body.keys.length) rejected();
+      // Imported keys live exactly as long as the JWKS snapshot they came from,
+      // so a rotated key set re-imports on the same five-minute refresh as today.
+      cachedKeys = {keys: body.keys, until: Date.now() + 300000, imported: new Map()};
+    })();
+    const pending = refreshingKeys;
+    try { await pending; } finally { if (refreshingKeys === pending) refreshingKeys = undefined; }
   }
-  let key = cachedKeys.imported.get(kid);
+  const snapshot = cachedKeys;
+  let key = snapshot.imported.get(kid);
   if (key === undefined) {
-    const matches = cachedKeys.keys.filter(key => object(key) && key.kid === kid && key.kty === 'RSA' &&
+    const matches = snapshot.keys.filter(key => object(key) && key.kid === kid && key.kty === 'RSA' &&
       (key.alg === undefined || key.alg === 'RS256') && (key.use === undefined || key.use === 'sig') &&
       (key.key_ops === undefined || Array.isArray(key.key_ops) && key.key_ops.includes('verify')));
     if (matches.length !== 1) rejected();
     const {n, e} = matches[0];
-    key = await crypto.subtle.importKey('jwk', {kty: 'RSA', n, e, alg: 'RS256', ext: true, key_ops: ['verify']},
+    key = crypto.subtle.importKey('jwk', {kty: 'RSA', n, e, alg: 'RS256', ext: true, key_ops: ['verify']},
       {name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256'}, false, ['verify']);
-    cachedKeys.imported.set(kid, key);
+    snapshot.imported.set(kid, key);
+    // An import belongs to this exact JWKS snapshot, even if refresh completes
+    // while it is pending. A rejected import must be retryable.
+    key.catch(() => { if (snapshot.imported.get(kid) === key) snapshot.imported.delete(kid); });
   }
   return key;
 }
