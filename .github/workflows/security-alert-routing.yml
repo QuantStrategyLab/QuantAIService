@@ -1,0 +1,100 @@
+name: Security alert routing
+
+on:
+  schedule:
+    - cron: '17 1 * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Print counts only; do not contact Telegram or update state
+        type: boolean
+        default: true
+  pull_request:
+    paths:
+      - '.github/workflows/security-alert-routing.yml'
+      - 'scripts/security_alert_router.py'
+      - 'tests/test_security_alert_router.py'
+      - 'tests/fixtures/security-alerts.json'
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Security alert router offline tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+      - name: Test routing and counts-only dry run with synthetic fixtures
+        run: |
+          python -m pip install ruff==0.15.22
+          python -m ruff check scripts/security_alert_router.py tests/test_security_alert_router.py
+          python -m unittest discover -s tests -p test_security_alert_router.py -v
+          python scripts/security_alert_router.py --dry-run --fixture tests/fixtures/security-alerts.json
+
+  poll:
+    name: Route open security alerts
+    needs: test
+    if: >-
+      github.event_name != 'pull_request' &&
+      github.repository == 'QuantStrategyLab/QuantAIService' &&
+      github.ref == 'refs/heads/main' && vars.SECURITY_ALERT_ROUTING_READY == 'true' &&
+      vars.QUANT_SENTINEL_EXPECTED_BOT_ID_SHA256 != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    concurrency:
+      group: security-alert-routing-state-v1
+      cancel-in-progress: false
+    env:
+      DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+      - name: Restore opaque delivery state
+        id: restore
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ runner.temp }}/security-alert-router/state.json
+          key: security-alert-routing-v1-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: security-alert-routing-v1-
+      - name: Poll with owner-scoped tokens and existing Telegram bindings
+        env:
+          QSL_SECURITY_ALERTS_TOKEN: ${{ secrets.QSL_SECURITY_ALERTS_TOKEN }}
+          PIGBIBI_SECURITY_ALERTS_TOKEN: ${{ secrets.PIGBIBI_SECURITY_ALERTS_TOKEN }}
+          TG_TOKEN: ${{ secrets.TG_TOKEN }}
+          GLOBAL_TELEGRAM_CHAT_ID: ${{ secrets.GLOBAL_TELEGRAM_CHAT_ID }}
+          QUANT_SENTINEL_EXPECTED_BOT_ID_SHA256: ${{ vars.QUANT_SENTINEL_EXPECTED_BOT_ID_SHA256 }}
+        run: |
+          set -euo pipefail
+          STATE_PATH="$RUNNER_TEMP/security-alert-router/state.json"
+          test -n "$QSL_SECURITY_ALERTS_TOKEN"
+          test -n "$PIGBIBI_SECURITY_ALERTS_TOKEN"
+          if [[ "$DRY_RUN" == 'true' ]]; then
+            python scripts/security_alert_router.py --dry-run --state "$STATE_PATH"
+          else
+            python scripts/security_alert_router.py --state "$STATE_PATH"
+          fi
+      - name: Check for delivery checkpoints, including uncertain sends
+        id: checkpoint
+        if: always() && steps.restore.outcome == 'success' && env.DRY_RUN != 'true'
+        run: |
+          STATE_PATH="$RUNNER_TEMP/security-alert-router/state.json"
+          if [[ -f "$STATE_PATH" ]]; then
+            echo 'exists=true' >> "$GITHUB_OUTPUT"
+          fi
+      - name: Save only opaque delivery state, including failed-run checkpoints
+        if: always() && steps.checkpoint.outputs.exists == 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ runner.temp }}/security-alert-router/state.json
+          key: security-alert-routing-v1-${{ github.run_id }}-${{ github.run_attempt }}

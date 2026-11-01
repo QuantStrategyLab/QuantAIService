@@ -11,6 +11,9 @@
 
 ## Monitoring operations
 
+- [Security alert routing](security-alert-routing.md): daily alert polling,
+  credential readiness, delivery checkpoints and counts-only verification.
+
 - [Quant Monitor by task](../ops/quant-monitor/README.md#reading-by-task): operation, notification and deployment sections. Monitoring is evidence-only; deployment has separate qualification requirements.
 
 The Actions-only [saved-observation diagnosis caller](../scripts/diagnose_monitor_oidc.py)
