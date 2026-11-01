@@ -1,6 +1,6 @@
 # Security alert routing
 
-The daily `Security alert routing` workflow lists every public, active, non-fork
+The hourly `Security alert routing` workflow lists every public, active, non-fork
 repository owned by QuantStrategyLab and Pigbibi. It polls open secret-scanning
 alerts and high/critical Dependabot alerts. Repository and alert lists paginate
 independently. Any required API failure aborts the poll before notifications;
@@ -8,8 +8,8 @@ independently. Any required API failure aborts the poll before notifications;
 
 The script optionally accepts `--code-scanning`; only code-scanning 404 responses
 are treated as disabled. This optional source is off in the scheduled workflow.
-The daily schedule runs at 01:17 UTC. GitHub can delay schedules; daily polling
-does not provide a one-hour detection SLA.
+The schedule runs at minute 17 of every hour (UTC). GitHub can delay or drop
+scheduled runs under load, so the one-hour target is best effort, not a hard SLA.
 
 ## Credential readiness
 
@@ -17,22 +17,25 @@ The workflow remains disabled until `vars.SECURITY_ALERT_ROUTING_READY` equals
 `true`. Setting this is an operator action after verifying all bindings below.
 This change creates no secrets, variables, installations or permissions.
 
-No installed organization App inspected for this change has both required
-security permissions. Existing `CROSS_REPO_GITHUB_APP_ID` and
-`QUANT_MONITOR_READER_APP_ID` bindings must not be used as security readers:
-their Apps do not have the required permissions. The proposed fallback requires
-two owner-scoped fine-grained PATs, stored as Actions secrets in this repository:
+No installed App had both required security permissions, so a dedicated
+read-only GitHub App is used instead of static personal access tokens. It is
+installed on QuantStrategyLab (all repositories) and Pigbibi (all repositories) with
+exactly Metadata, Secret scanning alerts and Dependabot alerts set to read. The
+workflow mints one short-lived installation token per owner with the pinned
+`actions/create-github-app-token`; tokens are masked and revoked at job end.
+Existing `CROSS_REPO_GITHUB_APP_ID` and `QUANT_MONITOR_READER_APP_ID` bindings
+must not be reused as security readers.
 
-| Secret name | Resource owner and repository scope | Repository permissions |
+| Binding | Kind | Purpose |
 |---|---|---|
-| `QSL_SECURITY_ALERTS_TOKEN` | QuantStrategyLab; all monitored public repositories | Secret scanning alerts: read; Dependabot alerts: read; Metadata: read |
-| `PIGBIBI_SECURITY_ALERTS_TOKEN` | Pigbibi; all monitored public repositories | Secret scanning alerts: read; Dependabot alerts: read; Metadata: read |
+| `SECURITY_ALERTS_APP_ID` | Actions variable | App ID of the security-alert reader App |
+| `SECURITY_ALERTS_APP_PRIVATE_KEY` | Actions secret | Private key of that App |
 
 API/App permission keys are `secret_scanning_alerts:read` and
-`vulnerability_alerts:read`. A fine-grained PAT has one resource owner, so one
-owner-scoped PAT cannot cover both owners. Its repository selection must cover
-newly added public repositories, too. Optional code scanning additionally needs
-Code scanning alerts: read (`security_events:read` for an App).
+`vulnerability_alerts:read`. Optional code scanning additionally needs
+Code scanning alerts: read (`security_events:read` for an App); it is off in the
+scheduled workflow. Private-key rotation: generate a new key in the App settings,
+update the secret, then delete the old key in the App settings.
 
 Reuse the existing Telegram names: `TG_TOKEN`, `GLOBAL_TELEGRAM_CHAT_ID` and
 `vars.QUANT_SENTINEL_EXPECTED_BOT_ID_SHA256`. `TG_TOKEN` is already referenced by

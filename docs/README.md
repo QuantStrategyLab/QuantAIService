@@ -11,7 +11,7 @@
 
 ## Monitoring operations
 
-- [Security alert routing](security-alert-routing.md): daily alert polling,
+- [Security alert routing](security-alert-routing.md): hourly alert polling,
   credential readiness, delivery checkpoints and counts-only verification.
 
 - [Quant Monitor by task](../ops/quant-monitor/README.md#reading-by-task): operation, notification and deployment sections. Monitoring is evidence-only; deployment has separate qualification requirements.
