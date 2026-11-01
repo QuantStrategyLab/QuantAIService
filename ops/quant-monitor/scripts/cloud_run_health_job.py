@@ -11,10 +11,49 @@ import json
 import os
 import shutil
 import tempfile
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from monitor_cloud_state import CloudState, PROJECTS, StateUnavailable, pack, restore
+
+
+def paper_watchdog_errors(*, client=None, now=None):
+    """Read four exact heartbeat keys; never list or read financial objects."""
+    bucket_name = os.environ.get('PAPER_WATCHDOG_BUCKET', '')
+    if not bucket_name:
+        return []
+    now = now or datetime.now(timezone.utc)
+    try:
+        activation = datetime.fromisoformat(os.environ['PAPER_WATCHDOG_ACTIVATED_AT'])
+        if activation.utcoffset() is None:
+            raise ValueError('invalid activation')
+        if now < activation + timedelta(minutes=45):
+            return []
+        from google.api_core.exceptions import NotFound
+        if client is None:
+            from google.cloud import storage
+            client = storage.Client()
+        bucket = client.bucket(bucket_name)
+        for offset in range(4):
+            tick = now - timedelta(minutes=15*offset)
+            tick = tick.replace(minute=tick.minute//15*15, second=0, microsecond=0)
+            key = 'alerts/watch-heartbeat/' + tick.strftime('%Y%m%dT%H%MZ') + '.json'
+            blob = bucket.blob(key)
+            try:
+                blob.reload(timeout=5, retry=None)
+                if blob.size is None or blob.size > 4096:
+                    raise ValueError('invalid heartbeat')
+                row = json.loads(blob.download_as_bytes(if_generation_match=blob.generation, timeout=5, retry=None))
+            except NotFound:
+                continue
+            observed = datetime.fromisoformat(row['at'])
+            if observed.utcoffset() is None:
+                raise ValueError('invalid heartbeat')
+            if now-timedelta(minutes=45) <= observed <= now:
+                return []
+        return ['paper_watchdog_heartbeat_missing']
+    except Exception:
+        return ['paper_watchdog_heartbeat_unavailable']
 
 
 def run_once(store, evaluate, *, mode='preview', execution_id='', refresh=None, publish=None,
@@ -131,7 +170,8 @@ def evaluate_workspace(root: Path, *, effects_enabled: bool):
                 path.write_bytes(encode_findings(findings))
                 return {'issues': [], 'errors': 0}
             health_cycle.main(effects_enabled=effects_enabled, emit_summary=False, on_summary=result.update,
-                              findings_dispatch=record_findings, diagnosis_enabled=False)
+                              findings_dispatch=record_findings, diagnosis_enabled=False,
+                              operational_errors=paper_watchdog_errors() if effects_enabled else ())
         status = result.get('snapshot_data_status')
         return {'healthy': result.get('ok') is True,
                 'snapshot_count': int(result['snapshot_count']),
