@@ -123,6 +123,26 @@ class RouterTests(unittest.TestCase):
                     telegram.send("synthetic alert")
                 self.assertEqual(type(caught.exception) is router.DeliveryNotSent, expected is router.DeliveryNotSent)
 
+    def test_timeouts_and_transport_errors_never_count_as_not_delivered(self):
+        telegram = object.__new__(router.Telegram)
+        telegram.token, telegram.chat = "synthetic", "synthetic-chat"
+        telegram.last_send = 0.0
+        for failure in (TimeoutError("x"), URLError("x"), ConnectionResetError("x"),
+                        OSError("x")):
+            with patch.object(router.request, "build_opener") as opener:
+                telegram.opener = opener.return_value
+                telegram.opener.open.side_effect = failure
+                with self.assertRaises(router.SafeError) as caught:
+                    telegram.send("synthetic alert")
+                self.assertNotIsInstance(caught.exception, router.DeliveryNotSent)
+        def uncertain(_text):
+            raise router.SafeError("unknown outcome")
+        with self.assertRaises(router.SafeError):
+            self.route(sender=uncertain)
+        self.state = router.load_state(self.path)
+        self.assertTrue(self.state["alerts"])
+        self.assertTrue(all(e["pending"] for e in self.state["alerts"].values()))
+
     def test_state_contains_only_opaque_ids_and_delivery_timing(self):
         self.route()
         value = json.loads(self.path.read_text())
