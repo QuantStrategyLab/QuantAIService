@@ -1,0 +1,146 @@
+{
+  "schema_version": "personal-ai.scenario-registry.extension.v1",
+  "registry_id": "quant",
+  "assumption": "PersonalAIService owns the generic scenario registry and fail-closed provider selection. Its open PR titled around Scenario-based provider routing was not readable from this repository identity on 2026-11-02, so this document uses the extension contract fields described below and binds logical providers onto existing PROJECT_POLICIES providers/models plus PROJECT_CONTEXTS.providers. Remap field names if the shared schema differs; keep the quant categories and scenarios as data only.",
+  "provider_bindings": {
+    "dot": {
+      "mode": "agent",
+      "profile": "default",
+      "policy_provider": "dot"
+    },
+    "grokbot": {
+      "mode": "agent",
+      "profile": "grokbot",
+      "policy_provider": "grokbot"
+    },
+    "api": {
+      "mode": "api",
+      "profile": "default",
+      "policy_provider": "gemini"
+    }
+  },
+  "complexity_tiers": {
+    "simple": {
+      "reasoning_effort": "low",
+      "model_profile": "cheap"
+    },
+    "standard": {
+      "reasoning_effort": "medium",
+      "model_profile": "balanced"
+    },
+    "complex": {
+      "reasoning_effort": "high",
+      "model_profile": "strongest"
+    }
+  },
+  "model_profiles": {
+    "cheap": {
+      "dot": "configured-dot",
+      "grokbot": "configured-grokbot",
+      "api": "configured-api-fast"
+    },
+    "balanced": {
+      "dot": "configured-dot",
+      "grokbot": "configured-grokbot",
+      "api": "configured-api"
+    },
+    "strongest": {
+      "dot": "configured-dot-strong",
+      "grokbot": "configured-grokbot-strong",
+      "api": "configured-api"
+    }
+  },
+  "categories": {
+    "quant": {
+      "parent": null,
+      "label": "Quant workloads",
+      "matching_hints": ["quant", "qas", "trading-ops"],
+      "provider_preference": ["dot", "grokbot", "api"],
+      "tier_overrides": {
+        "default_complexity": "standard"
+      }
+    },
+    "quant.review": {
+      "parent": "quant",
+      "label": "Reviews and audits",
+      "matching_hints": ["review", "audit", "pull-request"],
+      "provider_preference": ["dot", "grokbot", "api"],
+      "tier_overrides": {
+        "default_complexity": "complex"
+      }
+    },
+    "quant.research": {
+      "parent": "quant",
+      "label": "Strategy research",
+      "matching_hints": ["research", "strategy", "briefing"],
+      "provider_preference": ["dot", "api", "grokbot"],
+      "tier_overrides": {
+        "default_complexity": "standard"
+      }
+    },
+    "quant.ops": {
+      "parent": "quant",
+      "label": "Reconciliation and ops anomalies",
+      "matching_hints": ["reconciliation", "anomaly", "ops"],
+      "provider_preference": ["dot", "grokbot"],
+      "tier_overrides": {
+        "default_complexity": "complex"
+      }
+    },
+    "quant.signals": {
+      "parent": "quant",
+      "label": "Signal context",
+      "matching_hints": ["signal", "context"],
+      "provider_preference": ["dot", "api"],
+      "tier_overrides": {
+        "default_complexity": "standard"
+      }
+    },
+    "quant.notify": {
+      "parent": "quant",
+      "label": "Quick notifications",
+      "matching_hints": ["notification", "alert", "ping"],
+      "provider_preference": ["api", "dot", "grokbot"],
+      "tier_overrides": {
+        "default_complexity": "simple"
+      }
+    }
+  },
+  "scenarios": {
+    "pr_code_review": {
+      "category": "quant.review",
+      "label": "PR code review / audit",
+      "matching_hints": ["pull-request", "code-review", "architecture-audit"],
+      "provider_preference": [],
+      "tier_overrides": {}
+    },
+    "strategy_research_summary": {
+      "category": "quant.research",
+      "label": "Strategy research summaries",
+      "matching_hints": ["research-summary", "strategy-brief", "portfolio-note"],
+      "provider_preference": [],
+      "tier_overrides": {}
+    },
+    "reconciliation_anomaly": {
+      "category": "quant.ops",
+      "label": "Reconciliation / ops anomaly analysis",
+      "matching_hints": ["recon-diff", "ops-anomaly", "ledger-mismatch"],
+      "provider_preference": [],
+      "tier_overrides": {}
+    },
+    "signal_context": {
+      "category": "quant.signals",
+      "label": "Signal context generation",
+      "matching_hints": ["signal-context", "feature-note"],
+      "provider_preference": [],
+      "tier_overrides": {}
+    },
+    "quick_notification": {
+      "category": "quant.notify",
+      "label": "Quick notifications",
+      "matching_hints": ["short-alert", "status-ping"],
+      "provider_preference": [],
+      "tier_overrides": {}
+    }
+  }
+}

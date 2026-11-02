@@ -1,0 +1,160 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:quant-ai-service:scenario-registry-extension:v1",
+  "title": "PersonalAIService scenario registry extension (quant data)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "registry_id",
+    "assumption",
+    "provider_bindings",
+    "complexity_tiers",
+    "model_profiles",
+    "categories",
+    "scenarios"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "personal-ai.scenario-registry.extension.v1"
+    },
+    "registry_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[a-z][a-z0-9_-]*$"
+    },
+    "assumption": {
+      "type": "string",
+      "minLength": 1
+    },
+    "provider_bindings": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["mode", "profile", "policy_provider"],
+        "properties": {
+          "mode": {"enum": ["agent", "api"]},
+          "profile": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100,
+            "pattern": "^[^:]+$"
+          },
+          "policy_provider": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+          }
+        }
+      }
+    },
+    "complexity_tiers": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["simple", "standard", "complex"],
+      "properties": {
+        "simple": {"$ref": "#/$defs/tier"},
+        "standard": {"$ref": "#/$defs/tier"},
+        "complex": {"$ref": "#/$defs/tier"}
+      }
+    },
+    "model_profiles": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {
+        "type": "object",
+        "minProperties": 1,
+        "additionalProperties": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      }
+    },
+    "categories": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {"$ref": "#/$defs/category"}
+    },
+    "scenarios": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {"$ref": "#/$defs/scenario"}
+    }
+  },
+  "$defs": {
+    "tier": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reasoning_effort", "model_profile"],
+      "properties": {
+        "reasoning_effort": {"enum": ["low", "medium", "high", "xhigh"]},
+        "model_profile": {"type": "string", "minLength": 1, "maxLength": 64}
+      }
+    },
+    "tier_overrides": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "default_complexity": {"enum": ["simple", "standard", "complex"]},
+        "simple": {"$ref": "#/$defs/partial_tier"},
+        "standard": {"$ref": "#/$defs/partial_tier"},
+        "complex": {"$ref": "#/$defs/partial_tier"}
+      }
+    },
+    "partial_tier": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "reasoning_effort": {"enum": ["low", "medium", "high", "xhigh"]},
+        "model_profile": {"type": "string", "minLength": 1, "maxLength": 64}
+      }
+    },
+    "category": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["parent", "label", "matching_hints", "provider_preference", "tier_overrides"],
+      "properties": {
+        "parent": {"type": ["string", "null"], "minLength": 1, "maxLength": 128},
+        "label": {"type": "string", "minLength": 1, "maxLength": 200},
+        "matching_hints": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1, "maxLength": 64}
+        },
+        "provider_preference": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1, "maxLength": 64}
+        },
+        "tier_overrides": {"$ref": "#/$defs/tier_overrides"}
+      }
+    },
+    "scenario": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["category", "label", "matching_hints", "provider_preference", "tier_overrides"],
+      "properties": {
+        "category": {"type": "string", "minLength": 1, "maxLength": 128},
+        "label": {"type": "string", "minLength": 1, "maxLength": 200},
+        "matching_hints": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1, "maxLength": 64}
+        },
+        "provider_preference": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1, "maxLength": 64}
+        },
+        "tier_overrides": {"$ref": "#/$defs/tier_overrides"}
+      }
+    }
+  }
+}
