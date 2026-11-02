@@ -526,7 +526,7 @@ export class TaskStore extends DurableObject {
         this.sql.exec("INSERT INTO native_notifications(seq,status) VALUES(?,'sending')",event.seq);
         nativeJobs.push(event);
       }
-      const deliveries=this.sql.exec(`SELECT d.*,s.url,s.secret,s.previous_secret,s.previous_expires,s.owner,s.identity_json,s.expires,s.deleted,s.consecutive_failures FROM event_deliveries d JOIN subscriptions s ON s.id=d.subscription
+      const deliveries=this.sql.exec(`SELECT d.*,s.url,s.secret,s.previous_secret,s.previous_expires,s.owner,s.identity_json,s.expires,s.deleted FROM event_deliveries d JOIN subscriptions s ON s.id=d.subscription
         WHERE d.status='pending' AND d.next_attempt<=? ORDER BY d.seq LIMIT 4`,timestamp).toArray();
       for(const row of deliveries){
         if(row.deleted!==null||row.expires<=now()||!this.#eventAccess(row.owner,JSON.parse(row.identity_json)))continue;
@@ -536,10 +536,9 @@ export class TaskStore extends DurableObject {
         const state=status>=200&&status<300?'sent':transient&&attempts<5?'pending':'stopped';
         const httpStatus=status>=100&&status<=599?status:null;
         const errorClass=classifyDelivery(failure,status);
-        const failures=httpStatus!==null&&httpStatus>=200&&httpStatus<300?0:(row.consecutive_failures??0)+1;
         this.#log({message:'event_delivery',subscription:shortSubscriptionId(row.subscription),callback_host:callbackHost(row.url),event:'task.requested',task_id:deliveryTaskId(row.body),attempt:attempts,http_status:httpStatus,error_class:errorClass,latency_ms:Date.now()-started});
         this.sql.exec('UPDATE event_deliveries SET status=?,attempts=?,next_attempt=? WHERE subscription=? AND seq=?',state,attempts,now()+Math.min(2**attempts,60),row.subscription,row.seq);
-        this.sql.exec('UPDATE subscriptions SET last_attempt_at=?,last_status=?,last_error_class=?,consecutive_failures=? WHERE id=?',now(),httpStatus,errorClass,failures,row.subscription);
+        this.sql.exec('UPDATE subscriptions SET last_attempt_at=?,last_status=?,last_error_class=?,consecutive_failures=CASE WHEN ? THEN 0 ELSE consecutive_failures+1 END WHERE id=?',now(),httpStatus,errorClass,state==='sent'?1:0,row.subscription);
       }
       const delivery=this.sql.exec("SELECT MIN(next_attempt) AS n FROM event_deliveries WHERE status='pending'").one().n;
       // An expired live API call can only finish or become unknown; inspect its

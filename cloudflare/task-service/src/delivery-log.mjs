@@ -3,7 +3,7 @@
 // secret, signature or account principal.
 const MESSAGES = new Set(['event_delivery', 'subscription_subscribed', 'subscription_refreshed', 'subscription_expired', 'event_unmatched', 'subscription_verification_failed']);
 const CLASSES = new Set(['timeout', 'network', 'client_error', 'rate_limited', 'server_error', 'challenge_failed']);
-const HOST = /^(?:invalid-host|(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?::[0-9]{1,5})?)$/;
+const HOSTS = new Set(['redacted-host', 'invalid-host']);
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const redacted = () => JSON.stringify({message: 'event_delivery_redacted'});
 
@@ -11,7 +11,8 @@ export function callbackHost(value) {
   try {
     const url = new URL(value);
     if (url.protocol !== 'https:' || !url.hostname) return 'invalid-host';
-    return url.host;
+    // Host labels can contain account IDs or tokens, so retain no URL parts.
+    return 'redacted-host';
   } catch {
     return 'invalid-host';
   }
@@ -39,7 +40,7 @@ function take(fields, key, ok) {
 export function deliveryLog(fields) {
   if (!fields || typeof fields !== 'object' || Array.isArray(fields) || !MESSAGES.has(fields.message)) return redacted();
   if (!take(fields, 'subscription', typeof fields.subscription === 'string' && /^sub_(?:unknown|[0-9a-f]{12})$/.test(fields.subscription))) return redacted();
-  if (!take(fields, 'callback_host', typeof fields.callback_host === 'string' && HOST.test(fields.callback_host))) return redacted();
+  if (!take(fields, 'callback_host', HOSTS.has(fields.callback_host))) return redacted();
   if (!take(fields, 'event', fields.event === 'task.requested' || fields.event === 'verification')) return redacted();
   if (!take(fields, 'task_id', fields.task_id === 'invalid-task' || (typeof fields.task_id === 'string' && UUID.test(fields.task_id)))) return redacted();
   if (!take(fields, 'attempt', Number.isInteger(fields.attempt) && fields.attempt >= 1 && fields.attempt <= 20)) return redacted();

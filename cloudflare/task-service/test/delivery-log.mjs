@@ -6,7 +6,14 @@ const fullId = 'sub_' + 'ab'.repeat(32);
 const taskId = '11111111-1111-4111-8111-111111111111';
 const secretUrl = 'https://user:keep-out@delivery-probe.example:8443/hooks/v1?access=synthetic-marker#frag';
 
-assert.equal(callbackHost(secretUrl), 'delivery-probe.example:8443');
+for (const host of ['123456789.hooks.example.test', 'synthetic-token-abcdef.hooks.example.test']) {
+  assert.equal(callbackHost('https://' + host + '/hook'), 'redacted-host');
+  const direct = deliveryLog({message: 'event_delivery', callback_host: host});
+  assert.equal(JSON.parse(direct).message, 'event_delivery_redacted');
+  assert.ok(!direct.includes(host));
+}
+
+assert.equal(callbackHost(secretUrl), 'redacted-host');
 assert.equal(callbackHost('not a url'), 'invalid-host');
 assert.equal(shortSubscriptionId(fullId), 'sub_abababababab');
 assert.equal(shortSubscriptionId('github-10001:client'), 'sub_unknown');
@@ -28,7 +35,7 @@ const line = deliveryLog({
 });
 const parsed = JSON.parse(line);
 assert.equal(parsed.subscription, 'sub_abababababab');
-assert.equal(parsed.callback_host, 'delivery-probe.example:8443');
+assert.equal(parsed.callback_host, 'redacted-host');
 assert.equal(parsed.http_status, 410);
 assert.equal(parsed.error_class, 'client_error');
 assert.equal(parsed.attempt, 2);
