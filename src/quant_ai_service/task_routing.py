@@ -104,6 +104,21 @@ def validate_routing(document: Mapping[str, Any]) -> dict[str, Any]:
         merged = dict(DEFAULT_HEURISTICS)
         merged.update(heuristics)
         data['heuristics'] = merged
+    # JSON Schema also treats integral floats as integers; PAS requires Python ints.
+    if any(type(value) is not int for value in data['heuristics'].values()):
+        raise RoutingError('heuristics values must be positive integers')
+    heuristics = data['heuristics']
+    if not (heuristics['size_simple_max'] < heuristics['size_standard']
+            < heuristics['size_complex']):
+        raise RoutingError('heuristics size thresholds must increase')
+    for scenario in data['scenarios'].values():
+        thresholds = scenario.get('matching', {}).get('size_thresholds', {})
+        if any(type(value) is not int for value in thresholds.values()):
+            raise RoutingError('size_thresholds values must be positive integers')
+        standard = thresholds.get('standard', heuristics['size_standard'])
+        complex_size = thresholds.get('complex', heuristics['size_complex'])
+        if standard >= complex_size:
+            raise RoutingError('scenario size thresholds must increase')
     return data
 
 

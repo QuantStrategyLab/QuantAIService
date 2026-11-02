@@ -94,7 +94,7 @@ class TaskRoutingDataTests(unittest.TestCase):
             'category': 'quant_ledger',
             'mode': 'agent',
             'providers': ['dot'],
-            'matching': {'hints': ['ledger', 'spot-check'], 'default_complexity': None},
+            'matching': {'hints': ['ledger', 'spot-check']},
         }
         validate_project_routing(routing, self.project)
         route = effective_route(routing, 'ledger_spot_check')

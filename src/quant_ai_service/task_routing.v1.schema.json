@@ -9,6 +9,7 @@
     "schema_version": {"const": "task.routing.v1"},
     "categories": {
       "type": "object",
+      "propertyNames": {"pattern": "^[A-Za-z][A-Za-z0-9_-]{0,63}$"},
       "additionalProperties": {"$ref": "#/$defs/category"}
     },
     "scenarios": {
@@ -31,11 +32,11 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "size_simple_max": {"type": "integer", "minimum": 0},
-        "size_standard": {"type": "integer", "minimum": 0},
-        "size_complex": {"type": "integer", "minimum": 0},
-        "image_complex_size": {"type": "integer", "minimum": 0},
-        "materials_complex_count": {"type": "integer", "minimum": 0}
+        "size_simple_max": {"type": "integer", "minimum": 1},
+        "size_standard": {"type": "integer", "minimum": 1},
+        "size_complex": {"type": "integer", "minimum": 1},
+        "image_complex_size": {"type": "integer", "minimum": 1},
+        "materials_complex_count": {"type": "integer", "minimum": 1}
       }
     }
   },
@@ -47,11 +48,12 @@
       "required": ["model", "reasoning_effort"],
       "properties": {
         "model": {"type": "string", "minLength": 1, "maxLength": 128},
-        "reasoning_effort": {"enum": ["low", "medium", "high", "xhigh"]}
+        "reasoning_effort": {"enum": ["low", "medium", "high"]}
       }
     },
     "tier_map": {
       "type": "object",
+      "propertyNames": {"pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"},
       "minProperties": 1,
       "additionalProperties": {"$ref": "#/$defs/provider_selection"}
     },
@@ -109,17 +111,14 @@
           "uniqueItems": true,
           "items": {"type": "string", "minLength": 1, "maxLength": 64}
         },
-        "default_complexity": {
-          "type": ["string", "null"],
-          "enum": ["simple", "standard", "complex", null]
-        },
+        "default_complexity": {"$ref": "#/$defs/complexity"},
         "min_with_image": {"$ref": "#/$defs/complexity"},
         "size_thresholds": {
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "standard": {"type": "integer", "minimum": 0},
-            "complex": {"type": "integer", "minimum": 0}
+            "standard": {"type": "integer", "minimum": 1},
+            "complex": {"type": "integer", "minimum": 1}
           }
         }
       }

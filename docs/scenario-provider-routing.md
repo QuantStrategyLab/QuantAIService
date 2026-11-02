@@ -12,14 +12,16 @@ each project policy:
 Python in this repository only validates the document and inherits category
 defaults. It does not hard-code business scenario ids or perform live
 fail-closed provider selection; that remains in the shared PersonalAIService
-runtime.
+runtime. Routing only takes effect after the QAS runtime is synced to PAS #88.
+The currently bundled QAS runtime ignores policy routing data and rejects
+`scenario` task fields; validating this registry does not enable routing.
 
 ## Files
 
 | Path | Role |
 | --- | --- |
 | [`config/quant.example.json`](../config/quant.example.json) | Example project policy with `routing` |
-| [`src/quant_ai_service/task_routing.v1.schema.json`](../src/quant_ai_service/task_routing.v1.schema.json) | Exact `task.routing.v1` schema |
+| [`src/quant_ai_service/task_routing.v1.schema.json`](../src/quant_ai_service/task_routing.v1.schema.json) | PAS-compatible `task.routing.v1` schema with stricter QAS checks |
 | [`src/quant_ai_service/task_routing.py`](../src/quant_ai_service/task_routing.py) | Offline load / referential checks / complexity helper |
 
 ## Category tree
@@ -43,9 +45,12 @@ runtime.
 | `signal_context` | quant_signals | agent | dot | signal-context, feature-note |
 | `quick_notification` | quant_notify | api | gemini | short-alert, status-ping |
 
-`matching.default_complexity: null` inherits from the category chain. Image /
-size floors use `matching.min_with_image`, `matching.size_thresholds` and global
-`heuristics` with raise-only semantics from the shared contract.
+The example explicitly sets `matching.default_complexity` to `complex` for
+`pr_code_review` and `reconciliation_anomaly`, `standard` for
+`strategy_research_summary` and `signal_context`, and `simple` for
+`quick_notification`. Omit `matching.default_complexity` to inherit from the
+category chain; an explicit `null` is invalid. Image / size floors use
+`matching.min_with_image`, `matching.size_thresholds` and global `heuristics` with raise-only semantics from the shared contract.
 
 ## Complexity tier table
 
@@ -60,6 +65,22 @@ Aliases are synthetic; production names stay in private `models` allowlists.
 Real account ids never appear in the registry; diagnostics mask account-like
 tokens.
 
+## Validation contract
+
+Reasoning effort is `low`, `medium` or `high`. Heuristics and scenario size
+thresholds must be integers >= 1. After applying defaults,
+`size_simple_max < size_standard < size_complex`; each scenario's effective
+`standard < complex` thresholds must also hold. Category ids match
+`^[A-Za-z][A-Za-z0-9_-]{0,63}$`; tier provider ids (including overrides) match
+`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`.
+
+QAS retains stricter checks than PAS #88: an explicit schema version, category
+`parent` and `default_complexity`, complete provider coverage across tiers,
+project provider/model admission, and increasing scenario thresholds.
+Cross-validation tests use the pinned PAS #88 validator in
+`tests/fixtures/pas88_routing_validator.py` and cover the example plus rejected
+contract mismatches.
+
 ## Adding a category through config alone
 
 1. Add a `categories` entry (`parent`, `default_complexity`).
@@ -73,7 +94,8 @@ No Python scenario table update is required.
 
 ## Readiness and operations
 
-Unready providers are skipped by PersonalAIService; if none remain, submit is
-denied. In the example, `gemini` stays `enabled: false` /
+After the QAS runtime is synced to PAS #88, unready providers are skipped; if
+none remain, submit is denied. This runtime sync is a separate change. In the
+example, `gemini` stays `enabled: false` /
 `api_usage_authorized: false` until separately authorized. This change does not
 deploy services, rotate secrets or enable providers.
