@@ -5,6 +5,14 @@
   "compatibility_flags": [
     "global_fetch_strictly_public"
   ],
+  "observability": {
+    "enabled": true,
+    "logs": {
+      "enabled": true,
+      "head_sampling_rate": 1,
+      "invocation_logs": false
+    }
+  },
   "vars": {
     "ORGANIZATION": "quant",
     "ORGANIZATION_ID": "Quant",

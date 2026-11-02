@@ -7,14 +7,30 @@ const observed=Base=>class extends Base {
   async alarm(){this.testAlarmCount=(this.testAlarmCount??0)+1;return super.alarm();}
   async probeTick(){return this.alarm();}
   async alarmStats(){const scheduled=await this.ctx.storage.getAlarm();return {count:this.testAlarmCount??0,scheduledDelayMs:scheduled===null?null:scheduled-Date.now()};}
+  subscriptionVisibility(owner,principal,otherPrincipal,id){
+    const own=this.listSubscriptions(owner,principal).subscriptions.map(row=>row.id);
+    const other=this.listSubscriptions(owner,otherPrincipal).subscriptions.map(row=>row.id);
+    let denied=false;
+    try{this.subscriptionStatus(owner,otherPrincipal,id);}catch(error){denied=error.name==='PermissionError';}
+    return {own,other,denied};
+  }
   async subscriptionCount(){return this.sql.exec('SELECT COUNT(*) AS n FROM subscriptions').one().n;}
+  async seedDeliveryBatch(id,initialFailures){
+    this.sql.exec('UPDATE subscriptions SET consecutive_failures=? WHERE id=?',initialFailures,id);
+    this.sql.exec('DELETE FROM event_deliveries WHERE subscription=?',id);
+    for(const seq of [-2,-1])this.sql.exec('INSERT INTO event_deliveries(subscription,seq,body) VALUES(?,?,?)',id,seq,JSON.stringify({name:'task.requested',data:{task_id:'11111111-1111-4111-8111-111111111111'}}));
+    await this.ctx.storage.setAlarm(Date.now()+10);
+  }
   async staleUnclaimed(owner,id){this.sql.exec("UPDATE tasks SET status='cancel_requested',error='deadline_exceeded',deadline=? WHERE id=? AND owner=?",Date.now()/1000-1,id,owner);await this.ctx.storage.setAlarm(Date.now()+10);}
   async expireAPI(owner,id){this.sql.exec('UPDATE tasks SET deadline=? WHERE id=? AND owner=?',Math.floor(Date.now()/1000)-1,id,owner);await this.ctx.storage.setAlarm(Date.now()+10);}
 };
 export class PersonalFixtureStore extends observed(PigbibiTaskStore){}
 export class QuantFixtureStore extends observed(QuantTaskStore){}
 export default class Fixture extends WorkerEntrypoint {
+  async seedDeliveryBatch(id,initialFailures){return this.env.TASK_STATE.get(this.env.TASK_STATE.idFromName(this.env.TASK_STORE_NAME)).seedDeliveryBatch(id,initialFailures);}
   async subscriptionCount(){return this.env.TASK_STATE.get(this.env.TASK_STATE.idFromName(this.env.TASK_STORE_NAME)).subscriptionCount();}
+  async eventLogs(){return this.env.TASK_STATE.get(this.env.TASK_STATE.idFromName(this.env.TASK_STORE_NAME)).recentEventLogs();}
+  async subscriptionVisibility(owner,principal,otherPrincipal,id){return this.env.TASK_STATE.get(this.env.TASK_STATE.idFromName(this.env.TASK_STORE_NAME)).subscriptionVisibility(owner,principal,otherPrincipal,id);}
   async projectTask(owner,request){const store=this.env.TASK_STATE.get(this.env.TASK_STATE.idFromName(this.env.TASK_STORE_NAME));return store.submit(owner,'second-project-synthetic',JSON.stringify(request));}
   async nativeClaim(owner,id,provider){const store=this.env.TASK_STATE.get(this.env.TASK_STATE.idFromName(this.env.TASK_STORE_NAME));return store.claim(owner,id,provider,'synthetic-worker','synthetic-attempt');}
   async nativeReport(owner,id,provider,revision){const store=this.env.TASK_STATE.get(this.env.TASK_STATE.idFromName(this.env.TASK_STORE_NAME));return store.commitReport(owner,id,provider,'synthetic-worker','synthetic-attempt',{body:JSON.stringify({revision,status:'cancelled',output:null,artifacts:[]}),terminal_status:'cancelled'});}
