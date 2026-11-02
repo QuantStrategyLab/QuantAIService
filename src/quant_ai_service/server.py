@@ -8,7 +8,7 @@ def validate_configuration(config):
     projects = config.get('projects', {})
     if not valid_owner(owner) or not projects or any(not project_belongs_to(name, owner) for name in projects):
         raise ValueError('configure one exact service owner and its admitted projects')
-    allowed_scopes = {'tasks:read', 'tasks:submit', 'tasks:work', 'events:subscribe'}
+    allowed_scopes = {'tasks:read', 'tasks:submit', 'tasks:work', 'events:subscribe', 'dashboard:read'}
     for grant in config.get('grants', []):
         explicit = grant_projects(grant)
         if grant.get('owner', owner) != owner or not explicit <= projects.keys():

@@ -48,6 +48,21 @@ class AuthTests(unittest.TestCase):
         self.assertEqual(principal.provider, 'dot')
         self.assertEqual(principal.scopes, frozenset({'tasks:read', 'tasks:work'}))
 
+    def test_dashboard_scope_requires_both_token_and_project_grant(self):
+        grant = self.authorizer.grants[0]
+        grant.pop('provider')
+        grant['scopes'] = ['dashboard:read']
+        principal = self.authorizer.authenticate(self.token(dict(self.claims, scope='dashboard:read tasks:submit')))
+        self.assertEqual(principal.scopes, frozenset({'dashboard:read'}))
+        self.assertIsNone(principal.provider)
+        self.assertEqual(principal.project, 'owner/repo')
+        self.assertIn('dashboard:read', self.authorizer.resource_metadata()['scopes_supported'])
+        principal = self.authorizer.authenticate(self.token(self.claims))
+        self.assertEqual(principal.scopes, frozenset())
+        grant['scopes'] = ['tasks:read']
+        principal = self.authorizer.authenticate(self.token(dict(self.claims, scope='dashboard:read')))
+        self.assertEqual(principal.scopes, frozenset())
+
     def test_offline_access_does_not_grant_business_permissions(self):
         claims = dict(self.claims, scope='tasks:read tasks:work offline_access tasks:submit')
         principal = self.authorizer.authenticate(self.token(claims))

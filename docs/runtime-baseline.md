@@ -10,4 +10,6 @@ Configure the service `owner` explicitly and apply the version-specific [worker 
 
 The baseline describes wheel installation, dependency checks, service/Quant admission tests and safe logging. Logs exclude tokens, task material, raw exceptions and private identifiers. It does not copy Personal deployment configuration. A rollback restores matching code and configuration without rewriting the state database.
 
+The read-only [V2 dashboard contract](dashboard-v2.md) defines project-scoped health P95 and explicit quota observations on the same authenticated HTTP server. It does not restore retired V1 AI gateway routes.
+
 Local checks, CI and historical migration records cannot establish current deployment, login, subscription or business readiness. This summary preserves the complete baseline and both repository [MIT licenses](../LICENSE).
