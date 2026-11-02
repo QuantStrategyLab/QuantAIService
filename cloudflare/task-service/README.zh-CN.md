@@ -6,7 +6,7 @@ Dot 是当前 agent 执行方。API 模式保留同一任务提交、查询、�
 
 MCP 的资源 metadata 和未登录 challenge 广告 `AUTH_CLIENTS` 中精确匹配该资源、provider 非 null 的已配置工作角色 scope 并集，顺序沿服务端 `SCOPES`；不根据请求、当前 token 或 REST 调用方推断权限。该广告供客户端在正常授权时申请所需能力，不是执行许可：MCP 基本操作仍要求 `tasks:work`，订阅及其管理仍要求 `events:subscribe`，原 client、admission、组织、项目和 audience 校验保持不变。REST 继续只广告当前读取或提交操作的最小 scope。
 
-部署这个广告修复不会扩大已有 grant。已准入的 Dot 连接可发现事件能力及五个工具，各工具的 `securitySchemes` 明确声明所需 scope。若旧连接仅授予 `tasks:work`，它仍不能执行订阅或读取、删除订阅记录：原生事件请求返回官方 OAuth 403 scope challenge，订阅管理工具返回带 `_meta["mcp/www_authenticate"]` 的错误结果，提示正常补充授权；拒绝时不写订阅、不发送 webhook。普通任务操作仍只要求 `tasks:work`。
+部署这个广告修复不会扩大已有 grant。已准入的 Dot 连接可发现事件能力及六个工具，各工具的 `securitySchemes` 明确声明所需 scope。`get_event_subscription` 与 `list_event_subscriptions` 返回该调用方自己的订阅生命周期和最近一次投递（`last_attempt_at`、`last_status`、`last_error_class`、`consecutive_failures`），只含回调主机名，不含 secret、路径或 query。若旧连接仅授予 `tasks:work`，它仍不能执行订阅、列出、读取或删除订阅记录：原生事件请求返回官方 OAuth 403 scope challenge，订阅管理工具返回带 `_meta["mcp/www_authenticate"]` 的错误结果，提示正常补充授权；拒绝时不写订阅、不发送 webhook。普通任务操作仍只要求 `tasks:work`。
 
 需要使用原插件正常授权所需 scope，再核验事件目录、active 订阅及真实任务结果，不能修改 KV grant 或借用其他客户端 token 代替。资源 metadata 更新不保证宿主立即更新已保存的 scope；以工具和事件实际发现、授权页面及最终 grant 为准。
 
@@ -63,7 +63,7 @@ REST 机器入口中，`tasks:read` 允许 `GET /v1/tasks/lookup`、`GET /v1/tas
 
 这项回归还使用 Python 3 加载同仓未修改的 `TaskClient`，捕获其消息和事件请求后交给本地 Worker；捕获进程禁止 socket 网络访问。鉴权夹具显式推进 alarm，确保消息测试在任务仍可接收后续材料时执行；终态取消仍调用生产 alarm，真实定时投递由 `native.mjs` 验证。
 
-将 wrangler.example.jsonc 复制到受保护配置目录并填入已有资源与批准的项目策略；真实账号、客户端和授权名单不进入仓库。GitHub client secret 通过批准的凭据存储配置。部署由统筹执行 `wrangler deploy --config /absolute/private/wrangler.jsonc`，不依赖默认目录。占位示例不可直接上线。
+将 wrangler.example.jsonc 复制到受保护配置目录并填入已有资源与批准的项目策略；真实账号、客户端和授权名单不进入仓库。示例打开 Workers Logs（`observability.enabled` 与 `logs.enabled`，`head_sampling_rate` 为 1），并关闭 invocation logs，避免请求头和订阅正文里的 token、签名或完整回调 URL 进入平台日志。投递诊断只写脱敏后的自定义 JSON：订阅短标识、回调主机、事件类型、任务 ID、尝试次数、HTTP 状态或错误类别、耗时。受保护配置需保留同一段后才会在下次获准部署时生效；本仓库变更不执行部署。GitHub client secret 通过批准的凭据存储配置。部署由统筹执行 `wrangler deploy --config /absolute/private/wrangler.jsonc`，不依赖默认目录。占位示例不可直接上线。
 
 公有 OAuth 客户端注册脚本要求 `node scripts/register-clients.mjs --config /absolute/private/registration.json`，配置含 organization、PROJECT_ID、PUBLIC_ORIGIN。远端模式另需 --remote 与准确 --namespace-id。已有 .local 注册计划时先读回，禁止盲重；不发 grant 或 token。
 

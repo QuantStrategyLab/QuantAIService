@@ -1,6 +1,7 @@
 import {imageMaterials} from './image-materials.mjs';
 import {workerContext} from './projects.mjs';
 import {callbackURL,signingKey,signedHeaders} from './webhooks.mjs';
+import {callbackHost,classifyDelivery,emitEventLog,shortSubscriptionId} from './delivery-log.mjs';
 import {apiConfiguration,executeAPI} from './api.mjs';
 import {nativeConfiguration,triggerNative} from './native.mjs';
 import {outputValid} from './validation.mjs';
@@ -27,6 +28,21 @@ const bytes = (value) => new TextEncoder().encode(value);
 async function digest(body) {
   const hash = await crypto.subtle.digest("SHA-256", bytes(body));
   return Array.from(new Uint8Array(hash), (part) => part.toString(16).padStart(2, "0")).join("");
+}
+
+function ensureColumn(sql, table, name, definition) {
+  if (!sql.exec(`PRAGMA table_info(${table})`).toArray().some((column) => column.name === name)) {
+    sql.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${definition}`);
+  }
+}
+
+function deliveryTaskId(body) {
+  try {
+    const parsed = JSON.parse(body);
+    const taskId = parsed?.data?.task_id;
+    if (parsed?.name === 'task.requested' && typeof taskId === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(taskId)) return taskId;
+  } catch { /* The body is never copied into the log. */ }
+  return 'invalid-task';
 }
 
 function parseBody(body) {
@@ -73,7 +89,7 @@ export class TaskStore extends DurableObject {
         UNIQUE(owner, idem));
       CREATE TABLE IF NOT EXISTS events (
         seq INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT NOT NULL,
-        status TEXT NOT NULL, created REAL NOT NULL);
+        status TEXT NOT NULL, created REAL NOT NULL, fanout_noted INTEGER NOT NULL DEFAULT 0);
       CREATE TABLE IF NOT EXISTS native_notifications (seq INTEGER PRIMARY KEY, status TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS messages (
         task_id TEXT NOT NULL, idem TEXT NOT NULL, body TEXT NOT NULL,
@@ -88,11 +104,19 @@ export class TaskStore extends DurableObject {
     this.sql.exec(`CREATE TABLE IF NOT EXISTS subscriptions (
       id TEXT PRIMARY KEY, principal TEXT NOT NULL, owner TEXT NOT NULL, identity_json TEXT NOT NULL,
       url TEXT NOT NULL, secret TEXT NOT NULL, previous_secret TEXT, previous_expires REAL,
-      expires REAL NOT NULL, start_seq INTEGER NOT NULL, created REAL NOT NULL, deleted REAL);
+      expires REAL NOT NULL, start_seq INTEGER NOT NULL, created REAL NOT NULL, deleted REAL,
+      last_attempt_at REAL, last_status INTEGER, last_error_class TEXT,
+      consecutive_failures INTEGER NOT NULL DEFAULT 0, expiry_logged INTEGER NOT NULL DEFAULT 0);
       CREATE TABLE IF NOT EXISTS event_deliveries (
       subscription TEXT NOT NULL, seq INTEGER NOT NULL, body TEXT NOT NULL,
       status TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0,
       next_attempt REAL NOT NULL DEFAULT 0, PRIMARY KEY(subscription,seq));`);
+    ensureColumn(this.sql, 'events', 'fanout_noted', 'INTEGER NOT NULL DEFAULT 0');
+    ensureColumn(this.sql, 'subscriptions', 'last_attempt_at', 'REAL');
+    ensureColumn(this.sql, 'subscriptions', 'last_status', 'INTEGER');
+    ensureColumn(this.sql, 'subscriptions', 'last_error_class', 'TEXT');
+    ensureColumn(this.sql, 'subscriptions', 'consecutive_failures', 'INTEGER NOT NULL DEFAULT 0');
+    ensureColumn(this.sql, 'subscriptions', 'expiry_logged', 'INTEGER NOT NULL DEFAULT 0');
   }
 
   fetch() {
@@ -339,6 +363,30 @@ export class TaskStore extends DurableObject {
     return admissions.some(a=>a.githubUserId===identity.githubUserId&&a.ownerId===project.ownerId&&a.clientIds.includes(identity.clientId)&&a.providers.includes('dot')&&a.scopes.includes('events:subscribe'));
   }
 
+  #log(fields) {
+    const line = emitEventLog(fields);
+    if (!this.eventLogs) this.eventLogs = [];
+    this.eventLogs.push(line);
+    if (this.eventLogs.length > 40) this.eventLogs.shift();
+  }
+
+  recentEventLogs() { return [...(this.eventLogs ?? [])]; }
+
+  #publicSubscription(id, row, owner) {
+    const accessible = row && row.deleted === null && row.expires > now() && this.#eventAccess(owner, JSON.parse(row.identity_json));
+    return {
+      id, status: !row || row.deleted !== null ? 'gone' : accessible ? 'active' : 'inactive', event: 'task.requested',
+      callback_host: row?.url ? callbackHost(row.url) : null,
+      created_at: row ? new Date(row.created * 1000).toISOString() : null,
+      expires_at: row ? new Date(row.expires * 1000).toISOString() : null,
+      deleted_at: row?.deleted ? new Date(row.deleted * 1000).toISOString() : null,
+      last_attempt_at: row?.last_attempt_at ? new Date(row.last_attempt_at * 1000).toISOString() : null,
+      last_status: Number.isInteger(row?.last_status) ? row.last_status : null,
+      last_error_class: typeof row?.last_error_class === 'string' ? row.last_error_class : null,
+      consecutive_failures: Number.isInteger(row?.consecutive_failures) ? row.consecutive_failures : 0,
+    };
+  }
+
   async subscribe(owner,principal,identity,params) {
     return this.ctx.blockConcurrencyWhile(async()=>{
       this.#policy(owner);
@@ -356,11 +404,13 @@ export class TaskStore extends DurableObject {
       const count=this.sql.exec('SELECT COUNT(*) AS n FROM subscriptions WHERE principal=? AND owner=? AND deleted IS NULL AND expires>?',principal,owner,now()).one().n;
       if(!old&&count>=4)invalid('subscription limit reached');
       const challenge=crypto.randomUUID(),id='msg_verification_'+crypto.randomUUID(),body=JSON.stringify({type:'verification',challenge});
+      const verifyStarted=Date.now();
+      const verifyLog=(errorClass,httpStatus)=>this.#log({message:'subscription_verification_failed',subscription:shortSubscriptionId(subscription),callback_host:callbackHost(delivery.url),event:'verification',http_status:httpStatus,error_class:errorClass,latency_ms:Date.now()-verifyStarted});
       let reply;
       try{reply=await fetch(delivery.url,{method:'POST',headers:await signedHeaders(subscription,delivery.secret,id,body),body,redirect:'manual',signal:AbortSignal.timeout(5000)});}
-      catch{fail('CallbackEndpointError','transport_failed');}
-      let response;try{response=await reply.json();}catch{fail('CallbackEndpointError','challenge_failed');}
-      if(!reply.ok||response.challenge!==challenge)fail('CallbackEndpointError','challenge_failed');
+      catch(error){verifyLog(classifyDelivery(error,0),null);fail('CallbackEndpointError','transport_failed');}
+      let response;try{response=await reply.json();}catch{response=null;}
+      if(!reply.ok||response?.challenge!==challenge){verifyLog(reply.ok?'challenge_failed':classifyDelivery(null,reply.status),reply.status);fail('CallbackEndpointError','challenge_failed');}
       if(!this.#eventAccess(owner,identity))denied('event access revoked');
       const continuing=old&&old.deleted===null&&old.expires>now();
       this.ctx.storage.transactionSync(()=>{
@@ -373,7 +423,9 @@ export class TaskStore extends DurableObject {
           VALUES(?,?,?,?,?,?,?,?,?,?,?,NULL) ON CONFLICT(id) DO UPDATE SET identity_json=excluded.identity_json,secret=excluded.secret,
           previous_secret=excluded.previous_secret,previous_expires=excluded.previous_expires,expires=excluded.expires,start_seq=excluded.start_seq,deleted=NULL`,
           subscription,principal,owner,identityText,delivery.url,delivery.secret,previous,until,expires,start,continuing?old.created:now());
+        this.sql.exec('UPDATE subscriptions SET expiry_logged=0 WHERE id=?',subscription);
       });
+      this.#log({message:continuing?'subscription_refreshed':'subscription_subscribed',subscription:shortSubscriptionId(subscription),callback_host:callbackHost(delivery.url),event:'task.requested'});
       await this.#wake();
       return {id:subscription,refreshBefore:new Date(expires*1000).toISOString(),cursor:null,truncated:false};
     });
@@ -383,8 +435,14 @@ export class TaskStore extends DurableObject {
     this.#policy(owner);key(id,'subscription ID required');
     const row=this.sql.exec('SELECT * FROM subscriptions WHERE id=?',id).toArray()[0];
     if(row&&(row.owner!==owner||row.principal!==principal))denied('subscription access denied');
-    return {id,status:!row||row.deleted!==null?'gone':row.expires>now()&&this.#eventAccess(owner,JSON.parse(row.identity_json))?'active':'inactive',
-      created_at:row?new Date(row.created*1000).toISOString():null,expires_at:row?new Date(row.expires*1000).toISOString():null,deleted_at:row?.deleted?new Date(row.deleted*1000).toISOString():null};
+    return this.#publicSubscription(id,row,owner);
+  }
+
+  listSubscriptions(owner,principal) {
+    this.#policy(owner);
+    if(typeof principal!=='string'||!principal)denied('subscription access denied');
+    const rows=this.sql.exec('SELECT * FROM subscriptions WHERE principal=? AND owner=? ORDER BY created DESC LIMIT 20',principal,owner).toArray();
+    return {subscriptions:rows.map(row=>this.#publicSubscription(row.id,row,owner))};
   }
 
   async unsubscribe(owner,principal,id) {
@@ -434,14 +492,29 @@ export class TaskStore extends DurableObject {
           // Pure durable event acceptance has no remote side effect between these writes.
           this.#state(task.id,'running',{handle:JSON.stringify({task_id:task.id,acceptance:'event_pending',model_verification:'unavailable'})});
         }
+        const matchedOwners=new Set();
         for(const sub of this.sql.exec('SELECT * FROM subscriptions WHERE deleted IS NULL').toArray()){
-          if(sub.expires<=timestamp||!this.#eventAccess(sub.owner,JSON.parse(sub.identity_json))){this.sql.exec('DELETE FROM event_deliveries WHERE subscription=?',sub.id);continue;}
+          if(sub.expires<=timestamp){
+            if(!sub.expiry_logged){
+              this.#log({message:'subscription_expired',subscription:shortSubscriptionId(sub.id),callback_host:callbackHost(sub.url),event:'task.requested'});
+              this.sql.exec('UPDATE subscriptions SET expiry_logged=1 WHERE id=?',sub.id);
+            }
+            this.sql.exec('DELETE FROM event_deliveries WHERE subscription=?',sub.id);continue;
+          }
+          if(!this.#eventAccess(sub.owner,JSON.parse(sub.identity_json))){this.sql.exec('DELETE FROM event_deliveries WHERE subscription=?',sub.id);continue;}
+          matchedOwners.add(sub.owner);
           const pending=this.sql.exec("SELECT COUNT(*) AS n FROM event_deliveries WHERE subscription=? AND status='pending'",sub.id).one().n;
           const rows=this.sql.exec(`SELECT e.seq,e.status,e.created,t.id,t.owner,t.revision FROM events e JOIN tasks t ON t.id=e.task_id
             WHERE t.owner=? AND t.provider='dot' AND e.seq>? AND e.status IN ('queued','message','cancel_requested')
             AND t.status IN ('running','cancel_requested','outcome_unknown') ORDER BY e.seq LIMIT ?`,sub.owner,sub.start_seq,Math.max(0,128-pending)).toArray();
           for(const e of rows){const body=JSON.stringify({eventId:'evt_'+e.seq,name:'task.requested',timestamp:new Date(e.created*1000).toISOString(),cursor:null,data:{task_id:e.id,project:e.owner,revision:e.revision,change:e.status}});this.sql.exec('INSERT OR IGNORE INTO event_deliveries(subscription,seq,body) VALUES(?,?,?)',sub.id,e.seq,body);}
           if(rows.length)this.sql.exec('UPDATE subscriptions SET start_seq=? WHERE id=?',rows.at(-1).seq,sub.id);
+        }
+        const fresh=this.sql.exec(`SELECT e.seq,t.id AS task_id,t.owner FROM events e JOIN tasks t ON t.id=e.task_id
+          WHERE t.provider='dot' AND e.status IN ('queued','message','cancel_requested') AND COALESCE(e.fanout_noted,0)=0 AND e.created>=? LIMIT 32`,timestamp-3600).toArray();
+        for(const event of fresh){
+          if(!matchedOwners.has(event.owner))this.#log({message:'event_unmatched',event:'task.requested',task_id:event.task_id,matching_subscriptions:0});
+          this.sql.exec('UPDATE events SET fanout_noted=1 WHERE seq=?',event.seq);
         }
       });
       this.sql.exec("UPDATE native_notifications SET status='outcome_unknown' WHERE status='sending'");
@@ -453,15 +526,20 @@ export class TaskStore extends DurableObject {
         this.sql.exec("INSERT INTO native_notifications(seq,status) VALUES(?,'sending')",event.seq);
         nativeJobs.push(event);
       }
-      const deliveries=this.sql.exec(`SELECT d.*,s.url,s.secret,s.previous_secret,s.previous_expires,s.owner,s.identity_json,s.expires,s.deleted FROM event_deliveries d JOIN subscriptions s ON s.id=d.subscription
+      const deliveries=this.sql.exec(`SELECT d.*,s.url,s.secret,s.previous_secret,s.previous_expires,s.owner,s.identity_json,s.expires,s.deleted,s.consecutive_failures FROM event_deliveries d JOIN subscriptions s ON s.id=d.subscription
         WHERE d.status='pending' AND d.next_attempt<=? ORDER BY d.seq LIMIT 4`,timestamp).toArray();
       for(const row of deliveries){
         if(row.deleted!==null||row.expires<=now()||!this.#eventAccess(row.owner,JSON.parse(row.identity_json)))continue;
-        let status=0;
-        try{const reply=await fetch(row.url,{method:'POST',headers:await signedHeaders(row.subscription,row.secret,'evt_'+row.seq,row.body,row.previous_expires>now()?row.previous_secret:null),body:row.body,redirect:'manual',signal:AbortSignal.timeout(2000)});status=reply.status;await reply.body?.cancel();}catch{}
+        let status=0,failure=null;const started=Date.now();
+        try{const reply=await fetch(row.url,{method:'POST',headers:await signedHeaders(row.subscription,row.secret,'evt_'+row.seq,row.body,row.previous_expires>now()?row.previous_secret:null),body:row.body,redirect:'manual',signal:AbortSignal.timeout(2000)});status=reply.status;await reply.body?.cancel();}catch(error){failure=error;}
         const attempts=row.attempts+1,transient=status===0||status===429||status>=500;
         const state=status>=200&&status<300?'sent':transient&&attempts<5?'pending':'stopped';
+        const httpStatus=status>=100&&status<=599?status:null;
+        const errorClass=classifyDelivery(failure,status);
+        const failures=httpStatus!==null&&httpStatus>=200&&httpStatus<300?0:(row.consecutive_failures??0)+1;
+        this.#log({message:'event_delivery',subscription:shortSubscriptionId(row.subscription),callback_host:callbackHost(row.url),event:'task.requested',task_id:deliveryTaskId(row.body),attempt:attempts,http_status:httpStatus,error_class:errorClass,latency_ms:Date.now()-started});
         this.sql.exec('UPDATE event_deliveries SET status=?,attempts=?,next_attempt=? WHERE subscription=? AND seq=?',state,attempts,now()+Math.min(2**attempts,60),row.subscription,row.seq);
+        this.sql.exec('UPDATE subscriptions SET last_attempt_at=?,last_status=?,last_error_class=?,consecutive_failures=? WHERE id=?',now(),httpStatus,errorClass,failures,row.subscription);
       }
       const delivery=this.sql.exec("SELECT MIN(next_attempt) AS n FROM event_deliveries WHERE status='pending'").one().n;
       // An expired live API call can only finish or become unknown; inspect its

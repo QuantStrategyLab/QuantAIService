@@ -28,7 +28,7 @@ const nativeCalls=[];let nativeReply=200;
 policy.PROJECT_CONTEXTS[projectId+'-second']={organization,ownerId:organizationId,project:secondProject,providers:['dot']};
 policy.PROJECT_POLICIES[secondProject]={...policy.PROJECT_POLICIES[project]};
 
-const deliveries=[],key=randomBytes(32),secret='whsec_'+key.toString('base64');let failedOnce=false,githubUser=10001,outbound=0;
+const deliveries=[],probeCalls=[],key=randomBytes(32),secret='whsec_'+key.toString('base64');let failedOnce=false,githubUser=10001,outbound=0;
 const apiCalls=[];let apiReply='success',releaseAPI;
 const outboundService=async request=>{outbound++;const url=new URL(request.url);if(url.hostname==='routine.example'||url.hostname==='api.anthropic.com'){
  const body=await request.json(),event=url.hostname==='api.anthropic.com'?JSON.parse(body.text):body;
@@ -49,6 +49,12 @@ const outboundService=async request=>{outbound++;const url=new URL(request.url);
   if(apiReply==='oversize')return new Response(' '.repeat(2000001),{status:200});
   const text=apiReply==='schema'?'{"wrong":true}':apiReply==='duplicate'?' {"count":1,"count":2} ':'{"count":2,"ratio":1.0}';
   return Response.json({modelVersion:apiReply==='mismatch'?'another-model':'synthetic-fixed',candidates:[{finishReason:apiReply==='incomplete'?'MAX_TOKENS':'STOP',content:{parts:[{text}]}}],usageMetadata:{promptTokenCount:3,candidatesTokenCount:2,totalTokenCount:5,unsafe:'not copied'}});
+ }
+ if(url.hostname==='delivery-probe.example'||url.hostname==='expiry-probe.example'){
+  const body=await request.text(),event=JSON.parse(body);
+  if(event.type==='verification')return Response.json({challenge:event.challenge});
+  probeCalls.push({host:url.hostname,path:url.pathname,search:url.search});
+  return new Response(null,{status:url.hostname==='expiry-probe.example'?202:410});
  }
  assert.equal(url.hostname,'dot-callback.example');const body=await request.text(),stamp=request.headers.get('webhook-timestamp'),id=request.headers.get('webhook-id');
  const expected='v1,'+createHmac('sha256',key).update(id+'.'+stamp+'.'+body).digest('base64');assert.ok(request.headers.get('webhook-signature').split(' ').includes(expected));const event=JSON.parse(body);
@@ -102,8 +108,8 @@ try{
  await test('work-only grant discovers event capability and receives scope challenges without side effects',async()=>{
   const limited=await mint('dot',origin+'/mcp',['tasks:work'],ids.dot),before=outbound;
   const subscriptionCount=await worker.subscriptionCount(),tools=(await rpc('tools/list',{},limited)).body.result.tools;
-  assert.deepEqual(tools.map(t=>t.name),['get_task','claim_task','report_task_result','get_event_subscription','delete_event_subscription']);
-  for(const t of tools)assert.deepEqual(t.securitySchemes,[{type:'oauth2',scopes:t.name.endsWith('event_subscription')?['tasks:work','events:subscribe']:['tasks:work']}]);
+  assert.deepEqual(tools.map(t=>t.name),['get_task','claim_task','report_task_result','get_event_subscription','delete_event_subscription','list_event_subscriptions']);
+  for(const t of tools)assert.deepEqual(t.securitySchemes,[{type:'oauth2',scopes:t.name.includes('event_subscription')?['tasks:work','events:subscribe']:['tasks:work']}]);
   assert.deepEqual((await rpc('server/discover',{},limited)).body.result.capabilities,{tools:{},events:{}});
   const checkChallenge=challenge=>{assert.ok(challenge.includes('error="insufficient_scope"'));assert.ok(challenge.includes('scope="tasks:work events:subscribe"'));assert.ok(challenge.includes('resource_metadata="'+origin+'/.well-known/oauth-protected-resource/mcp"'));assert.ok(challenge.includes('error_description='));};
   for(const [method,params] of [['events/list',{}],['events/subscribe',{name:'task.requested',arguments:{project},delivery:{mode:'webhook',url:'https://dot-callback.example/events',secret},ttlMs:3600000}],['events/unsubscribe',{id:'synthetic-subscription'}]]){
@@ -112,6 +118,7 @@ try{
   for(const name of ['get_event_subscription','delete_event_subscription']){
    const denied=await rpc('tools/call',{name,arguments:{subscription_id:'synthetic-subscription'}},limited);assert.equal(denied.status,200);assert.equal(denied.body.result.isError,true);assert.ok(!denied.body.error);checkChallenge(denied.body.result._meta['mcp/www_authenticate'][0]);
   }
+  const listedDenied=await rpc('tools/call',{name:'list_event_subscriptions',arguments:{}},limited);assert.equal(listedDenied.status,200);assert.equal(listedDenied.body.result.isError,true);assert.ok(!listedDenied.body.error);checkChallenge(listedDenied.body.result._meta['mcp/www_authenticate'][0]);
   assert.equal((await rpc('ping',{},limited)).status,200);
   assert.equal(await worker.subscriptionCount(),subscriptionCount);assert.equal(outbound,before);
  });
@@ -149,14 +156,20 @@ try{
  tokens.caller=await mint(null,origin+'/v1/tasks',['tasks:read','tasks:submit'],ids.caller);
  let sub;
  await test('native MCP catalog/challenge/owned subscription actual HMAC',async()=>{
-  assert.equal((await rpc('tools/list')).body.result.tools.length,5);
+  assert.equal((await rpc('tools/list')).body.result.tools.length,6);
   assert.deepEqual((await rpc('server/discover')).body.result.capabilities,{tools:{},events:{}});assert.equal((await rpc('events/list')).body.result.events[0].name,'task.requested');
   const r=await rpc('events/subscribe',{name:'task.requested',arguments:{project},delivery:{mode:'webhook',url:'https://dot-callback.example/events',secret},ttlMs:3600000});assert.ok(r.body.result,r.body.error?.message);sub=r.body.result.id;
-  assert.equal((await tool('get_event_subscription',{subscription_id:sub})).body.result.structuredContent.status,'active');
+  const viewed=(await tool('get_event_subscription',{subscription_id:sub})).body.result.structuredContent;
+  assert.equal(viewed.status,'active');assert.equal(viewed.callback_host,'dot-callback.example');assert.equal(viewed.event,'task.requested');
+  assert.equal(viewed.last_attempt_at,null);assert.equal(viewed.last_status,null);assert.equal(viewed.last_error_class,null);assert.equal(viewed.consecutive_failures,0);
+  assert.ok(!JSON.stringify(viewed).includes('/events'));assert.ok(!JSON.stringify(viewed).includes('whsec_'));
  });
  let task;
  await test('durable alarm actually dispatches signed native event and retries identical id/body',async()=>{
   task=await submit('native-first');await until(()=>deliveries.length>=2);assert.equal((await get(task.id)).status,'running');assert.equal(deliveries[0].id,deliveries[1].id);assert.deepEqual(deliveries[0].body,deliveries[1].body);assert.equal(deliveries[0].body.data.task_id,task.id);
+  await until(async()=> (await tool('get_event_subscription',{subscription_id:sub})).body.result.structuredContent.last_status===202);
+  const delivered=(await tool('get_event_subscription',{subscription_id:sub})).body.result.structuredContent;
+  assert.equal(delivered.last_error_class,null);assert.equal(delivered.consecutive_failures,0);assert.ok(delivered.last_attempt_at);assert.equal(delivered.callback_host,'dot-callback.example');
  });
  await test('worker claim/report and caller read preserve bound identity and final output',async()=>{
   const claim=await tool('claim_task',{task_id:task.id,attempt_id:'native-attempt'});assert.equal(claim.body.result.structuredContent.status,'running');
@@ -169,6 +182,10 @@ try{
 
   const subscription=await rpc('events/subscribe',{name:'task.requested',arguments:{project:secondProject},delivery:{mode:'webhook',url:'https://dot-callback.example/events',secret},ttlMs:3600000});
   assert.ok(subscription.body.result,JSON.stringify(subscription.body));
+  const homeList=(await tool('list_event_subscriptions',{})).body.result.structuredContent.subscriptions;
+  assert.deepEqual(homeList.map(item=>item.id),[sub]);assert.ok(homeList.every(item=>item.callback_host==='dot-callback.example'&&!JSON.stringify(item).includes('/events')&&!JSON.stringify(item).includes('whsec_')));
+  const secondList=(await rpc('tools/call',{name:'list_event_subscriptions',arguments:{project:secondProject}})).body.result.structuredContent.subscriptions;
+  assert.deepEqual(secondList.map(item=>item.id),[subscription.body.result.id]);assert.equal(secondList[0].callback_host,'dot-callback.example');
   assert.equal((await rpc('events/subscribe',{name:'task.requested',arguments:{project:'OtherOwner/Private'},delivery:{mode:'webhook',url:'https://dot-callback.example/events',secret},ttlMs:3600000})).body.error.code,-32003);
   const foreignRead=await request('/v1/tasks/absent?project='+encodeURIComponent(secondProject),{headers:auth(tokens.caller)});assert.equal(foreignRead.status,403);
   const r=await rpc('tools/call',{name:'get_task',arguments:{task_id:'absent',project:secondProject}});assert.equal(r.body.error.code,-32602);
@@ -325,8 +342,49 @@ try{
    }
   });
  }
+ await test('client error is recorded once and subscriptions stay owner scoped',async()=>{
+  const callback='https://delivery-probe.example/hooks/v1?access=synthetic-marker';
+  const created=await rpc('events/subscribe',{name:'task.requested',arguments:{project},delivery:{mode:'webhook',url:callback,secret},ttlMs:3600000});
+  assert.ok(created.body.result,JSON.stringify(created.body));const probe=created.body.result.id;
+  const listed=(await tool('list_event_subscriptions',{})).body.result.structuredContent.subscriptions;
+  const row=listed.find(item=>item.id===probe);assert.equal(row.callback_host,'delivery-probe.example');assert.equal(row.consecutive_failures,0);
+  assert.ok(!JSON.stringify(listed).includes('synthetic-marker'));assert.ok(!JSON.stringify(listed).includes('hooks'));assert.ok(!JSON.stringify(listed).includes('whsec_'));
+  const task=await submit('probe-client-error');
+  const view=await until(async()=>{const current=(await tool('get_event_subscription',{subscription_id:probe})).body.result.structuredContent;return current.last_status===410?current:null;});
+  assert.equal(view.last_error_class,'client_error');assert.equal(view.consecutive_failures,1);assert.equal(view.callback_host,'delivery-probe.example');
+  assert.ok(!JSON.stringify(view).includes('synthetic-marker'));assert.ok(!JSON.stringify(view).includes('whsec_'));
+  const calls=probeCalls.length;await worker.alarmProbe('tick');assert.equal(probeCalls.length,calls);
+  const refreshed=await rpc('events/subscribe',{name:'task.requested',arguments:{project},delivery:{mode:'webhook',url:callback,secret},ttlMs:3600000});
+  assert.equal(refreshed.body.result.id,probe);
+  const kept=(await tool('get_event_subscription',{subscription_id:probe})).body.result.structuredContent;
+  assert.equal(kept.last_status,410);assert.equal(kept.consecutive_failures,1);
+  const logs=(await worker.eventLogs()).map(line=>JSON.parse(line));
+  assert.ok(logs.some(item=>item.message==='subscription_subscribed'&&item.subscription===probe.slice(0,16)&&item.callback_host==='delivery-probe.example'));
+  assert.ok(logs.some(item=>item.message==='subscription_refreshed'&&item.subscription===probe.slice(0,16)));
+  assert.ok(logs.some(item=>item.message==='event_delivery'&&item.http_status===410&&item.task_id===task.id&&item.attempt===1&&item.error_class==='client_error'&&Number.isInteger(item.latency_ms)));
+  const joined=JSON.stringify(logs);assert.ok(!joined.includes('synthetic-marker'));assert.ok(!joined.includes('/hooks'));assert.ok(!joined.includes('whsec_'));assert.ok(!joined.includes('github-'));assert.ok(!joined.includes(probe.slice(16)));
+  const scope=await worker.subscriptionVisibility(project,`github-10001:${ids.dot}`,'github-10001:synthetic-other-client',probe);
+  assert.ok(scope.own.includes(probe));assert.deepEqual(scope.other,[]);assert.equal(scope.denied,true);
+  assert.equal((await tool('delete_event_subscription',{subscription_id:probe})).body.result.structuredContent.status,'gone');
+ });
+ await test('expired subscription is logged once',async()=>{
+  const callback='https://expiry-probe.example/lifetime?marker=synthetic-expiry';
+  const created=await rpc('events/subscribe',{name:'task.requested',arguments:{project},delivery:{mode:'webhook',url:callback,secret},ttlMs:1000});
+  assert.ok(created.body.result,JSON.stringify(created.body));const id=created.body.result.id;
+  await new Promise(resolve=>setTimeout(resolve,1200));
+  await worker.alarmProbe('tick');
+  const expired=async()=>(await worker.eventLogs()).map(line=>JSON.parse(line)).filter(item=>item.message==='subscription_expired'&&item.subscription===id.slice(0,16));
+  const first=await expired();assert.equal(first.length,1);assert.equal(first[0].callback_host,'expiry-probe.example');assert.equal(first[0].event,'task.requested');
+  assert.ok(!JSON.stringify(first).includes('synthetic-expiry'));assert.ok(!JSON.stringify(first).includes('/lifetime'));
+  assert.equal((await tool('get_event_subscription',{subscription_id:id})).body.result.structuredContent.status,'inactive');
+  await worker.alarmProbe('tick');assert.equal((await expired()).length,1);
+  assert.equal((await tool('delete_event_subscription',{subscription_id:id})).body.result.structuredContent.status,'gone');
+ });
  await test('unsubscribe stops further acceptance, unavailable provider fails instead of paid fallback',async()=>{
   assert.equal((await tool('delete_event_subscription',{subscription_id:sub})).body.result.structuredContent.status,'gone');const t=await submit('no-subscription');await until(async()=> (await get(t.id)).status==='failed');
+  const unmatched=(await worker.eventLogs()).map(line=>JSON.parse(line)).filter(item=>item.message==='event_unmatched'&&item.task_id===t.id);
+  assert.equal(unmatched.length,1);assert.equal(unmatched[0].matching_subscriptions,0);assert.equal(unmatched[0].event,'task.requested');
+  assert.ok(!JSON.stringify(unmatched).includes('Synthetic'));
   const r=await request('/v1/tasks',{method:'POST',headers:{...auth(tokens.caller),'Idempotency-Key':'no-paid-fallback'},body:JSON.stringify({...taskRequest,mode:'api'})});assert.equal(r.status,403);
  });
  await mkdir('test-results',{recursive:true});await writeFile('test-results/native-'+organization+'.json',JSON.stringify({organization,cases,count:cases.length,realWorkerd:true,realGithub:false,realDot:false,testWebhookDeliveries:deliveries.length,externalRealRequests:0,outboundIntercepted:outbound},null,2)+'\n');
