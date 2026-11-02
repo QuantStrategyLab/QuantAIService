@@ -1,4 +1,4 @@
-"""Quant task.routing.v1 data plugs into the PersonalAIService registry contract."""
+"""Quant task.routing.v1 data plugs into the shared registry contract."""
 from __future__ import annotations
 
 import copy

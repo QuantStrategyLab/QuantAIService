@@ -2,7 +2,7 @@
 
 [完整中文基线](runtime-baseline.zh-CN.md) · [Documentation index](README.md)
 
-QuantAIService owns its `src/ai_service` runtime, dependencies and eight scenario templates. The offline SDK validates templates under the [scenario contracts](scenario-contracts.md). The Quant wheel supplies the compatible `ai_service.client` import; it does not install or download a PersonalAIService core package. Use separate virtual environments for the services because their compatibility namespace is the same.
+QuantAIService owns its `src/ai_service` runtime, dependencies and eight scenario templates. The offline SDK validates templates under the [scenario contracts](scenario-contracts.md). The Quant wheel supplies the compatible `ai_service.client` import; it does not install or download a separate service core package. Use separate virtual environments for the services because their compatibility namespace is the same.
 
 The initial runtime/tests were copied with owner authorization from the private routing service, including the safe MCP logging change. Preserve the provenance and MIT terms in [LICENSE.task-service](../LICENSE.task-service). Subsequent maintenance belongs to this repository; there is no synchronization task or cross-owner runtime dependency. Service discovery reports the Quant package and version.
 

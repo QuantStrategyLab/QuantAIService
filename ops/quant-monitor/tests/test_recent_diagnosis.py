@@ -461,7 +461,7 @@ def test_native_unknown_across_day_restart_never_reposts(tmp_path, monkeypatch):
 @pytest.mark.parametrize(
     "field,value",
     [
-        ("owner", "Pigbibi/PersonalAIService"),
+        ("owner", "example-org/example-private-repo"),
         ("provider", "other"),
         ("revision", 2),
         ("request", {}),
@@ -527,7 +527,7 @@ def test_native_invalid_output_and_cancel_deadline_never_adopt_or_replay(
 @pytest.mark.parametrize(
     "field,value",
     [
-        ("project", "Pigbibi/PersonalAIService"),
+        ("project", "example-org/example-private-repo"),
         ("provider", ""),
         ("mode", "codex"),
         ("worker", None),
