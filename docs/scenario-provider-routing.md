@@ -1,89 +1,79 @@
-# Quant scenario registry extension
+# Quant task routing (`task.routing.v1`)
 
 [简体中文](scenario-provider-routing.zh-CN.md) · [Documentation index](README.md)
 
-QuantAIService contributes **data only** to the shared PersonalAIService scenario
-registry. Categories and scenarios are JSON. New quant categories are added by
-editing the registry document; this package does not hard-code scenario names or
-provider preference tables in Python.
+QuantAIService reuses the PersonalAIService task routing registry dialect
+`task.routing.v1` (see [Pigbibi/PersonalAIService#88](https://github.com/Pigbibi/PersonalAIService/pull/88)
+and its `docs/task-routing.md`). Quant categories and scenarios are **data** under
+each project policy:
 
-## Assumption (PersonalAIService alignment)
+`projects[<id>].routing` / Worker `PROJECT_POLICIES[project].routing`
 
-On 2026-11-02 the PersonalAIService pull request titled around “Scenario-based
-provider routing” was not readable from this repository’s GitHub identity
-(`Pigbibi/PersonalAIService` unresolved / private). This repository therefore
-ships:
-
-- schema id `personal-ai.scenario-registry.extension.v1`
-- logical provider bindings that map onto existing `PROJECT_POLICIES` route keys
-  (`agent`, `agent:<profile>`, `api`) and `PROJECT_CONTEXTS.providers`
-- complexity tiers `simple` / `standard` / `complex`
-
-If the shared schema uses different field names, remap them here and keep the
-quant category and scenario rows as data. Fail-closed skipping of providers that
-are not ready remains in the PersonalAIService registry runtime.
+Python in this repository only validates the document and inherits category
+defaults. It does not hard-code business scenario ids or perform live
+fail-closed provider selection; that remains in the shared PersonalAIService
+runtime.
 
 ## Files
 
 | Path | Role |
 | --- | --- |
-| [`config/quant-scenario-registry.example.json`](../config/quant-scenario-registry.example.json) | Example quant registry document (source of truth for tables below) |
-| [`src/quant_ai_service/scenario_registry.extension.v1.schema.json`](../src/quant_ai_service/scenario_registry.extension.v1.schema.json) | Extension contract schema |
-| [`src/quant_ai_service/scenario_registry.py`](../src/quant_ai_service/scenario_registry.py) | Offline load, schema/referential validation, category inheritance |
-
-The loader never submits tasks, reads secrets, or selects a live provider.
+| [`config/quant.example.json`](../config/quant.example.json) | Example project policy with `routing` |
+| [`src/quant_ai_service/task_routing.v1.schema.json`](../src/quant_ai_service/task_routing.v1.schema.json) | Exact `task.routing.v1` schema |
+| [`src/quant_ai_service/task_routing.py`](../src/quant_ai_service/task_routing.py) | Offline load / referential checks / complexity helper |
 
 ## Category tree
 
-| Category | Parent | Default complexity | Provider preference | Matching hints (examples) |
-| --- | --- | --- | --- | --- |
-| `quant` | — | standard | dot → grokbot → api | quant, qas, trading-ops |
-| `quant.review` | quant | complex | dot → grokbot → api | review, audit, pull-request |
-| `quant.research` | quant | standard | dot → api → grokbot | research, strategy, briefing |
-| `quant.ops` | quant | complex | dot → grokbot | reconciliation, anomaly, ops |
-| `quant.signals` | quant | standard | dot → api | signal, context |
-| `quant.notify` | quant | simple | api → dot → grokbot | notification, alert, ping |
-
-An empty `provider_preference` or `tier_overrides` on a scenario means “inherit
-from the category chain.”
+| Category | Parent | Default complexity |
+| --- | --- | --- |
+| `quant` | — | standard |
+| `quant_review` | quant | complex |
+| `quant_research` | quant | standard |
+| `quant_ops` | quant | complex |
+| `quant_signals` | quant | standard |
+| `quant_notify` | quant | simple |
 
 ## Scenario table
 
-| Scenario | Category | Default complexity | Effective preference |
-| --- | --- | --- | --- |
-| `pr_code_review` | quant.review | complex | dot → grokbot → api |
-| `strategy_research_summary` | quant.research | standard | dot → api → grokbot |
-| `reconciliation_anomaly` | quant.ops | complex | dot → grokbot |
-| `signal_context` | quant.signals | standard | dot → api |
-| `quick_notification` | quant.notify | simple | api → dot → grokbot |
+| Scenario | Category | Mode | Ordered providers | Matching hints (examples) |
+| --- | --- | --- | --- | --- |
+| `pr_code_review` | quant_review | agent | dot → grokbot | pull-request, code-review, architecture-audit |
+| `strategy_research_summary` | quant_research | agent | dot → grokbot | research-summary, strategy-brief, portfolio-note |
+| `reconciliation_anomaly` | quant_ops | agent | dot → grokbot | recon-diff, ops-anomaly, ledger-mismatch |
+| `signal_context` | quant_signals | agent | dot | signal-context, feature-note |
+| `quick_notification` | quant_notify | api | gemini | short-alert, status-ping |
+
+`matching.default_complexity: null` inherits from the category chain. Image /
+size floors use `matching.min_with_image`, `matching.size_thresholds` and global
+`heuristics` with raise-only semantics from the shared contract.
 
 ## Complexity tier table
 
-| Tier | Reasoning effort | Model profile | Intended use |
+| Tier | Provider | Model (example alias) | Reasoning effort |
 | --- | --- | --- | --- |
-| `simple` | low | cheap | Short notifications and low-cost text |
-| `standard` | medium | balanced | Research summaries and signal context |
-| `complex` | high | strongest | PR audits, architecture review, ops anomalies |
+| simple | dot / grokbot / gemini | `*-fast` / `configured-api-fast` | low |
+| standard | dot / grokbot / gemini | `configured-dot` / `configured-grokbot` / `configured-api` | medium |
+| complex | dot / grokbot / gemini | `*-strong` / `configured-api` | high |
 
-Model profile aliases are synthetic placeholders (`configured-dot`,
-`configured-api-fast`, …). Production model names stay in private
-`PROJECT_POLICIES.models` allowlists. Real account ids are never stored in this
-repository; tests use fake ids and `mask_account_ids` redacts account-like tokens
-before logs or artifacts.
+`pr_code_review` sets `tier_overrides.complex` to the strong models explicitly.
+Aliases are synthetic; production names stay in private `models` allowlists.
+Real account ids never appear in the registry; diagnostics mask account-like
+tokens.
 
 ## Adding a category through config alone
 
-1. Add a `categories` entry with `parent`, `matching_hints`, `provider_preference`
-   and `tier_overrides`.
-2. Add one or more `scenarios` that reference that category.
-3. Leave scenario `provider_preference` empty to inherit, or set an explicit list.
-4. Run offline validation: `python -m unittest discover -s tests -p test_scenario_registry.py -v`.
+1. Add a `categories` entry (`parent`, `default_complexity`).
+2. Add scenarios with `category`, `mode`, ordered `providers`, optional
+   `matching` / `tier_overrides`.
+3. Ensure every preferred provider is a value in the project `providers` map and
+   every tier model is in that provider’s `models` allowlist.
+4. Run `python -m unittest discover -s tests/task_service -p test_task_routing.py -v`.
 
-No Python table update is required.
+No Python scenario table update is required.
 
-## Security and operations
+## Readiness and operations
 
-- Do not put API keys, tokens, or real account ids in the registry document.
-- API logical provider remains unbound in `config/quant.example.json` until
-  separately authorized; unreadiness is fail-closed in the shared runtime.
-- This change does not deploy services, rotate secrets, or enable providers.
+Unready providers are skipped by PersonalAIService; if none remain, submit is
+denied. In the example, `gemini` stays `enabled: false` /
+`api_usage_authorized: false` until separately authorized. This change does not
+deploy services, rotate secrets or enable providers.

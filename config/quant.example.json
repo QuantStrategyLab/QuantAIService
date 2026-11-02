@@ -37,6 +37,13 @@
     "claudeduet": {
       "type": "claudeduet",
       "enabled": false
+    },
+    "gemini": {
+      "type": "gemini_api",
+      "enabled": false,
+      "model": "configured-api",
+      "key_env": "AI_SERVICE_GEMINI_API_KEY",
+      "api_usage_authorized": false
     }
   },
   "projects": {
@@ -45,24 +52,178 @@
         "agent": "dot",
         "agent:second-opinion": "grok",
         "agent:grokbot": "grokbot",
-        "agent:claudeduet": "claudeduet"
+        "agent:claudeduet": "claudeduet",
+        "api": "gemini"
       },
       "models": {
         "dot": [
-          "configured-dot"
+          "configured-dot",
+          "configured-dot-fast",
+          "configured-dot-strong"
         ],
         "grok": [
           "configured-grok"
         ],
         "grokbot": [
-          "configured-grokbot"
+          "configured-grokbot",
+          "configured-grokbot-fast",
+          "configured-grokbot-strong"
         ],
         "claudeduet": [
           "configured-claudeduet"
+        ],
+        "gemini": [
+          "configured-api",
+          "configured-api-fast"
         ]
       },
       "max_active": 2,
-      "max_timeout_seconds": 3600
+      "max_timeout_seconds": 3600,
+      "routing": {
+        "schema_version": "task.routing.v1",
+        "categories": {
+          "quant": {
+            "parent": null,
+            "default_complexity": "standard"
+          },
+          "quant_review": {
+            "parent": "quant",
+            "default_complexity": "complex"
+          },
+          "quant_research": {
+            "parent": "quant",
+            "default_complexity": "standard"
+          },
+          "quant_ops": {
+            "parent": "quant",
+            "default_complexity": "complex"
+          },
+          "quant_signals": {
+            "parent": "quant",
+            "default_complexity": "standard"
+          },
+          "quant_notify": {
+            "parent": "quant",
+            "default_complexity": "simple"
+          }
+        },
+        "scenarios": {
+          "pr_code_review": {
+            "category": "quant_review",
+            "mode": "agent",
+            "providers": ["dot", "grokbot"],
+            "matching": {
+              "hints": ["pull-request", "code-review", "architecture-audit"],
+              "default_complexity": null,
+              "min_with_image": "complex",
+              "size_thresholds": {
+                "standard": 4000,
+                "complex": 50000
+              }
+            },
+            "tier_overrides": {
+              "complex": {
+                "dot": {
+                  "model": "configured-dot-strong",
+                  "reasoning_effort": "high"
+                },
+                "grokbot": {
+                  "model": "configured-grokbot-strong",
+                  "reasoning_effort": "high"
+                }
+              }
+            }
+          },
+          "strategy_research_summary": {
+            "category": "quant_research",
+            "mode": "agent",
+            "providers": ["dot", "grokbot"],
+            "matching": {
+              "hints": ["research-summary", "strategy-brief", "portfolio-note"],
+              "default_complexity": null
+            }
+          },
+          "reconciliation_anomaly": {
+            "category": "quant_ops",
+            "mode": "agent",
+            "providers": ["dot", "grokbot"],
+            "matching": {
+              "hints": ["recon-diff", "ops-anomaly", "ledger-mismatch"],
+              "default_complexity": null,
+              "min_with_image": "complex"
+            }
+          },
+          "signal_context": {
+            "category": "quant_signals",
+            "mode": "agent",
+            "providers": ["dot"],
+            "matching": {
+              "hints": ["signal-context", "feature-note"],
+              "default_complexity": null
+            }
+          },
+          "quick_notification": {
+            "category": "quant_notify",
+            "mode": "api",
+            "providers": ["gemini"],
+            "matching": {
+              "hints": ["short-alert", "status-ping"],
+              "default_complexity": null
+            }
+          }
+        },
+        "complexity_tiers": {
+          "simple": {
+            "dot": {
+              "model": "configured-dot-fast",
+              "reasoning_effort": "low"
+            },
+            "grokbot": {
+              "model": "configured-grokbot-fast",
+              "reasoning_effort": "low"
+            },
+            "gemini": {
+              "model": "configured-api-fast",
+              "reasoning_effort": "low"
+            }
+          },
+          "standard": {
+            "dot": {
+              "model": "configured-dot",
+              "reasoning_effort": "medium"
+            },
+            "grokbot": {
+              "model": "configured-grokbot",
+              "reasoning_effort": "medium"
+            },
+            "gemini": {
+              "model": "configured-api",
+              "reasoning_effort": "medium"
+            }
+          },
+          "complex": {
+            "dot": {
+              "model": "configured-dot-strong",
+              "reasoning_effort": "high"
+            },
+            "grokbot": {
+              "model": "configured-grokbot-strong",
+              "reasoning_effort": "high"
+            },
+            "gemini": {
+              "model": "configured-api",
+              "reasoning_effort": "high"
+            }
+          }
+        },
+        "heuristics": {
+          "size_simple_max": 1500,
+          "size_standard": 4000,
+          "size_complex": 50000,
+          "image_complex_size": 20000,
+          "materials_complex_count": 8
+        }
+      }
     }
   },
   "grants": [

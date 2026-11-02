@@ -1,5 +1,5 @@
 """Configured owner admission for the independent Quant task service.
 
-Scenario and category routing preferences live in registry JSON loaded by
-``quant_ai_service.scenario_registry``; they are not hard-coded here.
+Task routing uses PersonalAIService ``task.routing.v1`` data under each
+project's ``routing`` map; scenario ids are not hard-coded in Python.
 """

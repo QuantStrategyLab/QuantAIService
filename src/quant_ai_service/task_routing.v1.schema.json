@@ -1,0 +1,128 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:personal-ai-service:task-routing:v1",
+  "title": "Task routing registry (task.routing.v1)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "scenarios", "complexity_tiers"],
+  "properties": {
+    "schema_version": {"const": "task.routing.v1"},
+    "categories": {
+      "type": "object",
+      "additionalProperties": {"$ref": "#/$defs/category"}
+    },
+    "scenarios": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {"pattern": "^[A-Za-z][A-Za-z0-9_-]{0,63}$"},
+      "additionalProperties": {"$ref": "#/$defs/scenario"}
+    },
+    "complexity_tiers": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["simple", "standard", "complex"],
+      "properties": {
+        "simple": {"$ref": "#/$defs/tier_map"},
+        "standard": {"$ref": "#/$defs/tier_map"},
+        "complex": {"$ref": "#/$defs/tier_map"}
+      }
+    },
+    "heuristics": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "size_simple_max": {"type": "integer", "minimum": 0},
+        "size_standard": {"type": "integer", "minimum": 0},
+        "size_complex": {"type": "integer", "minimum": 0},
+        "image_complex_size": {"type": "integer", "minimum": 0},
+        "materials_complex_count": {"type": "integer", "minimum": 0}
+      }
+    }
+  },
+  "$defs": {
+    "complexity": {"enum": ["simple", "standard", "complex"]},
+    "provider_selection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["model", "reasoning_effort"],
+      "properties": {
+        "model": {"type": "string", "minLength": 1, "maxLength": 128},
+        "reasoning_effort": {"enum": ["low", "medium", "high", "xhigh"]}
+      }
+    },
+    "tier_map": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {"$ref": "#/$defs/provider_selection"}
+    },
+    "category": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["parent", "default_complexity"],
+      "properties": {
+        "parent": {
+          "type": ["string", "null"],
+          "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,63}$"
+        },
+        "default_complexity": {"$ref": "#/$defs/complexity"}
+      }
+    },
+    "scenario": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "providers"],
+      "properties": {
+        "category": {
+          "type": "string",
+          "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,63}$"
+        },
+        "mode": {"enum": ["agent", "api"]},
+        "providers": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+          }
+        },
+        "matching": {"$ref": "#/$defs/matching"},
+        "tier_overrides": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "simple": {"$ref": "#/$defs/tier_map"},
+            "standard": {"$ref": "#/$defs/tier_map"},
+            "complex": {"$ref": "#/$defs/tier_map"}
+          }
+        }
+      }
+    },
+    "matching": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "hints": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1, "maxLength": 64}
+        },
+        "default_complexity": {
+          "type": ["string", "null"],
+          "enum": ["simple", "standard", "complex", null]
+        },
+        "min_with_image": {"$ref": "#/$defs/complexity"},
+        "size_thresholds": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "standard": {"type": "integer", "minimum": 0},
+            "complex": {"type": "integer", "minimum": 0}
+          }
+        }
+      }
+    }
+  }
+}
