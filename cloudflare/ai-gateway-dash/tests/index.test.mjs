@@ -68,6 +68,18 @@ import worker, {
   codexWindowDisplay,
   requiresHumanAudit,
 } from "../src/index.mjs";
+import { LOCALES } from "../src/ui/locales.mjs";
+import { loginHTML } from "../src/ui/login.mjs";
+import { dashboardHTML } from "../src/ui/dashboard.mjs";
+import {
+  classifyLoginError,
+  escapeHtml,
+  healthReadouts,
+  jsObjectLiteral,
+  quotaRowModel,
+  safeHttpUrl,
+  tokensFromQuota,
+} from "../src/ui/format.mjs";
 
 test("buildDashboardApiUrl preserves query strings for allowed read routes", () => {
   assert.equal(
@@ -547,4 +559,152 @@ test("logout surfaces KV revocation failures", async (t) => {
     env,
   );
   assert.equal(stillActive.status, 200);
+});
+
+test("locales keep zh-CN and en key parity with plain-text values", () => {
+  const zhKeys = Object.keys(LOCALES["zh-CN"]).sort();
+  const enKeys = Object.keys(LOCALES.en).sort();
+  assert.deepEqual(enKeys, zhKeys);
+  for (const [locale, dictionary] of Object.entries(LOCALES)) {
+    for (const [key, value] of Object.entries(dictionary)) {
+      assert.equal(typeof value, "string", locale + "." + key);
+      assert.doesNotMatch(value, /[<>]/, locale + "." + key);
+    }
+  }
+  assert.equal(LOCALES["zh-CN"].remaining, "剩余");
+  assert.equal(LOCALES["zh-CN"].k_p95_f, "进程内 · 5 分钟窗口");
+  assert.equal(LOCALES.en.k_p95_f, "process-local · 5-min window");
+});
+
+test("login page exposes GitHub OAuth as the only sign-in action", () => {
+  const page = loginHTML();
+  assert.equal((page.match(/href="\/login"/g) || []).length, 1);
+  assert.match(page, /class="gh" id="gh" href="\/login"/);
+  assert.doesNotMatch(page, /<form\b/i);
+  assert.doesNotMatch(page, /<input\b/i);
+  assert.doesNotMatch(page, /<select\b/i);
+  assert.doesNotMatch(page, /type="password"/i);
+  assert.doesNotMatch(page, /type="email"/i);
+  assert.match(page, /id="alert" role="alert"/);
+  assert.match(page, /function classifyLoginError/);
+});
+
+test("OAuth error redirects are classified without reflecting raw text", () => {
+  assert.equal(classifyLoginError(""), "none");
+  assert.equal(classifyLoginError("not_a_member"), "denied");
+  assert.equal(classifyLoginError("Not a member of the organisation"), "denied");
+  assert.equal(classifyLoginError("access_denied"), "cancel");
+  assert.equal(classifyLoginError("session_expired"), "expired");
+  assert.equal(classifyLoginError("<script>alert(1)</script>"), "error");
+});
+
+test("quota rows never turn a missing budget into unlimited or zero usage", () => {
+  assert.deepEqual(quotaRowModel({}), { status: "not_configured", percent: null, used: null, budget: null });
+  assert.equal(quotaRowModel({ daily_budget: 0, total_cost_usd: 3 }).status, "not_configured");
+  assert.deepEqual(quotaRowModel({ daily_budget: 10 }), { status: "unknown", percent: null, used: null, budget: 10 });
+  const observed = quotaRowModel({ daily_budget: 10, total_cost_usd: 0 });
+  assert.equal(observed.status, "observed");
+  assert.equal(observed.percent, 0);
+  assert.equal(quotaRowModel({ daily_budget: 10, total_cost_usd: 2.5 }).percent, 25);
+});
+
+test("health readouts keep unknown values unknown and exclude background latency", () => {
+  assert.equal(healthReadouts({}), null);
+  assert.equal(healthReadouts({ endpoints: [] }), null);
+  assert.equal(healthReadouts({ endpoints: [null] }), null);
+  assert.equal(healthReadouts({ endpoints: [{ total: 100, errors: 0, p95_ms: 9999, latency_profile: "background_job" }] }), null);
+  assert.equal(healthReadouts({ endpoints: [{ total: 4, errors: null }] }), null);
+  const readouts = healthReadouts({
+    status: "healthy",
+    endpoints: [
+      { total: 3, errors: 1, p95_ms: 120 },
+      { total: 5, errors: 0, p95_ms: 90 },
+      { total: 100, errors: 0, p95_ms: 9999, latency_profile: "background_job" },
+    ],
+  });
+  assert.equal(readouts.requests, 8);
+  assert.equal(readouts.errors, 1);
+  assert.equal(readouts.errorRate, 12.5);
+  assert.equal(readouts.p95, 120);
+  const idle = healthReadouts({ status: "healthy", endpoints: [{ total: 0, errors: 0, p95_ms: 0 }] });
+  assert.equal(idle.errorRate, null);
+  assert.equal(idle.p95, 0);
+});
+
+test("token readout prefers combined usage and never fabricates numbers", () => {
+  assert.equal(tokensFromQuota(null), null);
+  assert.equal(tokensFromQuota({ summary: {} }), null);
+  assert.deepEqual(tokensFromQuota({ summary: { combined: { tokens_input: 10, tokens_output: 5 } } }), {
+    input: 10,
+    output: 5,
+    total: 15,
+  });
+  assert.deepEqual(
+    tokensFromQuota({
+      summary: { api_key: { tokens_input: 2, tokens_output: 3 }, codex: { tokens_input: 4, tokens_output: 1 } },
+    }),
+    { input: 6, output: 4, total: 10 },
+  );
+  assert.equal(tokensFromQuota({ summary: { api_key: { tokens_input: null, tokens_output: null } } }), null);
+});
+
+test("dynamic values are escaped for HTML and script contexts", () => {
+  assert.equal(escapeHtml(`<img src=x onerror="x">&'`), "&lt;img src=x onerror=&quot;x&quot;&gt;&amp;&#39;");
+  const literal = jsObjectLiteral({ value: "</script><script>alert(1)</script>&" });
+  assert.doesNotMatch(literal, /<\/script>/i);
+  assert.doesNotMatch(literal, /<script/i);
+  assert.equal(JSON.parse(literal).value, "</script><script>alert(1)</script>&");
+  assert.equal(safeHttpUrl("https://example.test/a?b=1"), "https://example.test/a?b=1");
+  assert.equal(safeHttpUrl("javascript:alert(1)"), "");
+  assert.equal(safeHttpUrl("http://example.test/a"), "");
+  assert.equal(safeHttpUrl("not a url"), "");
+});
+
+test("dashboard keeps honest unknown states and the read adapter", () => {
+  const page = dashboardHTML();
+  assert.match(page, /var ROUTES=\{/);
+  assert.match(page, /health:"\/v1\/ai\/health"/);
+  assert.match(page, /diagnoses:"\/diagnoses"/);
+  assert.doesNotMatch(page, /"\/v2\//);
+  assert.doesNotMatch(page, /MOCK/);
+  assert.match(page, /not_configured/);
+  assert.match(page, /未配置/);
+  assert.match(page, /bar na/);
+  assert.match(page, /panel-error/);
+  assert.match(page, /进程内 · 5 分钟窗口/);
+  assert.match(page, /process-local · 5-min window/);
+  assert.match(page, /t\.k_bal_f/);
+  assert.doesNotMatch(page, /innerHTML\s*=/);
+  assert.match(page, /textContent/);
+  assert.match(page, /qg-lang/);
+  assert.match(page, /qg-theme/);
+  assert.match(page, /prefers-color-scheme/);
+});
+
+test("failed reads replace stale values with per-panel errors", () => {
+  const page = dashboardHTML();
+  for (const panel of ["health", "quota", "org", "autonomy-summary", "changes", "effectiveness", "diagnoses"]) {
+    assert.ok(page.includes('panelError("' + panel + '"'), panel);
+  }
+  assert.match(page, /att_human\+" · "\+t\.error_title/);
+  assert.match(page, /att_shadow\+" · "\+t\.error_title/);
+  assert.match(page, /state\.health\.status==="error"\?t\.unavailable/);
+});
+
+test("embedded client scripts parse without export leakage", () => {
+  function lastScript(page) {
+    const matches = [...page.matchAll(/<script>([\s\S]*?)<\/script>/g)];
+    return matches.length ? matches[matches.length - 1][1] : "";
+  }
+  for (const page of [loginHTML(), dashboardHTML()]) {
+    const source = lastScript(page);
+    assert.ok(source.length > 100);
+    assert.doesNotMatch(source, /^export\s/m);
+    assert.doesNotThrow(() => new Function(source));
+  }
+});
+
+test("dashboard proxy allowlist still rejects V2 and write routes", () => {
+  assert.throws(() => buildDashboardApiUrl("https://origin.example", "/v2/ai/health", ""), /not allowed/);
+  assert.throws(() => buildDashboardApiUrl("https://origin.example", "/v1/ai/execute/jobs", ""), /not allowed/);
 });
