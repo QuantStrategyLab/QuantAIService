@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import vm from "node:vm";
 
 class FakeKV {
   constructor(options = {}) {
@@ -707,4 +708,40 @@ test("embedded client scripts parse without export leakage", () => {
 test("dashboard proxy allowlist still rejects V2 and write routes", () => {
   assert.throws(() => buildDashboardApiUrl("https://origin.example", "/v2/ai/health", ""), /not allowed/);
   assert.throws(() => buildDashboardApiUrl("https://origin.example", "/v1/ai/execute/jobs", ""), /not allowed/);
+});
+
+function endpointClient() {
+  const script = [...dashboardHTML().matchAll(/<script>([\s\S]*?)<\/script>/g)].at(-1)[1];
+  const source = script.slice(0, script.lastIndexOf('document.querySelectorAll(".js-lang")'));
+  const context = vm.createContext({
+    document: { documentElement: { lang: "en", getAttribute: () => "light" } },
+    URL,
+  });
+  vm.runInContext(source, context);
+  return context;
+}
+
+test("endpoint health never infers success from historical request metrics", () => {
+  const client = endpointClient();
+  for (const fields of [
+    {}, { errors: 0 }, { errors: null }, { errors: -1 },
+    { errors: "invalid" }, { errors: 9 }, { errors: 1 },
+    { status: "unavailable", errors: 0 }, { status: "stale", errors: 0 },
+    { status: "unknown", errors: 0 },
+  ]) {
+    assert.equal(client.endpointStatus({ path: "/synthetic/tasks", total: 8, ...fields }, []), "unknown");
+  }
+  for (const status of ["healthy", "degraded", "unhealthy", "unknown"]) {
+    assert.equal(client.endpointStatus({ status }, []), status);
+  }
+  assert.equal(client.endpointStatus({ path: "/synthetic/tasks", total: 8 }, [
+    { path: "/synthetic/tasks", reason: "error_rate" },
+  ]), "degraded");
+});
+
+test("egress requirement stays unverified in both languages without observations", () => {
+  const page = dashboardHTML();
+  assert.equal(/<span class="lamp st-unk" aria-hidden="true"><\/span><span data-i18n="d_chip">/.test(page), true);
+  assert.equal(LOCALES.en.d_chip, "egress · SG · unverified");
+  assert.equal(LOCALES["zh-CN"].d_chip, "出口 · SG · 未验证");
 });

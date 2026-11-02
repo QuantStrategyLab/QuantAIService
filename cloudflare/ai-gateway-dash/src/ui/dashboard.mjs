@@ -140,7 +140,16 @@ function renderReadouts(){
 }
 
 function profileText(endpoint){var profile=endpoint&&endpoint.latency_profile;if(profile==="background_job")return t.p_bg;if(profile)return String(profile);return "—";}
-function endpointStatus(endpoint,reasons){var raw=String((endpoint&&endpoint.status)||"");if(["healthy","degraded","unhealthy","unknown"].indexOf(raw)>=0)return raw;var pathName=String((endpoint&&endpoint.path)||"");for(var i=0;i<reasons.length;i++){if(reasons[i]&&String(reasons[i].path||"")===pathName)return "degraded";}var total=finiteNumber(endpoint&&endpoint.total);return total!==null&&total>0?"healthy":"unknown";}
+function endpointStatus(endpoint,reasons){
+  var raw=String((endpoint&&endpoint.status)||"");
+  if(["healthy","degraded","unhealthy","unknown"].indexOf(raw)>=0)return raw;
+  // An explicit unavailable/stale state must not be inferred away from old metrics.
+  if(raw)return "unknown";
+  var pathName=String((endpoint&&endpoint.path)||"");
+  for(var i=0;i<reasons.length;i++){if(reasons[i]&&String(reasons[i].path||"")===pathName)return "degraded";}
+  // Request counts (even zero errors) do not establish current endpoint health.
+  return "unknown";
+}
 function healthReasonText(reason){var pathName=String((reason&&reason.path)||"—");if(reason&&reason.reason==="error_rate")return pathName+" "+t.k_err+" "+fmtPct(reason.value,2)+" ≥ "+fmtPct(reason.threshold,2);if(reason&&reason.reason==="p95_latency_ms")return pathName+" P95 "+fmtMs(reason.value)+" ≥ "+fmtMs(reason.threshold);return pathName+" "+String((reason&&reason.reason)||t.or_attention);}
 function renderHealthTable(){
   var target=qs("health");if(!target)return;
@@ -572,7 +581,7 @@ export function dashboardHTML() {
     <header class="top">
       <h1><span class="mark m-only" aria-hidden="true">QG</span><span><span data-i18n="d_title">${text("d_title")}</span><small class="lbl" data-i18n="d_sub">${text("d_sub")}</small></span></h1>
       <span class="grow"></span>
-      <span class="chip hide-m"><span class="lamp st-ok" aria-hidden="true"></span><span data-i18n="d_chip">${text("d_chip")}</span></span>
+      <span class="chip hide-m"><span class="lamp st-unk" aria-hidden="true"></span><span data-i18n="d_chip">${text("d_chip")}</span></span>
       <span class="chip hide-m" id="status-pill"><span class="lamp st-unk" id="pulse" aria-hidden="true"></span><span id="status-text" data-i18n="loading">${text("loading")}</span></span>
       <span class="chip hide-m"><span data-i18n="updated">${text("updated")}</span> <span id="last-refresh">—</span></span>
       <div class="seg" role="group" data-i18n-aria="win_label" aria-label="${text("win_label")}">
