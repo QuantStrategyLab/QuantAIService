@@ -21,6 +21,21 @@ const observed=Base=>class extends Base {
     for(const seq of [-2,-1])this.sql.exec('INSERT INTO event_deliveries(subscription,seq,body) VALUES(?,?,?)',id,seq,JSON.stringify({name:'task.requested',data:{task_id:'11111111-1111-4111-8111-111111111111'}}));
     await this.ctx.storage.setAlarm(Date.now()+10);
   }
+  async fillDeliveryQueue(id,count=128){
+    // Far-future next_attempt keeps capacity full without running 128 outbound POSTs in one alarm.
+    this.sql.exec('DELETE FROM event_deliveries WHERE subscription=?',id);
+    const later=Date.now()/1000+86400;
+    for(let i=0;i<count;i++)this.sql.exec("INSERT INTO event_deliveries(subscription,seq,body,status,next_attempt) VALUES(?,?,?,'pending',?)",id,-1000-i,JSON.stringify({name:'task.requested',data:{task_id:'11111111-1111-4111-8111-111111111111'}}),later);
+  }
+  async subscriptionRow(id){
+    return this.sql.exec('SELECT id,start_seq,ttl_seconds,non_expiring,expires,deleted FROM subscriptions WHERE id=?',id).toArray()[0]??null;
+  }
+  async subscriptionColumns(){
+    return this.sql.exec('PRAGMA table_info(subscriptions)').toArray().map(column=>column.name);
+  }
+  async expireSubscription(id){
+    this.sql.exec('UPDATE subscriptions SET expires=?,non_expiring=0,ttl_seconds=1 WHERE id=?',Date.now()/1000-1,id);
+  }
   async staleUnclaimed(owner,id){this.sql.exec("UPDATE tasks SET status='cancel_requested',error='deadline_exceeded',deadline=? WHERE id=? AND owner=?",Date.now()/1000-1,id,owner);await this.ctx.storage.setAlarm(Date.now()+10);}
   async expireAPI(owner,id){this.sql.exec('UPDATE tasks SET deadline=? WHERE id=? AND owner=?',Math.floor(Date.now()/1000)-1,id,owner);await this.ctx.storage.setAlarm(Date.now()+10);}
 };
@@ -28,6 +43,10 @@ export class PersonalFixtureStore extends observed(PigbibiTaskStore){}
 export class QuantFixtureStore extends observed(QuantTaskStore){}
 export default class Fixture extends WorkerEntrypoint {
   async seedDeliveryBatch(id,initialFailures){return this.env.TASK_STATE.get(this.env.TASK_STATE.idFromName(this.env.TASK_STORE_NAME)).seedDeliveryBatch(id,initialFailures);}
+  async fillDeliveryQueue(id,count){return this.env.TASK_STATE.get(this.env.TASK_STATE.idFromName(this.env.TASK_STORE_NAME)).fillDeliveryQueue(id,count);}
+  async subscriptionRow(id){return this.env.TASK_STATE.get(this.env.TASK_STATE.idFromName(this.env.TASK_STORE_NAME)).subscriptionRow(id);}
+  async subscriptionColumns(){return this.env.TASK_STATE.get(this.env.TASK_STATE.idFromName(this.env.TASK_STORE_NAME)).subscriptionColumns();}
+  async expireSubscription(id){return this.env.TASK_STATE.get(this.env.TASK_STATE.idFromName(this.env.TASK_STORE_NAME)).expireSubscription(id);}
   async subscriptionCount(){return this.env.TASK_STATE.get(this.env.TASK_STATE.idFromName(this.env.TASK_STORE_NAME)).subscriptionCount();}
   async eventLogs(){return this.env.TASK_STATE.get(this.env.TASK_STATE.idFromName(this.env.TASK_STORE_NAME)).recentEventLogs();}
   async subscriptionVisibility(owner,principal,otherPrincipal,id){return this.env.TASK_STATE.get(this.env.TASK_STATE.idFromName(this.env.TASK_STORE_NAME)).subscriptionVisibility(owner,principal,otherPrincipal,id);}

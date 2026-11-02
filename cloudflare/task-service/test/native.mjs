@@ -425,6 +425,74 @@ try{
   await worker.alarmProbe('tick');assert.equal((await expired()).length,1);
   assert.equal((await tool('delete_event_subscription',{subscription_id:id})).body.result.structuredContent.status,'gone');
  });
+ await test('ttlMs null is non-expiring; finite and omitted grants stay exact',async()=>{
+  const columns=await worker.subscriptionColumns();
+  assert.ok(columns.includes('ttl_seconds'));assert.ok(columns.includes('non_expiring'));
+  const unlimitedUrl='https://dot-callback.example/events-unlimited';
+  const unlimited=await rpc('events/subscribe',{name:'task.requested',arguments:{project},delivery:{mode:'webhook',url:unlimitedUrl,secret},ttlMs:null});
+  assert.ok(unlimited.body.result,JSON.stringify(unlimited.body));
+  assert.equal(unlimited.body.result.refreshBefore,null);
+  const unlimitedRow=await worker.subscriptionRow(unlimited.body.result.id);
+  assert.equal(unlimitedRow.non_expiring,1);assert.equal(unlimitedRow.ttl_seconds,null);
+  assert.equal((await tool('get_event_subscription',{subscription_id:unlimited.body.result.id})).body.result.structuredContent.expires_at,null);
+  const longUrl='https://dot-callback.example/events-long';
+  const before=Date.now();
+  const long=await rpc('events/subscribe',{name:'task.requested',arguments:{project},delivery:{mode:'webhook',url:longUrl,secret},ttlMs:7200000});
+  assert.ok(long.body.result.refreshBefore);assert.notEqual(long.body.result.refreshBefore,null);
+  const granted=Date.parse(long.body.result.refreshBefore);
+  assert.ok(granted>=before+7200000-5000);assert.ok(granted<=before+7200000+5000);
+  const longRow=await worker.subscriptionRow(long.body.result.id);
+  assert.equal(longRow.non_expiring,0);assert.equal(longRow.ttl_seconds,7200);
+  const defaultUrl='https://dot-callback.example/events-default';
+  const omitted=await rpc('events/subscribe',{name:'task.requested',arguments:{project},delivery:{mode:'webhook',url:defaultUrl,secret}});
+  assert.ok(omitted.body.result.refreshBefore);
+  const omittedRow=await worker.subscriptionRow(omitted.body.result.id);
+  assert.equal(omittedRow.non_expiring,0);assert.equal(omittedRow.ttl_seconds,3600);
+  const omittedGranted=Date.parse(omitted.body.result.refreshBefore);
+  assert.ok(omittedGranted>=before+3600000-5000);assert.ok(omittedGranted<=Date.now()+3600000+5000);
+  for(const id of [unlimited.body.result.id,long.body.result.id,omitted.body.result.id]){
+   assert.equal((await tool('delete_event_subscription',{subscription_id:id})).body.result.structuredContent.status,'gone');
+  }
+ });
+ await test('refresh keeps start_seq; expired subscribe does not revive delivery state',async()=>{
+  const callback='https://dot-callback.example/events-revive';
+  const created=await rpc('events/subscribe',{name:'task.requested',arguments:{project},delivery:{mode:'webhook',url:callback,secret},ttlMs:3600000});
+  assert.ok(created.body.result,JSON.stringify(created.body));const id=created.body.result.id;
+  const task=await submit('ttl-revive-first');
+  await until(async()=>(await get(task.id)).status==='running');
+  await until(async()=>deliveries.some(item=>item.body.data?.task_id===task.id));
+  const live=await worker.subscriptionRow(id);assert.ok(live.start_seq>0);
+  const refreshed=await rpc('events/subscribe',{name:'task.requested',arguments:{project},delivery:{mode:'webhook',url:callback,secret},ttlMs:1800000});
+  assert.equal(refreshed.body.result.id,id);
+  assert.equal((await worker.subscriptionRow(id)).start_seq,live.start_seq);
+  assert.equal((await worker.subscriptionRow(id)).ttl_seconds,1800);
+  await worker.expireSubscription(id);
+  assert.equal((await tool('get_event_subscription',{subscription_id:id})).body.result.structuredContent.status,'inactive');
+  const beforeDeliveries=deliveries.length;
+  const revived=await rpc('events/subscribe',{name:'task.requested',arguments:{project},delivery:{mode:'webhook',url:callback,secret},ttlMs:3600000});
+  assert.equal(revived.body.result.id,id);
+  const after=await worker.subscriptionRow(id);
+  assert.equal(after.non_expiring,0);assert.ok(after.start_seq>=live.start_seq);
+  const late=await submit('ttl-revive-late');
+  await until(async()=>(await get(late.id)).status==='running');
+  await until(async()=>deliveries.length>beforeDeliveries);
+  assert.ok(deliveries.slice(beforeDeliveries).every(item=>item.body.data?.task_id===late.id));
+  assert.equal((await tool('delete_event_subscription',{subscription_id:id})).body.result.structuredContent.status,'gone');
+ });
+ await test('enqueue_empty warns when matched events cannot be queued',async()=>{
+  // Drop the suite-wide subscription so only the capacity-full callback remains matched.
+  assert.equal((await tool('delete_event_subscription',{subscription_id:sub})).body.result.structuredContent.status,'gone');
+  const callback='https://dot-callback.example/events-enqueue-empty';
+  const created=await rpc('events/subscribe',{name:'task.requested',arguments:{project},delivery:{mode:'webhook',url:callback,secret},ttlMs:3600000});
+  assert.ok(created.body.result,JSON.stringify(created.body));const id=created.body.result.id;
+  await worker.fillDeliveryQueue(id,128);
+  const task=await submit('ttl-enqueue-empty');
+  await until(async()=>(await get(task.id)).status==='running');
+  await worker.alarmProbe('tick');
+  const empty=await until(async()=>(await worker.eventLogs()).map(line=>JSON.parse(line)).find(item=>item.message==='enqueue_empty'&&item.task_id===task.id));
+  assert.equal(empty.event,'task.requested');assert.equal(empty.matching_subscriptions,1);
+  assert.equal((await tool('delete_event_subscription',{subscription_id:id})).body.result.structuredContent.status,'gone');
+ });
  await test('unsubscribe stops further acceptance, unavailable provider fails instead of paid fallback',async()=>{
   assert.equal((await tool('delete_event_subscription',{subscription_id:sub})).body.result.structuredContent.status,'gone');const t=await submit('no-subscription');await until(async()=> (await get(t.id)).status==='failed');
   const unmatched=(await worker.eventLogs()).map(line=>JSON.parse(line)).filter(item=>item.message==='event_unmatched'&&item.task_id===t.id);

@@ -106,7 +106,8 @@ export class TaskStore extends DurableObject {
       url TEXT NOT NULL, secret TEXT NOT NULL, previous_secret TEXT, previous_expires REAL,
       expires REAL NOT NULL, start_seq INTEGER NOT NULL, created REAL NOT NULL, deleted REAL,
       last_attempt_at REAL, last_status INTEGER, last_error_class TEXT,
-      consecutive_failures INTEGER NOT NULL DEFAULT 0, expiry_logged INTEGER NOT NULL DEFAULT 0);
+      consecutive_failures INTEGER NOT NULL DEFAULT 0, expiry_logged INTEGER NOT NULL DEFAULT 0,
+      ttl_seconds INTEGER, non_expiring INTEGER NOT NULL DEFAULT 0);
       CREATE TABLE IF NOT EXISTS event_deliveries (
       subscription TEXT NOT NULL, seq INTEGER NOT NULL, body TEXT NOT NULL,
       status TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0,
@@ -117,6 +118,9 @@ export class TaskStore extends DurableObject {
     ensureColumn(this.sql, 'subscriptions', 'last_error_class', 'TEXT');
     ensureColumn(this.sql, 'subscriptions', 'consecutive_failures', 'INTEGER NOT NULL DEFAULT 0');
     ensureColumn(this.sql, 'subscriptions', 'expiry_logged', 'INTEGER NOT NULL DEFAULT 0');
+    // Additive TTL columns: older Durable Object SQLite rows keep delivering with non_expiring=0.
+    ensureColumn(this.sql, 'subscriptions', 'ttl_seconds', 'INTEGER');
+    ensureColumn(this.sql, 'subscriptions', 'non_expiring', 'INTEGER NOT NULL DEFAULT 0');
   }
 
   fetch() {
@@ -372,13 +376,19 @@ export class TaskStore extends DurableObject {
 
   recentEventLogs() { return [...(this.eventLogs ?? [])]; }
 
+  // Live means not deleted and either non-expiring or still before the granted expiry.
+  // Expired rows are never silently extended or treated as a continuing refresh target.
+  #subscriptionLive(row, timestamp = now()) {
+    return Boolean(row && row.deleted === null && (Number(row.non_expiring) === 1 || row.expires > timestamp));
+  }
+
   #publicSubscription(id, row, owner) {
-    const accessible = row && row.deleted === null && row.expires > now() && this.#eventAccess(owner, JSON.parse(row.identity_json));
+    const accessible = this.#subscriptionLive(row) && this.#eventAccess(owner, JSON.parse(row.identity_json));
     return {
       id, status: !row || row.deleted !== null ? 'gone' : accessible ? 'active' : 'inactive', event: 'task.requested',
       callback_host: row?.url ? callbackHost(row.url) : null,
       created_at: row ? new Date(row.created * 1000).toISOString() : null,
-      expires_at: row ? new Date(row.expires * 1000).toISOString() : null,
+      expires_at: row && !row.non_expiring ? new Date(row.expires * 1000).toISOString() : null,
       deleted_at: row?.deleted ? new Date(row.deleted * 1000).toISOString() : null,
       last_attempt_at: row?.last_attempt_at ? new Date(row.last_attempt_at * 1000).toISOString() : null,
       last_status: Number.isInteger(row?.last_status) ? row.last_status : null,
@@ -395,13 +405,23 @@ export class TaskStore extends DurableObject {
       const delivery=params.delivery;
       if(!object(delivery)||Object.keys(delivery).sort().join(',')!=='mode,secret,url'||delivery.mode!=='webhook')invalid('webhook required');
       try{callbackURL(delivery.url);signingKey(delivery.secret);}catch{invalid('invalid webhook destination or key');}
-      const ttl=params.ttlMs??3600000;
-      if(!Number.isSafeInteger(ttl)||ttl<1000)invalid('invalid ttlMs');
-      const expires=now()+Math.min(ttl/1000,3600);
+      // Tri-state ttlMs: omit → finite default; null → non-expiring; finite integer → grant as requested.
+      const hasTtl=Object.hasOwn(params,'ttlMs');
+      let nonExpiring=0,ttlSeconds=null,expires;
+      if(hasTtl&&params.ttlMs===null){
+        nonExpiring=1;
+        // Durable sentinel so legacy expires-only readers keep the row; refreshBefore stays null.
+        expires=253402300799;
+      }else{
+        const ttl=hasTtl?params.ttlMs:3600000;
+        if(!Number.isSafeInteger(ttl)||ttl<1000)invalid('invalid ttlMs');
+        ttlSeconds=Math.floor(ttl/1000);
+        expires=now()+ttl/1000;
+      }
       const identityText=JSON.stringify(identity);
       const subscription='sub_'+await digest(JSON.stringify([principal,delivery.url,'task.requested',{project:owner}]));
       const old=this.sql.exec('SELECT * FROM subscriptions WHERE id=?',subscription).toArray()[0];
-      const count=this.sql.exec('SELECT COUNT(*) AS n FROM subscriptions WHERE principal=? AND owner=? AND deleted IS NULL AND expires>?',principal,owner,now()).one().n;
+      const count=this.sql.exec('SELECT COUNT(*) AS n FROM subscriptions WHERE principal=? AND owner=? AND deleted IS NULL AND (non_expiring=1 OR expires>?)',principal,owner,now()).one().n;
       if(!old&&count>=4)invalid('subscription limit reached');
       const challenge=crypto.randomUUID(),id='msg_verification_'+crypto.randomUUID(),body=JSON.stringify({type:'verification',challenge});
       const verifyStarted=Date.now();
@@ -412,22 +432,25 @@ export class TaskStore extends DurableObject {
       let response;try{response=await reply.json();}catch{response=null;}
       if(!reply.ok||response?.challenge!==challenge){verifyLog(reply.ok?'challenge_failed':classifyDelivery(null,reply.status),reply.status);fail('CallbackEndpointError','challenge_failed');}
       if(!this.#eventAccess(owner,identity))denied('event access revoked');
-      const continuing=old&&old.deleted===null&&old.expires>now();
+      const continuing=this.#subscriptionLive(old);
       this.ctx.storage.transactionSync(()=>{
         const start=continuing?old.start_seq:this.sql.exec('SELECT COALESCE(MAX(seq),0) AS n FROM events').one().n;
         const rotate=continuing&&old.secret!==delivery.secret;
         const previous=rotate?old.secret:continuing?old.previous_secret:null;
-        const until=rotate?Math.min(now()+60,old.expires,expires):continuing?Math.min(old.previous_expires??0,expires):null;
+        const oldBound=old&&Number(old.non_expiring)===1?now()+60:old?.expires;
+        const newBound=nonExpiring?now()+60:expires;
+        const until=rotate?Math.min(now()+60,oldBound,newBound):continuing?Math.min(old.previous_expires??0,newBound):null;
         if(!continuing)this.sql.exec('DELETE FROM event_deliveries WHERE subscription=?',subscription);
-        this.sql.exec(`INSERT INTO subscriptions(id,principal,owner,identity_json,url,secret,previous_secret,previous_expires,expires,start_seq,created,deleted)
-          VALUES(?,?,?,?,?,?,?,?,?,?,?,NULL) ON CONFLICT(id) DO UPDATE SET identity_json=excluded.identity_json,secret=excluded.secret,
-          previous_secret=excluded.previous_secret,previous_expires=excluded.previous_expires,expires=excluded.expires,start_seq=excluded.start_seq,deleted=NULL`,
-          subscription,principal,owner,identityText,delivery.url,delivery.secret,previous,until,expires,start,continuing?old.created:now());
+        this.sql.exec(`INSERT INTO subscriptions(id,principal,owner,identity_json,url,secret,previous_secret,previous_expires,expires,start_seq,created,deleted,ttl_seconds,non_expiring)
+          VALUES(?,?,?,?,?,?,?,?,?,?,?,NULL,?,?) ON CONFLICT(id) DO UPDATE SET identity_json=excluded.identity_json,secret=excluded.secret,
+          previous_secret=excluded.previous_secret,previous_expires=excluded.previous_expires,expires=excluded.expires,start_seq=excluded.start_seq,deleted=NULL,
+          ttl_seconds=excluded.ttl_seconds,non_expiring=excluded.non_expiring`,
+          subscription,principal,owner,identityText,delivery.url,delivery.secret,previous,until,expires,start,continuing?old.created:now(),ttlSeconds,nonExpiring);
         this.sql.exec('UPDATE subscriptions SET expiry_logged=0 WHERE id=?',subscription);
       });
       this.#log({message:continuing?'subscription_refreshed':'subscription_subscribed',subscription:shortSubscriptionId(subscription),callback_host:callbackHost(delivery.url),event:'task.requested'});
       await this.#wake();
-      return {id:subscription,refreshBefore:new Date(expires*1000).toISOString(),cursor:null,truncated:false};
+      return {id:subscription,refreshBefore:nonExpiring?null:new Date(expires*1000).toISOString(),cursor:null,truncated:false};
     });
   }
 
@@ -487,15 +510,16 @@ export class TaskStore extends DurableObject {
           this.#state(task.id,'submitting');
           if(JSON.parse(task.request).mode==='api'){this.apiInFlight.add(task.id);apiJobs.push(task);continue;}
           if(task.provider!=='dot'){this.nativeInFlight.add(task.id);nativeJobs.push({...task,change:'requested'});continue;}
-          const active=this.sql.exec('SELECT * FROM subscriptions WHERE owner=? AND deleted IS NULL AND expires>?',task.owner,timestamp).toArray().some(s=>this.#eventAccess(task.owner,JSON.parse(s.identity_json)));
+          const active=this.sql.exec('SELECT * FROM subscriptions WHERE owner=? AND deleted IS NULL AND (non_expiring=1 OR expires>?)',task.owner,timestamp).toArray().some(s=>this.#eventAccess(task.owner,JSON.parse(s.identity_json)));
           if(task.provider!=='dot'||!active){this.#state(task.id,'failed',{error:'submission_rejected'});continue;}
           // Pure durable event acceptance has no remote side effect between these writes.
           this.#state(task.id,'running',{handle:JSON.stringify({task_id:task.id,acceptance:'event_pending',model_verification:'unavailable'})});
         }
         const matchedOwners=new Set();
+        const matchedCounts=new Map();
         for(const sub of this.sql.exec('SELECT * FROM subscriptions WHERE deleted IS NULL').toArray()){
-          if(sub.expires<=timestamp){
-            if(!sub.expiry_logged){
+          if(!this.#subscriptionLive(sub,timestamp)){
+            if(!Number(sub.non_expiring)&&!sub.expiry_logged){
               this.#log({message:'subscription_expired',subscription:shortSubscriptionId(sub.id),callback_host:callbackHost(sub.url),event:'task.requested'});
               this.sql.exec('UPDATE subscriptions SET expiry_logged=1 WHERE id=?',sub.id);
             }
@@ -503,6 +527,7 @@ export class TaskStore extends DurableObject {
           }
           if(!this.#eventAccess(sub.owner,JSON.parse(sub.identity_json))){this.sql.exec('DELETE FROM event_deliveries WHERE subscription=?',sub.id);continue;}
           matchedOwners.add(sub.owner);
+          matchedCounts.set(sub.owner,(matchedCounts.get(sub.owner)??0)+1);
           const pending=this.sql.exec("SELECT COUNT(*) AS n FROM event_deliveries WHERE subscription=? AND status='pending'",sub.id).one().n;
           const rows=this.sql.exec(`SELECT e.seq,e.status,e.created,t.id,t.owner,t.revision FROM events e JOIN tasks t ON t.id=e.task_id
             WHERE t.owner=? AND t.provider='dot' AND e.seq>? AND e.status IN ('queued','message','cancel_requested')
@@ -513,7 +538,15 @@ export class TaskStore extends DurableObject {
         const fresh=this.sql.exec(`SELECT e.seq,t.id AS task_id,t.owner FROM events e JOIN tasks t ON t.id=e.task_id
           WHERE t.provider='dot' AND e.status IN ('queued','message','cancel_requested') AND COALESCE(e.fanout_noted,0)=0 AND e.created>=? LIMIT 32`,timestamp-3600).toArray();
         for(const event of fresh){
+          const matches=matchedCounts.get(event.owner)??0;
           if(!matchedOwners.has(event.owner))this.#log({message:'event_unmatched',event:'task.requested',task_id:event.task_id,matching_subscriptions:0});
+          else if(!this.sql.exec('SELECT COUNT(*) AS n FROM event_deliveries WHERE seq=?',event.seq).one().n){
+            const task=this.sql.exec('SELECT status FROM tasks WHERE id=?',event.task_id).toArray()[0];
+            // Terminal tasks are intentionally skipped by the enqueue query; only warn when a live match still failed to queue.
+            if(task&&['running','cancel_requested','outcome_unknown'].includes(task.status)){
+              this.#log({message:'enqueue_empty',event:'task.requested',task_id:event.task_id,matching_subscriptions:matches});
+            }
+          }
           this.sql.exec('UPDATE events SET fanout_noted=1 WHERE seq=?',event.seq);
         }
       });
@@ -526,10 +559,10 @@ export class TaskStore extends DurableObject {
         this.sql.exec("INSERT INTO native_notifications(seq,status) VALUES(?,'sending')",event.seq);
         nativeJobs.push(event);
       }
-      const deliveries=this.sql.exec(`SELECT d.*,s.url,s.secret,s.previous_secret,s.previous_expires,s.owner,s.identity_json,s.expires,s.deleted FROM event_deliveries d JOIN subscriptions s ON s.id=d.subscription
+      const deliveries=this.sql.exec(`SELECT d.*,s.url,s.secret,s.previous_secret,s.previous_expires,s.owner,s.identity_json,s.expires,s.deleted,s.non_expiring FROM event_deliveries d JOIN subscriptions s ON s.id=d.subscription
         WHERE d.status='pending' AND d.next_attempt<=? ORDER BY d.seq LIMIT 4`,timestamp).toArray();
       for(const row of deliveries){
-        if(row.deleted!==null||row.expires<=now()||!this.#eventAccess(row.owner,JSON.parse(row.identity_json)))continue;
+        if(row.deleted!==null||!this.#subscriptionLive(row)||!this.#eventAccess(row.owner,JSON.parse(row.identity_json)))continue;
         let status=0,failure=null;const started=Date.now();
         try{const reply=await fetch(row.url,{method:'POST',headers:await signedHeaders(row.subscription,row.secret,'evt_'+row.seq,row.body,row.previous_expires>now()?row.previous_secret:null),body:row.body,redirect:'manual',signal:AbortSignal.timeout(2000)});status=reply.status;await reply.body?.cancel();}catch(error){failure=error;}
         const attempts=row.attempts+1,transient=status===0||status===429||status>=500;
