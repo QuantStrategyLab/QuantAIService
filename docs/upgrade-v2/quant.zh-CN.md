@@ -32,13 +32,13 @@ CN 的本地研究入口已迁入 CnEquityStrategies，保留保护政策、来�
 
 ## 当前验收边界（2026-10-08）
 
-Quant v2.0.2 的准确源码为 `8e771462fd14e4552d6add55b2920f6bd20dc0ee`，共享核心为 `8b36ee8137c8cfa3900f9120066990c71ab23246`。Dot 的 scopes 只有 tasks:read、tasks:work、events:subscribe，不包含 submit、仓库写入、交易或部署。
+Quant v2.0.2 的准确源码为 `8e771462fd14e4552d6add55b2920f6bd20dc0ee`，共享核心来自私有路由服务。Dot 的 scopes 只有 tasks:read、tasks:work、events:subscribe，不包含 submit、仓库写入、交易或部署。
 
 本轮两个公开合成任务回传 completed，revision=1、output={"sum":12}；由人工在 Dot 聊天中给定真实任务 ID 触发，不能代替自动事件验收。Webhook 获 2xx 时两个监控的 last_run_time 仍为空。自动调度、追加材料/取消的原生验收、Grok Routine 和真实业务资格仍待验证。原生模型不能从 webhook 接口确认，因此未声称使用指定 Astra 模型。
 
 ## 2.0.3 公共 CI 边界
 
-公共 CI 不再检出 private 核心或使用其只读 deploy key，只构建 wrapper 和检查工作流。共享服务与 Quant 集成移到 private AIGateway 的 quant-integration.yml，以人工批准的准确 Quant/QPK SHA 验证。核心依赖固定为 personal-ai-service 2.0.3。旧 deploy key 尚未回收，新的公共工作流不消费它。
+公共 CI 不再检出 private 核心或使用其只读 deploy key，只构建 wrapper 和检查工作流。共享服务与 Quant 集成移到私有路由服务的内部集成工作流，以人工批准的准确 Quant/QPK SHA 验证。核心依赖固定为 personal-ai-service 2.0.3。旧 deploy key 尚未回收，新的公共工作流不消费它。
 
 
 ## 2.0.7 核心依赖绑定
@@ -50,6 +50,5 @@ Events refresh 短期双签实现。两个 `quant_ai_service` 启动/身份守�
 公开 AAB CI 沿原规则构建未发布 wrapper，不下载私有核心；其中 wheel build 的
 `--no-deps` 不等于可跳过运行安装的依赖验证。联合采用必须取得已审的私有 core 2.0.7
 准确 release 源 SHA、artifact/hash，离线安装后强制 `pip check`，不能用同名公共包、
-浮动 main、旧 core 2.0.6 或伪造版本替代。本轮已审核心源码为
-`9aeaa93e61856facd01f905f5f5466bd93acfe1f`；正式 artifact/hash 由发布者提供，此说明不
+浮动 main、旧 core 2.0.6 或伪造版本替代。已审核心源码及正式 artifact/hash 由私有服务发布者提供，此说明不
 声称 Quant 候选已正式发布、生产采用或首次原生订阅通过。

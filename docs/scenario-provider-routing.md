@@ -2,17 +2,16 @@
 
 [简体中文](scenario-provider-routing.zh-CN.md) · [Documentation index](README.md)
 
-QuantAIService reuses the PersonalAIService task routing registry dialect
-`task.routing.v1` (see [Pigbibi/PersonalAIService#88](https://github.com/Pigbibi/PersonalAIService/pull/88)
-and its `docs/task-routing.md`). Quant categories and scenarios are **data** under
+QuantAIService uses the `task.routing.v1` registry contract shared with the
+private routing service. Quant categories and scenarios are **data** under
 each project policy:
 
 `projects[<id>].routing` / Worker `PROJECT_POLICIES[project].routing`
 
 Python in this repository only validates the document and inherits category
 defaults. It does not hard-code business scenario ids or perform live
-fail-closed provider selection; that remains in the shared PersonalAIService
-runtime. Routing only takes effect after the QAS runtime is synced to PAS #88.
+fail-closed provider selection; that remains in the private routing service.
+Routing only takes effect after the QAS runtime supports the routing contract.
 The currently bundled QAS runtime ignores policy routing data and rejects
 `scenario` task fields; validating this registry does not enable routing.
 
@@ -21,7 +20,7 @@ The currently bundled QAS runtime ignores policy routing data and rejects
 | Path | Role |
 | --- | --- |
 | [`config/quant.example.json`](../config/quant.example.json) | Example project policy with `routing` |
-| [`src/quant_ai_service/task_routing.v1.schema.json`](../src/quant_ai_service/task_routing.v1.schema.json) | PAS-compatible `task.routing.v1` schema with stricter QAS checks |
+| [`src/quant_ai_service/task_routing.v1.schema.json`](../src/quant_ai_service/task_routing.v1.schema.json) | Compatible `task.routing.v1` schema with stricter QAS checks |
 | [`src/quant_ai_service/task_routing.py`](../src/quant_ai_service/task_routing.py) | Offline load / referential checks / complexity helper |
 
 ## Category tree
@@ -74,12 +73,12 @@ thresholds must be integers >= 1. After applying defaults,
 `^[A-Za-z][A-Za-z0-9_-]{0,63}$`; tier provider ids (including overrides) match
 `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`.
 
-QAS retains stricter checks than PAS #88: an explicit schema version, category
-`parent` and `default_complexity`, complete provider coverage across tiers,
-project provider/model admission, and increasing scenario thresholds.
-Cross-validation tests use the pinned PAS #88 validator in
-`tests/fixtures/pas88_routing_validator.py` and cover the example plus rejected
-contract mismatches.
+QAS also checks an explicit schema version, category `parent` and
+`default_complexity`, complete provider coverage across tiers, and project
+provider/model admission. Compatibility tests use the independently written
+`tests/fixtures/routing_contract.py` to check the subset above against the
+example and rejected values. This fixture does not establish full runtime
+compatibility with the private routing service.
 
 ## Adding a category through config alone
 
@@ -94,8 +93,8 @@ No Python scenario table update is required.
 
 ## Readiness and operations
 
-After the QAS runtime is synced to PAS #88, unready providers are skipped; if
-none remain, submit is denied. This runtime sync is a separate change. In the
+After the QAS runtime supports the routing contract, unready providers are
+skipped; if none remain, submit is denied. This runtime sync is a separate change. In the
 example, `gemini` stays `enabled: false` /
 `api_usage_authorized: false` until separately authorized. This change does not
 deploy services, rotate secrets or enable providers.

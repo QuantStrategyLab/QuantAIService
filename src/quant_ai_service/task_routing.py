@@ -1,10 +1,10 @@
-"""Offline validation for PersonalAIService ``task.routing.v1`` registry data.
+"""Offline validation for the ``task.routing.v1`` registry data.
 
 Quant categories and scenarios are configuration under
 ``projects[<id>].routing`` / ``PROJECT_POLICIES[project].routing``. This module
 does not hard-code business scenario ids, submit tasks, skip unreadiness, read
 secrets or authorize spend. Fail-closed provider readiness belongs to the
-shared PersonalAIService runtime (see Pigbibi/PersonalAIService#88).
+private routing service.
 """
 from __future__ import annotations
 
@@ -41,7 +41,7 @@ class RoutingError(ValueError):
 
 
 def mask_account_ids(text: str) -> str:
-    """Replace account-like tokens for diagnostics (PAS fixed log fields)."""
+    """Replace account-like tokens for diagnostics."""
     if not isinstance(text, str):
         raise TypeError('text must be a string')
     masked = text
@@ -104,7 +104,7 @@ def validate_routing(document: Mapping[str, Any]) -> dict[str, Any]:
         merged = dict(DEFAULT_HEURISTICS)
         merged.update(heuristics)
         data['heuristics'] = merged
-    # JSON Schema also treats integral floats as integers; PAS requires Python ints.
+    # JSON Schema also treats integral floats as integers; the routing contract requires Python ints.
     if any(type(value) is not int for value in data['heuristics'].values()):
         raise RoutingError('heuristics values must be positive integers')
     heuristics = data['heuristics']
@@ -187,7 +187,7 @@ def resolve_complexity(
     material_count: int = 0,
     has_image: bool = False,
 ) -> str:
-    """Resolve complexity using the PAS raise-only order (offline helper)."""
+    """Resolve complexity using the raise-only order (offline helper)."""
     data = validate_routing(registry)
     scenario = data['scenarios'].get(scenario_id)
     if scenario is None:

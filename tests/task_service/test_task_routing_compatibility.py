@@ -1,4 +1,4 @@
-"""Cross-check QAS registries against the pinned PAS #88 validator."""
+"""Check QAS registries against an independent routing contract fixture."""
 from __future__ import annotations
 
 import copy
@@ -7,10 +7,7 @@ import unittest
 from pathlib import Path
 
 from quant_ai_service.task_routing import RoutingError, validate_routing
-from tests.fixtures.pas88_routing_validator import (
-    RoutingError as PASRoutingError,
-    validate_routing_config,
-)
+from tests.fixtures.routing_contract import ContractError, check_routing_contract
 
 
 class RoutingCompatibilityTests(unittest.TestCase):
@@ -18,19 +15,14 @@ class RoutingCompatibilityTests(unittest.TestCase):
         example = Path(__file__).resolve().parents[2] / 'config' / 'quant.example.json'
         self.projects = json.loads(example.read_text(encoding='utf-8'))['projects']
         self.routing = next(iter(self.projects.values()))['routing']
-        # Isolate B3 from the original B2 null defaults when testing the old head.
-        for scenario in self.routing['scenarios'].values():
-            matching = scenario.get('matching', {})
-            if matching.get('default_complexity') is None:
-                matching.pop('default_complexity', None)
 
-    def test_example_passes_both_validators(self):
+    def test_example_passes_validator_and_contract(self):
         example = Path(__file__).resolve().parents[2] / 'config' / 'quant.example.json'
         projects = json.loads(example.read_text(encoding='utf-8'))['projects']
         for project in projects.values():
             with self.subTest(project='synthetic example'):
                 validate_routing(project['routing'])
-                validate_routing_config(project['routing'])
+                check_routing_contract(project['routing'])
 
     def test_review_incompatibilities_are_rejected_by_both(self):
         cases = []
@@ -63,6 +55,8 @@ class RoutingCompatibilityTests(unittest.TestCase):
         for name in ('1x', 'bad key!', 'a' * 65):
             case('category name', ('categories', name),
                  {'parent': None, 'default_complexity': 'standard'})
+            case('scenario name', ('scenarios', name),
+                 copy.deepcopy(self.routing['scenarios']['pr_code_review']))
         for name in ('bad key!', '-provider', 'p' * 65):
             case('tier provider name', ('complexity_tiers', 'simple', name),
                  {'model': 'synthetic-model', 'reasoning_effort': 'low'})
@@ -74,8 +68,8 @@ class RoutingCompatibilityTests(unittest.TestCase):
         case('null category default', ('categories', 'quant', 'default_complexity'), None)
         for label, bad in cases:
             with self.subTest(case=label):
-                with self.assertRaises(PASRoutingError):
-                    validate_routing_config(bad)
+                with self.assertRaises(ContractError):
+                    check_routing_contract(bad)
                 with self.assertRaises(RoutingError):
                     validate_routing(bad)
 
@@ -85,8 +79,11 @@ class RoutingCompatibilityTests(unittest.TestCase):
                            {'standard': 7000, 'complex': 6000}):
             bad = copy.deepcopy(self.routing)
             bad['scenarios']['pr_code_review']['matching']['size_thresholds'] = thresholds
-            with self.subTest(thresholds=thresholds), self.assertRaises(RoutingError):
-                validate_routing(bad)
+            with self.subTest(thresholds=thresholds):
+                with self.assertRaises(ContractError):
+                    check_routing_contract(bad)
+                with self.assertRaises(RoutingError):
+                    validate_routing(bad)
 
     def test_positive_boundaries_and_omitted_matching_default(self):
         good = copy.deepcopy(self.routing)
@@ -97,4 +94,4 @@ class RoutingCompatibilityTests(unittest.TestCase):
         }
         good['scenarios']['pr_code_review']['matching'].pop('default_complexity', None)
         validate_routing(good)
-        validate_routing_config(good)
+        check_routing_contract(good)

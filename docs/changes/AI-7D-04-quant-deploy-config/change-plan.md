@@ -8,7 +8,7 @@
 
 - `/etc/ai-services/quant-deploy.json` 不存在。现有 helper `/usr/local/sbin/quant-ai-deploy` SHA256 为 `1f44bedab7d91ed7212892a71e0fdb397eb83bbe8ea0ecdc8767275aa9facee3`，仍要求 root config 和 config hash。不得跳过 `Settings.load` 或 `config_gate`。
 - 当前 ExecStart release：`20261014-quant-v2.0.7-4769cf6`。
-- 该 release 的 `source-manifest.json` 中 shim source SHA 为 `4769cf6de39012b0691027c35d33aef30edbef3a`，原仓库名 `QuantStrategyLab/AIAuditBridge`；本机 Git 对象独立解析到相同完整 SHA。core 为原 `Pigbibi/AIGateway` 的 `9aeaa93e61856facd01f905f5f5466bd93acfe1f`，版本均为 2.0.7。这是现有旧运行组合，不把当前独立 wheel 当其已采用。
+- 该 release 的 `source-manifest.json` 中 shim source SHA 为 `4769cf6de39012b0691027c35d33aef30edbef3a`，原仓库名 `QuantStrategyLab/AIAuditBridge`；本机 Git 对象独立解析到相同完整 SHA。core 来自私有路由服务，版本均为 2.0.7。这是现有旧运行组合，不把当前独立 wheel 当其已采用。
 - release 包含 `venv`、`wheels`、`requirements.txt`、`source-manifest.json`、`metadata/prior-target-dropin.conf`。本轮未验证其全部 wheel/venv 内容、drop-in 字节等价或可回滚性。
 - 当前业务 config SHA256 `bba1cc8a90f11741aa07b331bd4494bcc1adec2249e2f040a0b58a1fc25ed8f1`；这是当前文件的读值，不是未来候选的 hash。AI-7D-03 实读 owner 缺失，本轮没有修改。当前 github_apps/Grok provider 仍未配置。
 

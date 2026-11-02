@@ -2,15 +2,13 @@
 
 [English](scenario-provider-routing.md) · [文档索引](README.md)
 
-QuantAIService 复用 PersonalAIService 的任务路由注册方言 `task.routing.v1`
-（见 [Pigbibi/PersonalAIService#88](https://github.com/Pigbibi/PersonalAIService/pull/88)
-及其 `docs/task-routing.md`）。Quant 的类别与场景是各项目策略下的**数据**：
+QuantAIService 使用与私有路由服务共享的 `task.routing.v1` 注册契约。Quant 的类别与场景是各项目策略下的**数据**：
 
 `projects[<id>].routing` / Worker `PROJECT_POLICIES[project].routing`
 
 本仓库 Python 只做文档校验与类别默认值继承，不硬编码业务场景 id，也不做线上
-fail-closed provider 选择；后者由 PersonalAIService 运行时负责。
-只有 QAS 运行时同步 PAS #88 后，路由配置才会生效。目前随 QAS 提供的运行时
+fail-closed provider 选择；后者由私有路由服务负责。
+只有 QAS 运行时支持路由契约后，路由配置才会生效。目前随 QAS 提供的运行时
 忽略策略中的 routing 数据，并拒绝任务中的 `scenario` 字段；配置校验通过不表示
 路由已启用。
 
@@ -19,7 +17,7 @@ fail-closed provider 选择；后者由 PersonalAIService 运行时负责。
 | 路径 | 作用 |
 | --- | --- |
 | [`config/quant.example.json`](../config/quant.example.json) | 含 `routing` 的示例项目策略 |
-| [`src/quant_ai_service/task_routing.v1.schema.json`](../src/quant_ai_service/task_routing.v1.schema.json) | 兼容 PAS 并保留 QAS 更严格检查的 `task.routing.v1` schema |
+| [`src/quant_ai_service/task_routing.v1.schema.json`](../src/quant_ai_service/task_routing.v1.schema.json) | 兼容路由契约并保留 QAS 检查的 `task.routing.v1` schema |
 | [`src/quant_ai_service/task_routing.py`](../src/quant_ai_service/task_routing.py) | 离线加载 / 引用检查 / 复杂度辅助 |
 
 ## 类别树
@@ -70,10 +68,10 @@ Reasoning effort 仅允许 `low`、`medium`、`high`。Heuristics 与场景体�
 `standard < complex`。类别 id 匹配 `^[A-Za-z][A-Za-z0-9_-]{0,63}$`；
 档位 provider id（含覆盖配置）匹配 `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`。
 
-QAS 保留比 PAS #88 更严格的检查：显式 schema 版本、类别的 `parent` 和
-`default_complexity`、provider 在各档位的完整配置、项目 provider/model 白名单，
-以及场景阈值递增。跨验证测试使用固定 PAS #88 版本的校验器
-`tests/fixtures/pas88_routing_validator.py`，覆盖示例及契约不兼容值。
+QAS 还检查显式 schema 版本、类别的 `parent` 和 `default_complexity`、
+provider 在各档位的完整配置以及项目 provider/model 白名单。兼容性测试使用独立编写的
+`tests/fixtures/routing_contract.py`，检查上述契约子集的示例和无效值。
+该 fixture 不代表已验证与私有路由服务的完整运行时兼容性。
 
 ## 仅通过配置新增类别
 
@@ -88,7 +86,7 @@ QAS 保留比 PAS #88 更严格的检查：显式 schema 版本、类别的 `par
 
 ## 就绪与运维
 
-QAS 运行时同步 PAS #88 后，会跳过未就绪 provider；若列表耗尽则拒绝提交。
+QAS 运行时支持路由契约后，会跳过未就绪 provider；若列表耗尽则拒绝提交。
 运行时同步属于独立变更。示例中
 `gemini` 保持 `enabled: false` / `api_usage_authorized: false`，直至另行授权。
 本变更不部署服务、不轮换密钥、不启用 provider。
