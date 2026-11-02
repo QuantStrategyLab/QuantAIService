@@ -31,7 +31,6 @@ WORKFLOW_REF = REPOSITORY + "/.github/workflows/quant-monitor-operational-diagno
 JOBS = "/v1/ai/execute/jobs"
 TASK = "operational_data_diagnosis"
 LIMIT = 2 * 1024 * 1024
-CLOUD_PROJECT = "longbridgequant"
 CLOUD_BUCKET = "qsl-runtime-logs-shared"
 CLOUD_OBSERVATION = "monitor-state/core/diagnosis-observation.json"
 CLOUD_LEDGER_PREFIX = "monitor-state/diagnosis-actions"
@@ -392,12 +391,15 @@ def diagnose_cloud(*, include_healthy=False, verify_state_only=False, env=None,
             or not re.fullmatch(r"[0-9]{1,6}", env.get("GITHUB_RUN_ATTEMPT", ""))):
         raise Rejected("invalid_execution_identity")
     if client is None:
+        project = env.get("GOOGLE_CLOUD_PROJECT", "")
+        if not isinstance(project, str) or not re.fullmatch(r"[a-z][a-z0-9-]{4,28}[a-z0-9]", project):
+            raise Rejected("invalid_cloud_project")
         import google.auth
         from google.auth.transport.requests import Request
         from google.cloud import storage
 
         credentials, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/devstorage.read_write"])
-        client = storage.Client(project=CLOUD_PROJECT, credentials=credentials)
+        client = storage.Client(project=project, credentials=credentials)
 
         def refresh():
             credentials.refresh(Request())

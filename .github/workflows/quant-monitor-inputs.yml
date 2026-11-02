@@ -55,9 +55,17 @@ jobs:
           git -C "$RUNNER_TEMP/qpk" checkout --detach FETCH_HEAD
           test "$(git -C "$RUNNER_TEMP/qpk" rev-parse HEAD)" = "$pin"
           python -m pip --isolated install --no-deps --no-build-isolation "$RUNNER_TEMP/qpk"
+      - name: Validate cloud project configuration
+        env:
+          GCP_PROJECT_ID: ${{ vars.QUANT_MONITOR_GCP_PROJECT_ID }}
+        run: |
+          if ! [[ "$GCP_PROJECT_ID" =~ ^[a-z][a-z0-9-]{4,28}[a-z0-9]$ ]]; then
+            echo "::error::Set QUANT_MONITOR_GCP_PROJECT_ID to a valid project ID"
+            exit 1
+          fi
       - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
         with:
-          project_id: longbridgequant
+          project_id: ${{ vars.QUANT_MONITOR_GCP_PROJECT_ID }}
           workload_identity_provider: ${{ vars.QUANT_MONITOR_INPUTS_GCP_WIF_PROVIDER }}
           create_credentials_file: true
           export_environment_variables: true
@@ -120,9 +128,17 @@ jobs:
       - name: Install existing pinned monitor dependencies
         run: |
           python -m pip --isolated install --require-hashes --only-binary=:all: -r ops/quant-monitor/requirements-linux-py312.lock
+      - name: Validate cloud project configuration
+        env:
+          GCP_PROJECT_ID: ${{ vars.QUANT_MONITOR_GCP_PROJECT_ID }}
+        run: |
+          if ! [[ "$GCP_PROJECT_ID" =~ ^[a-z][a-z0-9-]{4,28}[a-z0-9]$ ]]; then
+            echo "::error::Set QUANT_MONITOR_GCP_PROJECT_ID to a valid project ID"
+            exit 1
+          fi
       - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
         with:
-          project_id: longbridgequant
+          project_id: ${{ vars.QUANT_MONITOR_GCP_PROJECT_ID }}
           workload_identity_provider: ${{ vars.QUANT_MONITOR_INPUTS_GCP_WIF_PROVIDER }}
           create_credentials_file: true
           export_environment_variables: true

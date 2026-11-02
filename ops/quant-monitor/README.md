@@ -550,3 +550,13 @@ See the repository `CONTRIBUTING.md`.
 ## Security
 
 See the repository `SECURITY.md`. Do not open a public issue for a vulnerability.
+
+### Monitor workflow project configuration
+
+Set the repository variable `QUANT_MONITOR_GCP_PROJECT_ID` to the project used
+by the existing monitor input and operational diagnosis federation providers.
+Both workflows require this variable and reject a missing or malformed value
+before authentication. Keep the existing WIF provider variables unchanged.
+No new repository secret is required. The authentication action exports
+`GOOGLE_CLOUD_PROJECT`; the cloud diagnosis caller uses that explicit value
+instead of an embedded project ID. Set the variable before enabling this change.

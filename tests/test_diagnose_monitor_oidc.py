@@ -889,3 +889,41 @@ def test_native_synthetic_verification_rejects_reruns_before_http_or_state(tmp_p
     with pytest.raises(verifier.caller.Rejected, match='invalid_native_verification_identity'):
         verifier.verify(root, env={**native_environment(), 'GITHUB_RUN_ATTEMPT': '2'}, opener=opener, now=NOW)
     assert not opener.calls and not root.exists()
+
+
+@pytest.fixture
+def cloud_sdk(monkeypatch):
+    modules = {name: types.ModuleType(name) for name in (
+        "google", "google.auth", "google.auth.transport", "google.auth.transport.requests",
+        "google.cloud", "google.cloud.storage")}
+    modules["google"].auth = modules["google.auth"]
+    modules["google"].cloud = modules["google.cloud"]
+    modules["google.auth"].default = mock.Mock()
+    modules["google.auth.transport.requests"].Request = mock.Mock()
+    modules["google.cloud"].storage = modules["google.cloud.storage"]
+    modules["google.cloud.storage"].Client = mock.Mock()
+    for name, module in modules.items():
+        monkeypatch.setitem(sys.modules, name, module)
+    return modules["google.auth"].default, modules["google.cloud.storage"].Client
+
+
+@pytest.mark.parametrize("project", [None, "", "UPPERCASE", "short", "example-project-123/other"])
+def test_cloud_missing_or_invalid_project_blocks_before_credentials(project, cloud_sdk):
+    env = cloud_environment()
+    if project is not None:
+        env["GOOGLE_CLOUD_PROJECT"] = project
+    credentials, client = cloud_sdk
+    with pytest.raises(caller.Rejected, match="^invalid_cloud_project$"):
+        caller.diagnose_cloud(env=env)
+    credentials.assert_not_called()
+    client.assert_not_called()
+
+
+def test_cloud_client_uses_configured_project(cloud_sdk):
+    credentials = mock.Mock()
+    default, client = cloud_sdk
+    default.return_value = credentials, "example-ambient-456"
+    client.side_effect = RuntimeError("synthetic stop")
+    with pytest.raises(RuntimeError, match="synthetic stop"):
+        caller.diagnose_cloud(env={**cloud_environment(), "GOOGLE_CLOUD_PROJECT": "example-project-123"})
+    client.assert_called_once_with(project="example-project-123", credentials=credentials)
