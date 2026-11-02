@@ -2,7 +2,7 @@
 
 This release brings the independent Quant runtime to the Personal 2.0.13 class
 of task, event and scenario-instance controls. The comparison reference is
-PersonalAIService `cabcc30f8440162f97b83d93fe8794112505fcc5` (2.0.13).
+the private routing service release 2.0.13.
 It does not install or depend on the Personal distribution.
 
 | Capability | Quant 2.0.13 |
@@ -12,7 +12,7 @@ It does not install or depend on the Personal distribution.
 | Task/event runtime | Existing authentication, signed callbacks, attempt/revision checks, exact-project subscriptions and subscription management retained. |
 | Scenario instance control | `ai-scenario-instance` adds audited readback/enable/disable with exact project, instance, approval reference and expected digest. Private external state only; no service authorization edits. |
 | Fixed synthetic probe | `ai_service.scenarios.protocol_probe` accepts only `quant.synthetic-probe.v1` with `expected_output={"probe":"ok"}`. Existing `synthetic.protocol-input.v1` series fixtures retain their previous contract. |
-| Worker tools preflight | Read-only `quant-ai-service --check-worker-tools`; the schema builder is shared with actual `tools/list`. Adapted from Personal PR #37 at `730a4e269837a993d137bf318304de1780bb947c`, which was not part of released Personal 2.0.13. Request logging changes from that PR are not included. |
+| Worker tools preflight | Read-only `quant-ai-service --check-worker-tools`; the schema builder is shared with actual `tools/list`. Adapted from a later private routing service change, outside release 2.0.13. Its request logging changes are not included. |
 | Deployment helper | Existing #354 Quant-only helper and gates retained; no Personal helper, Secret synchronization or automatic deployment. |
 
 Personal's Ctrip compliance adapter is business-specific and is not a Quant

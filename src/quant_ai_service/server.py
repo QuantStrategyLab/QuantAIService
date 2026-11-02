@@ -2,6 +2,8 @@
 from ai_service.server import main as runtime_main
 from ai_service.auth import grant_projects, project_belongs_to, valid_owner
 
+from .task_routing import RoutingError, validate_project_routing
+
 
 def validate_configuration(config):
     owner = config.get('owner')
@@ -15,6 +17,14 @@ def validate_configuration(config):
             raise ValueError('identity grant must belong to an admitted service project or its exact owner')
         if set(grant['scopes']) - allowed_scopes:
             raise ValueError('AI service grants do not authorize financial or deployment actions')
+    for project in projects.values():
+        routing = project.get('routing')
+        if routing is None:
+            continue
+        try:
+            validate_project_routing(routing, project)
+        except RoutingError as exc:
+            raise ValueError(str(exc)) from exc
 
 
 def main():
