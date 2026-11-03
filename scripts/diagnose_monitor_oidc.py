@@ -31,8 +31,6 @@ WORKFLOW_REF = REPOSITORY + "/.github/workflows/quant-monitor-operational-diagno
 JOBS = "/v1/ai/execute/jobs"
 TASK = "operational_data_diagnosis"
 LIMIT = 2 * 1024 * 1024
-CLOUD_PROJECT = "longbridgequant"
-CLOUD_BUCKET = "qsl-runtime-logs-shared"
 CLOUD_OBSERVATION = "monitor-state/core/diagnosis-observation.json"
 CLOUD_LEDGER_PREFIX = "monitor-state/diagnosis-actions"
 CLOUD_FAILURE_REASONS = frozenset({
@@ -145,14 +143,24 @@ def identity_available(env, *, include_healthy=False):
     return True
 
 
-def verify_storage_bounds(client):
+def configured_bucket(env):
+    """Read a private binding; accept only plain 3..63 character bucket names."""
+    bucket = env.get("QUANT_MONITOR_GCS_BUCKET", "")
+    if (not isinstance(bucket, str)
+            or not re.fullmatch(r"[a-z0-9][a-z0-9_-]{1,61}[a-z0-9]", bucket)
+            or bucket.startswith("goog") or "google" in bucket):
+        raise Rejected("invalid_cloud_bucket")
+    return bucket
+
+
+def verify_storage_bounds(client, bucket):
     """Require actual 403s without downloading the protected archive or names."""
     operations = (
-        lambda: client.bucket(CLOUD_BUCKET).blob("monitor-state/core/current.tar.gz").reload(
+        lambda: client.bucket(bucket).blob("monitor-state/core/current.tar.gz").reload(
             timeout=20, retry=None),
         # Iteration makes the request; the field mask excludes object names and
         # contents even if the identity unexpectedly has listing permission.
-        lambda: list(client.list_blobs(CLOUD_BUCKET, max_results=1, fields="kind",
+        lambda: list(client.list_blobs(bucket, max_results=1, fields="kind",
                                       timeout=20, retry=None)),
     )
     for operation in operations:
@@ -391,13 +399,17 @@ def diagnose_cloud(*, include_healthy=False, verify_state_only=False, env=None,
     if (not re.fullmatch(r"[0-9]{1,24}", env.get("GITHUB_RUN_ID", ""))
             or not re.fullmatch(r"[0-9]{1,6}", env.get("GITHUB_RUN_ATTEMPT", ""))):
         raise Rejected("invalid_execution_identity")
+    bucket = configured_bucket(env)
     if client is None:
+        project = env.get("GOOGLE_CLOUD_PROJECT", "")
+        if not isinstance(project, str) or not re.fullmatch(r"[a-z][a-z0-9-]{4,28}[a-z0-9]", project):
+            raise Rejected("invalid_cloud_project")
         import google.auth
         from google.auth.transport.requests import Request
         from google.cloud import storage
 
         credentials, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/devstorage.read_write"])
-        client = storage.Client(project=CLOUD_PROJECT, credentials=credentials)
+        client = storage.Client(project=project, credentials=credentials)
 
         def refresh():
             credentials.refresh(Request())
@@ -405,14 +417,14 @@ def diagnose_cloud(*, include_healthy=False, verify_state_only=False, env=None,
         from monitor_diagnosis_state import DiagnosisState
 
         store = DiagnosisState(
-            client, checkpoint_uri=f"gs://{CLOUD_BUCKET}/{CLOUD_LEDGER_PREFIX}/checkpoints.json",
-            observation_uri=f"gs://{CLOUD_BUCKET}/{CLOUD_OBSERVATION}")
+            client, checkpoint_uri=f"gs://{bucket}/{CLOUD_LEDGER_PREFIX}/checkpoints.json",
+            observation_uri=f"gs://{bucket}/{CLOUD_OBSERVATION}")
     now = now or datetime.now(timezone.utc)
     # Qualification still validates its source first. Normal execution restores
     # pending jobs first; polling one does not depend on a fresh observation.
     if verify_state_only:
         store.observation(now=now)
-    bounds = verify_storage_bounds(client) if verify_state_only else {}
+    bounds = verify_storage_bounds(client, bucket) if verify_state_only else {}
     claim = store.claim("actions/" + env["GITHUB_RUN_ID"] + "/" + env["GITHUB_RUN_ATTEMPT"])
     if claim is None:
         raise Rejected("diagnosis_state_busy")

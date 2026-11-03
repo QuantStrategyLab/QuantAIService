@@ -304,14 +304,14 @@ def test_storage_boundary_requires_both_forbidden_responses_without_body_reads()
     client = mock.Mock()
     client.bucket.return_value.blob.return_value.reload.side_effect = StorageFailure(403)
     client.list_blobs.side_effect = StorageFailure(403)
-    assert caller.verify_storage_bounds(client) == {
+    assert caller.verify_storage_bounds(client, "synthetic-diagnosis-bucket") == {
         "archive_metadata_denied": True, "object_listing_denied": True}
-    client.bucket.assert_called_once_with(caller.CLOUD_BUCKET)
+    client.bucket.assert_called_once_with("synthetic-diagnosis-bucket")
     blob = client.bucket.return_value.blob
     blob.assert_called_once_with("monitor-state/core/current.tar.gz")
     blob.return_value.download_as_bytes.assert_not_called()
     client.list_blobs.assert_called_once_with(
-        caller.CLOUD_BUCKET, max_results=1, fields="kind", timeout=20, retry=None)
+        "synthetic-diagnosis-bucket", max_results=1, fields="kind", timeout=20, retry=None)
 
 
 @pytest.mark.parametrize("code", [401, 404, 429, 500, None])
@@ -319,7 +319,7 @@ def test_storage_boundary_does_not_treat_other_failures_as_denial(code):
     client = mock.Mock()
     client.bucket.return_value.blob.return_value.reload.side_effect = StorageFailure(code)
     with pytest.raises(caller.Rejected, match="storage_boundary_unverified"):
-        caller.verify_storage_bounds(client)
+        caller.verify_storage_bounds(client, "synthetic-diagnosis-bucket")
     client.list_blobs.assert_not_called()
 
 
@@ -330,7 +330,7 @@ def test_storage_boundary_rejects_unexpected_access_without_reading_data(allowed
         client.bucket.return_value.blob.return_value.reload.side_effect = StorageFailure(403)
         client.list_blobs.return_value = iter(())
     with pytest.raises(caller.Rejected, match="storage_access_too_broad"):
-        caller.verify_storage_bounds(client)
+        caller.verify_storage_bounds(client, "synthetic-diagnosis-bucket")
     client.bucket.return_value.blob.return_value.download_as_bytes.assert_not_called()
 
 
@@ -343,7 +343,7 @@ def test_storage_boundary_forces_lazy_listing_request():
         yield
 
     client.list_blobs.return_value = forbidden_page()
-    assert caller.verify_storage_bounds(client)["object_listing_denied"] is True
+    assert caller.verify_storage_bounds(client, "synthetic-diagnosis-bucket")["object_listing_denied"] is True
 
 
 class SavedCloudState:
@@ -400,7 +400,8 @@ class SavedCloudState:
 
 
 def cloud_environment():
-    return {**environment(), "GITHUB_RUN_ID": "123456", "GITHUB_RUN_ATTEMPT": "1"}
+    return {**environment(), "GITHUB_RUN_ID": "123456", "GITHUB_RUN_ATTEMPT": "1",
+            "QUANT_MONITOR_GCS_BUCKET": "synthetic-diagnosis-bucket"}
 
 
 def cloud_run(store, opener, **kwargs):
@@ -656,8 +657,8 @@ def test_cloud_caller_uses_real_shared_json_contract_and_preserves_original_byte
     (original / "2026-10-21.json").write_bytes(b'{ "job_id": null, "extra": {"unknown":true} }\n')
     raw = shared.encode_checkpoints(original)
     state = shared.DiagnosisState(
-        mock.Mock(), checkpoint_uri=f"gs://{caller.CLOUD_BUCKET}/{caller.CLOUD_LEDGER_PREFIX}/checkpoints.json",
-        observation_uri=f"gs://{caller.CLOUD_BUCKET}/{caller.CLOUD_OBSERVATION}")
+        mock.Mock(), checkpoint_uri=f"gs://synthetic-diagnosis-bucket/{caller.CLOUD_LEDGER_PREFIX}/checkpoints.json",
+        observation_uri=f"gs://synthetic-diagnosis-bucket/{caller.CLOUD_OBSERVATION}")
     backend = mock.Mock()
     backend.claim.return_value = 20
     backend.read.side_effect = [(raw, 10), (raw, 11)]
@@ -684,8 +685,8 @@ def test_cloud_caller_uses_real_shared_json_contract_and_preserves_original_byte
 def test_cloud_real_projection_rejects_bad_source_and_releases_claim_without_audit(failure):
     shared = importlib.import_module("monitor_diagnosis_state")
     state = shared.DiagnosisState(
-        mock.Mock(), checkpoint_uri=f"gs://{caller.CLOUD_BUCKET}/{caller.CLOUD_LEDGER_PREFIX}/checkpoints.json",
-        observation_uri=f"gs://{caller.CLOUD_BUCKET}/{caller.CLOUD_OBSERVATION}")
+        mock.Mock(), checkpoint_uri=f"gs://synthetic-diagnosis-bucket/{caller.CLOUD_LEDGER_PREFIX}/checkpoints.json",
+        observation_uri=f"gs://synthetic-diagnosis-bucket/{caller.CLOUD_OBSERVATION}")
     state.store = mock.Mock()
     state.store.claim.return_value = 20
     state.store.read.return_value = (json.dumps({"schema_version": shared.CHECKPOINT_SCHEMA, "files": {}}).encode(), 10)
@@ -889,3 +890,95 @@ def test_native_synthetic_verification_rejects_reruns_before_http_or_state(tmp_p
     with pytest.raises(verifier.caller.Rejected, match='invalid_native_verification_identity'):
         verifier.verify(root, env={**native_environment(), 'GITHUB_RUN_ATTEMPT': '2'}, opener=opener, now=NOW)
     assert not opener.calls and not root.exists()
+
+
+@pytest.fixture
+def cloud_sdk(monkeypatch):
+    modules = {name: types.ModuleType(name) for name in (
+        "google", "google.auth", "google.auth.transport", "google.auth.transport.requests",
+        "google.cloud", "google.cloud.storage")}
+    modules["google"].auth = modules["google.auth"]
+    modules["google"].cloud = modules["google.cloud"]
+    modules["google.auth"].default = mock.Mock()
+    modules["google.auth.transport.requests"].Request = mock.Mock()
+    modules["google.cloud"].storage = modules["google.cloud.storage"]
+    modules["google.cloud.storage"].Client = mock.Mock()
+    for name, module in modules.items():
+        monkeypatch.setitem(sys.modules, name, module)
+    return modules["google.auth"].default, modules["google.cloud.storage"].Client
+
+
+@pytest.mark.parametrize("project", [None, "", "UPPERCASE", "short", "example-project-123/other"])
+def test_cloud_missing_or_invalid_project_blocks_before_credentials(project, cloud_sdk):
+    env = cloud_environment()
+    if project is not None:
+        env["GOOGLE_CLOUD_PROJECT"] = project
+    credentials, client = cloud_sdk
+    with pytest.raises(caller.Rejected, match="^invalid_cloud_project$"):
+        caller.diagnose_cloud(env=env)
+    credentials.assert_not_called()
+    client.assert_not_called()
+
+
+def test_cloud_client_uses_configured_project(cloud_sdk):
+    credentials = mock.Mock()
+    default, client = cloud_sdk
+    default.return_value = credentials, "example-ambient-456"
+    client.side_effect = RuntimeError("synthetic stop")
+    with pytest.raises(RuntimeError, match="synthetic stop"):
+        caller.diagnose_cloud(env={**cloud_environment(), "GOOGLE_CLOUD_PROJECT": "example-project-123"})
+    client.assert_called_once_with(project="example-project-123", credentials=credentials)
+
+
+@pytest.mark.parametrize("bucket", [None, "", "ab", "A-bucket", " bucket", "bucket\n",
+                                    "gs://synthetic-bucket", "synthetic-bucket/path",
+                                    "synthetic.bucket", "a" * 64, "goog-bucket", 42])
+def test_cloud_bucket_rejected_before_credentials_or_state(bucket, cloud_sdk):
+    env = cloud_environment()
+    env.pop("QUANT_MONITOR_GCS_BUCKET")
+    env["GOOGLE_CLOUD_PROJECT"] = "synthetic-project-123"
+    if bucket is not None:
+        env["QUANT_MONITOR_GCS_BUCKET"] = bucket
+    default, client = cloud_sdk
+    store = mock.Mock()
+    with pytest.raises(caller.Rejected, match="^invalid_cloud_bucket$"):
+        caller.diagnose_cloud(env=env, store=store)
+    default.assert_not_called()
+    client.assert_not_called()
+    assert store.mock_calls == []
+
+
+def test_configured_bucket_binds_state_and_boundary_probes(monkeypatch):
+    env = {**cloud_environment(), "QUANT_MONITOR_GCS_BUCKET": "synthetic-alternate-bucket"}
+    client = mock.Mock()
+    store = mock.Mock()
+    store.observation.side_effect = RuntimeError("synthetic stop before state mutations")
+    import monitor_diagnosis_state
+    factory = mock.Mock(return_value=store)
+    monkeypatch.setattr(monitor_diagnosis_state, "DiagnosisState", factory)
+    with pytest.raises(RuntimeError, match="synthetic stop"):
+        caller.diagnose_cloud(env=env, client=client, verify_state_only=True)
+    factory.assert_called_once_with(
+        client, checkpoint_uri="gs://synthetic-alternate-bucket/monitor-state/diagnosis-actions/checkpoints.json",
+        observation_uri="gs://synthetic-alternate-bucket/monitor-state/core/diagnosis-observation.json")
+    client.bucket.assert_not_called()
+
+
+def test_configured_bucket_is_not_retained_between_invocations():
+    assert caller.configured_bucket({"QUANT_MONITOR_GCS_BUCKET": "synthetic-first-bucket"}) == "synthetic-first-bucket"
+    assert caller.configured_bucket({"QUANT_MONITOR_GCS_BUCKET": "synthetic-next-bucket"}) == "synthetic-next-bucket"
+    with pytest.raises(caller.Rejected, match="^invalid_cloud_bucket$"):
+        caller.configured_bucket({})
+
+
+@pytest.mark.parametrize("bucket", ["", "synthetic-private-bucket/path"])
+def test_invalid_bucket_cli_reports_only_fixed_reason(tmp_path, monkeypatch, capsys, bucket):
+    monkeypatch.setattr(caller.os, "environ", {
+        **cloud_environment(), "QUANT_MONITOR_GCS_BUCKET": bucket})
+    receipt = tmp_path / "receipt.json"
+    assert caller.main(["--cloud", "--receipt", str(receipt)]) == 1
+    expected = {"status": "unavailable", "reason": "invalid_cloud_bucket"}
+    assert json.loads(receipt.read_text()) == expected
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == expected
+    assert not captured.err

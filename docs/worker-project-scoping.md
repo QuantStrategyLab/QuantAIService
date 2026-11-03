@@ -94,7 +94,7 @@ Safe logging from #31 remains enabled; owner scopes and repository lists are not
 
 ## Quant service configuration
 
-Set the top-level `owner` explicitly for this deployment; there is no compiled-in organization name. Every admitted project and worker owner must match it. Legacy production configurations need this field before running 2.0.9. Validate a private candidate with `quant-ai-service --check-config --config PATH` before adoption. The runtime is owned by this repository and has no dependency on PersonalAIService.
+Set the top-level `owner` explicitly for this deployment; there is no compiled-in organization name. Every admitted project and worker owner must match it. Legacy production configurations need this field before running 2.0.9. Validate a private candidate with `quant-ai-service --check-config --config PATH` before adoption. The runtime is owned by this repository and has no dependency on another service repository.
 
 Version 2.0.13 also provides `--check-worker-tools --worker-identity ID` with one
 `--expect-project OWNER/REPO` per expected policy. This read-only owner-worker

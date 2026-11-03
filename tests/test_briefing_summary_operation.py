@@ -197,7 +197,7 @@ def test_cancel_requested_then_completed_is_rejected_by_events(rig):
     assert operation.execute_summary(service.make_context(state), "synthetic counts")["status"] != "available"
 
 
-@pytest.mark.parametrize("field,value", [("id", "wrong"), ("owner", "Pigbibi/PersonalAIService"),
+@pytest.mark.parametrize("field,value", [("id", "wrong"), ("owner", "example-org/example-private-repo"),
     ("provider", "dot"), ("revision", 2), ("worker", "wrong"), ("attempt", "wrong"),
     ("output", {"summary": ""}), ("output", {"extra": "bad"}),
     ("request", {}), ("handle", {"model": MODEL, "model_verification": "unavailable"})])
