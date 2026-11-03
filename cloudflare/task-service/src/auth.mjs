@@ -246,6 +246,7 @@ export function createAuthApplication(config, { taskHandler } = {}) {
       const url = new URL(request.url);
       if (url.origin !== config.origin) return deny('unexpected_origin', 421);
       try {
+        if (url.pathname === '/healthz' && request.method === 'GET') return Response.json({status:'ok'}, {headers:{'Cache-Control':'no-store'}});
         if (url.pathname === '/authorize') return await authorize(request, env);
         if (url.pathname === '/callback' && request.method==='GET') return callback(request,env);
         if (url.pathname === '/v1/tasks' || url.pathname.startsWith('/v1/tasks/')) {

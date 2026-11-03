@@ -112,3 +112,7 @@ Dot agent 在 worker 领取前仅有持久化事件，没有正在执行的工�
 ### Grok Bot 与 Claude Duet
 
 新增名称、配置和准入步骤见 [agent providers](../../docs/agent-providers.md)。`grokbot` 在 provider 示例中为 `enabled: true`，仍需有效 endpoint、Secret 绑定和完整项目/worker 准入；`claudeduet` 默认关闭，尚无已核验的触发协议，误设启用也会拒绝。Claude Duet 不复用 Claude Code Routine token。
+
+## GitHub Actions 部署
+
+手动部署、production 审批和私有配置的准备步骤见[部署说明](../../docs/deploy.md)。
