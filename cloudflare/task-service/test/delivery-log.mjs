@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
-import {callbackHost, classifyDelivery, deliveryLog, shortSubscriptionId} from '../src/delivery-log.mjs';
+import {callbackHost, classifyDelivery, deliveryLog, emitEventLog, shortSubscriptionId} from '../src/delivery-log.mjs';
 
 const fullId = 'sub_' + 'ab'.repeat(32);
 const taskId = '11111111-1111-4111-8111-111111111111';
@@ -61,6 +61,26 @@ assert.equal(classifyDelivery(null, 410), 'client_error');
 assert.equal(classifyDelivery(null, 429), 'rate_limited');
 assert.equal(classifyDelivery(null, 503), 'server_error');
 assert.equal(classifyDelivery(null, 0), 'network');
+
+const empty = deliveryLog({
+  message: 'enqueue_empty',
+  event: 'task.requested',
+  task_id: taskId,
+  matching_subscriptions: 1,
+});
+assert.equal(JSON.parse(empty).message, 'enqueue_empty');
+assert.equal(JSON.parse(empty).matching_subscriptions, 1);
+
+const warned = [];
+const originalWarn = console.warn;
+console.warn = (...args) => warned.push(args.join(' '));
+try {
+  emitEventLog({message: 'enqueue_empty', event: 'task.requested', task_id: taskId, matching_subscriptions: 2});
+} finally {
+  console.warn = originalWarn;
+}
+assert.equal(warned.length, 1);
+assert.equal(JSON.parse(warned[0]).message, 'enqueue_empty');
 
 const config = JSON.parse(await readFile('wrangler.example.jsonc', 'utf8'));
 assert.equal(config.observability.enabled, true);

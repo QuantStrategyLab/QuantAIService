@@ -116,7 +116,7 @@ export class TaskService extends WorkerEntrypoint {
       if(!obj(params))bad();if(Object.hasOwn(params,'_meta')){if(!obj(params._meta))bad();params={...params};delete params._meta;paramsNode=objectNode(paramsNode.entries.filter(([k])=>k!=='_meta'));}
       let result;
       switch(message.method){
-        case 'initialize':if(typeof params.protocolVersion!=='string'||!obj(params.capabilities)||!obj(params.clientInfo))bad();result=nodeFrom({protocolVersion:['2025-03-26','2025-06-18','2025-11-25'].includes(params.protocolVersion)?params.protocolVersion:'2025-11-25',capabilities:{tools:{}},serverInfo:{name:c.organization==='pigbibi'?'personal-ai-service':'quant-ai-service',version:'2.0.14-cloudflare.1'}});break;
+        case 'initialize':if(typeof params.protocolVersion!=='string'||!obj(params.capabilities)||!obj(params.clientInfo))bad();result=nodeFrom({protocolVersion:['2025-03-26','2025-06-18','2025-11-25'].includes(params.protocolVersion)?params.protocolVersion:'2025-11-25',capabilities:{tools:{}},serverInfo:{name:c.organization==='pigbibi'?'personal-ai-service':'quant-ai-service',version:'2.0.14-cloudflare.2'}});break;
         case 'ping':result=nodeFrom({});break;
         case 'server/discover':result=nodeFrom({resultType:'complete',supportedVersions:['2026-07-28'],capabilities:{tools:{},...(c.provider==='dot'?{events:{}}:{})}});break;
         // Discovery describes the Dot capability; the token must still authorize its use.

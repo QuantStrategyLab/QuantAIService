@@ -1,7 +1,7 @@
 // Masked delivery diagnostics. Callers pass already-split fields; this module
 // drops everything else and refuses to emit a line that still carries a URL,
 // secret, signature or account principal.
-const MESSAGES = new Set(['event_delivery', 'subscription_subscribed', 'subscription_refreshed', 'subscription_expired', 'event_unmatched', 'subscription_verification_failed']);
+const MESSAGES = new Set(['event_delivery', 'subscription_subscribed', 'subscription_refreshed', 'subscription_expired', 'event_unmatched', 'enqueue_empty', 'subscription_verification_failed']);
 const CLASSES = new Set(['timeout', 'network', 'client_error', 'rate_limited', 'server_error', 'challenge_failed']);
 const HOSTS = new Set(['redacted-host', 'invalid-host']);
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -57,6 +57,10 @@ export function deliveryLog(fields) {
 
 export function emitEventLog(fields) {
   const line = deliveryLog(fields);
+  if (fields && typeof fields === 'object' && fields.message === 'enqueue_empty') {
+    console.warn(line);
+    return line;
+  }
   const failure = Boolean(fields && typeof fields === 'object' && (fields.error_class || fields.message === 'event_unmatched' || fields.message === 'subscription_expired' || fields.message === 'subscription_verification_failed'));
   (failure ? console.error : console.log)(line);
   return line;
