@@ -1,3 +1,4 @@
+import {initializeTaskMetadata,listTaskMetadata,taskMetadataStats} from './task-metadata.mjs';
 import {imageMaterials} from './image-materials.mjs';
 import {workerContext} from './projects.mjs';
 import {callbackURL,signingKey,signedHeaders} from './webhooks.mjs';
@@ -96,6 +97,7 @@ export class TaskStore extends DurableObject {
         revision INTEGER NOT NULL, created REAL NOT NULL,
         PRIMARY KEY(task_id, idem));
     `);
+    initializeTaskMetadata(this.sql);
     // Local M1 stores may predate canonical report preservation. Never invent a
     // report body for old rows: the lost numeric lexemes cannot be recovered.
     if (!this.sql.exec("PRAGMA table_info(tasks)").toArray().some((column) => column.name === "report_json")) {
@@ -145,11 +147,12 @@ export class TaskStore extends DurableObject {
     for (const name of ["request", "handle", "output", "artifacts"]) {
       result[name] = result[name] === null ? null : JSON.parse(result[name]);
     }
-    for (const name of ["idem", "digest", "cancel_sent", "report_digest", "report_json"]) delete result[name];
+    for (const name of ["idem", "digest", "cancel_sent", "report_digest", "report_json", "claimed_at", "completed_at"]) delete result[name];
     return { ...result, result_kind: "advisory" };
   }
 
   #state(taskId, status, fields = {}, recordedAt = now()) {
+    if (TERMINAL.has(status)) fields = {...fields, completed_at: recordedAt};
     const names = Object.keys(fields);
     this.sql.exec(`UPDATE tasks SET status=?,updated=?${names.map((name) => `,${name}=?`).join("")} WHERE id=?`,
       status, recordedAt, ...Object.values(fields), taskId);
@@ -236,6 +239,16 @@ export class TaskStore extends DurableObject {
     this.#policy(row.owner);return row.owner;
   }
 
+  listMetadata(owner, query) {
+    this.#policy(owner);
+    return listTaskMetadata(this.sql, owner, query);
+  }
+
+  metadataStats(owner, query) {
+    this.#policy(owner);
+    return taskMetadataStats(this.sql, owner, query, now());
+  }
+
   get(owner, taskId) {
     return this.#record(this.#row(owner, taskId));
   }
@@ -275,7 +288,7 @@ export class TaskStore extends DurableObject {
       if (!row.attempt) {
         if (!["submitting", "running", "outcome_unknown"].includes(row.status)) conflict("task cannot be claimed in its current state");
         if (now() >= row.deadline) conflict("task deadline passed");
-        this.#state(taskId, "running", { worker, attempt: attemptId, error: null });
+        this.#state(taskId, "running", { worker, attempt: attemptId, error: null, claimed_at: now() });
       }
       return { ...this.get(owner, taskId), attempt_id: attemptId, messages: this.messages(owner, taskId) };
     });

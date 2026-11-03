@@ -116,7 +116,7 @@ try{
   const metadata=await request('/.well-known/oauth-protected-resource/mcp');assert.equal(metadata.status,200);assert.deepEqual((await metadata.json()).scopes_supported,advertised);
   const mcp=await request('/mcp',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});assert.equal(mcp.status,401);assert.ok(mcp.headers.get('WWW-Authenticate').includes('scope="'+advertised.join(' ')+'"'));
   const restMetadata=await request('/.well-known/oauth-protected-resource/v1/tasks');assert.equal(restMetadata.status,200);assert.deepEqual((await restMetadata.json()).scopes_supported,['tasks:read']);
-  for(const [method,scope] of [['GET','tasks:read'],['POST','tasks:submit']]){const r=await request('/v1/tasks',{method});assert.equal(r.status,401);assert.ok(r.headers.get('WWW-Authenticate').includes('scope="'+scope+'"'));}
+  for(const [method,path,scope] of [['GET','/v1/tasks','tasks:list'],['GET','/v1/tasks/stats','tasks:list'],['GET','/v1/tasks/synthetic-task','tasks:read'],['POST','/v1/tasks','tasks:submit']]){const r=await request(path,{method});assert.equal(r.status,401);assert.ok(r.headers.get('WWW-Authenticate').includes('scope="'+scope+'"'));}
  });
  await test('work-only grant discovers event capability and receives scope challenges without side effects',async()=>{
   const limited=await mint('dot',origin+'/mcp',['tasks:work'],ids.dot),before=outbound;
