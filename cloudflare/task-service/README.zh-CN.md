@@ -71,9 +71,11 @@ REST 机器入口中，`tasks:read` 允许 `GET /v1/tasks/lookup`、`GET /v1/tas
 
 生产验收还需核定一个实际原调用程序、其有效原 grant/audience、准确服务端映射及受限配置。由原程序请求真实 GitHub token，提交有限任务后用同一幂等键和任务 ID 完成查询及原客户端消费；单独的 events 合成提交脚本不等于业务调用闭环。离线测试不替代该闭环。
 
+OAuth access token 默认有效期为 3600 秒。客户端应在有效期内复用 token，并在到期前通过 refresh token 换取新 token；校验和复用不会写入 OAuth KV，也不会延长已签发 token 的到期时间。每次刷新仍保留 provider 原有的 access/refresh token 轮换与两次 KV 写入。更长有效期意味着泄露的访问令牌 可能被使用更久；audience、scope、准入和撤销校验继续生效。
+
 ## 本地验证与部署
 
-运行 `npm ci`、`npm test`、`npm run build`。测试在本地 workerd 中分别验证 Quant、Pigbibi，以及跨组织、错误 owner 拒绝；GitHub、webhook 与 Gemini HTTP 使用合成替身，包含真实 SQLite 状态、输出验证、跨组织、未知回执与不重发回归；不证明线上 Dot 或生产 API 完成。
+运行 `npm ci`、`npm test`、`npm run build`。`npm test` 包含本地 OAuth 有效期回归，验证 3600 秒签发、到期前零写入复用、刷新轮换、过期拒绝、错误 audience 拒绝和撤销。测试在本地 workerd 中分别验证 Quant、Pigbibi，以及跨组织、错误 owner 拒绝；GitHub、webhook 与 Gemini HTTP 使用合成替身，包含真实 SQLite 状态、输出验证、跨组织、未知回执与不重发回归；不证明线上 Dot 或生产 API 完成。
 
 机器入口另运行 `node test/workload.mjs`：本地生成临时 RSA 密钥、模拟固定 JWKS，验证两组织本地 SQLite 提交/读取/lookup、消息幂等与 revision、事件游标、read/submit 分权、错误身份和越权拒绝；不请求外网 JWT、不调用模型，也不把测试签发能力放进生产 bundle。
 
