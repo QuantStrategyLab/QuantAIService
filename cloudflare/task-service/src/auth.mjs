@@ -124,6 +124,15 @@ export function createAuthApplication(config, { taskHandler } = {}) {
       item.ownerId === props.ownerId && item.clientIds.includes(ctx.auth.clientId) && (provider===null || item.providers.includes(provider)) &&
       ctx.auth.scope.every((scope) => item.scopes.includes(scope)));
     if (!admission) return deny('admission_required');
+    // Obtain the stable grant identity from the provider, never tool arguments.
+    let grantId;
+    if (provider === 'dot') {
+      let token;
+      try { token = await authorizationServer.getOAuthApi(env).unwrapToken(ctx.auth.token); }
+      catch { return deny('grant_unavailable'); }
+      if (!token || token.userId !== ctx.auth.userId || token.grant.clientId !== ctx.auth.clientId || !token.grantId) return deny('grant_required');
+      grantId = token.grantId;
+    }
     const identity = Object.freeze({
       organization: config.organization,
       projectId: config.projectId,
@@ -134,6 +143,7 @@ export function createAuthApplication(config, { taskHandler } = {}) {
       scopes: Object.freeze([...ctx.auth.scope]),
       resource: ctx.auth.audience,
       clientId: ctx.auth.clientId,
+      ...(grantId ? {grantId} : {}),
     });
     return downstream(request, identity, env);
   }

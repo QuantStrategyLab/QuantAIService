@@ -47,8 +47,22 @@ default project, including a `projects` list containing just one entry.
 Events keep one exact `arguments.project` per subscription. One application may
 own several project subscriptions; it is not one wildcard subscription. Delivery
 rechecks the current list and provider. Subscription management checks both
-identity and selected project. Existing TTL, signing, callback verification and
-delivery limits are unchanged.
+identity and selected project. Saved OAuth subscriptions bind to their original
+grant. Registration, task admission, status, enqueue and each delivery/retry
+read current grant authority; missing, unreadable, revoked, expired or mismatched
+grants are inactive. Legacy subscriptions without a grant identity require an
+explicit new subscription. A replacement grant never inherits pending deliveries.
+Checks follow the OAuth KV visibility contract; already-started requests cannot
+be recalled, and global instantaneous revocation is not guaranteed.
+
+For Worker `events/subscribe`, omitted `ttlMs` grants one hour, explicit `null`
+grants no expiration, and positive safe integer milliseconds grant the requested
+representable deadline, including durations below one second. The finite clock
+starts after callback verification and is checked again immediately before send.
+Only explicit subscribe renews it. Finite and unlimited subscriptions share four
+active slots per principal/project; restoring a deleted or expired ID needs a
+free slot, while refreshing a live ID uses its existing slot. Callback signing
+and verification remain unchanged.
 
 Grok workers may use the same list with a distinct signed `azp`, `provider: grok`
 and `tasks:read tasks:work`. A Grok routine webhook is only a wake-up trigger; its

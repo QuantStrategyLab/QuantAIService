@@ -99,7 +99,9 @@ export class TaskService extends WorkerEntrypoint {
     const projects=workerProjects(this.env,c.identity);
     const scoped=tool=>projects.length<2?tool:{...tool,inputSchema:{...tool.inputSchema,properties:{...tool.inputSchema.properties,project:{type:'string',enum:projects}}}};
     if(c.provider!=='dot')return TOOLS.map(scoped);
-    return [...TOOLS,...['get_event_subscription','delete_event_subscription'].map(name=>({name,description:name==='get_event_subscription'?'Read owned subscription lifecycle.':'Delete owned subscription and stop delivery.',inputSchema:schema({subscription_id:{type:'string',minLength:1,maxLength:200}}),securitySchemes:securitySchemes(EVENT_SCOPES)}))].map(scoped);
+    const subscriptionId=schema({subscription_id:{type:'string',minLength:1,maxLength:200}});
+    const eventTools=[['get_event_subscription','Read an owned subscription, including callback host and last delivery.',subscriptionId],['delete_event_subscription','Delete an owned subscription and stop delivery.',subscriptionId],['list_event_subscriptions','List the caller subscriptions for the selected project. Callback host and last delivery only.',schema({})]];
+    return [...TOOLS,...eventTools.map(([name,description,inputSchema])=>({name,description,inputSchema,securitySchemes:securitySchemes(EVENT_SCOPES)}))].map(scoped);
   }
   async mcp(request,c){
     const root=parseJson(await request.text()),message=valueOf(root);
@@ -114,7 +116,7 @@ export class TaskService extends WorkerEntrypoint {
       if(!obj(params))bad();if(Object.hasOwn(params,'_meta')){if(!obj(params._meta))bad();params={...params};delete params._meta;paramsNode=objectNode(paramsNode.entries.filter(([k])=>k!=='_meta'));}
       let result;
       switch(message.method){
-        case 'initialize':if(typeof params.protocolVersion!=='string'||!obj(params.capabilities)||!obj(params.clientInfo))bad();result=nodeFrom({protocolVersion:['2025-03-26','2025-06-18','2025-11-25'].includes(params.protocolVersion)?params.protocolVersion:'2025-11-25',capabilities:{tools:{}},serverInfo:{name:c.organization==='pigbibi'?'personal-ai-service':'quant-ai-service',version:'2.0.14-cloudflare.1'}});break;
+        case 'initialize':if(typeof params.protocolVersion!=='string'||!obj(params.capabilities)||!obj(params.clientInfo))bad();result=nodeFrom({protocolVersion:['2025-03-26','2025-06-18','2025-11-25'].includes(params.protocolVersion)?params.protocolVersion:'2025-11-25',capabilities:{tools:{}},serverInfo:{name:c.organization==='pigbibi'?'personal-ai-service':'quant-ai-service',version:'2.0.14-cloudflare.2'}});break;
         case 'ping':result=nodeFrom({});break;
         case 'server/discover':result=nodeFrom({resultType:'complete',supportedVersions:['2026-07-28'],capabilities:{tools:{},...(c.provider==='dot'?{events:{}}:{})}});break;
         // Discovery describes the Dot capability; the token must still authorize its use.
@@ -130,12 +132,12 @@ export class TaskService extends WorkerEntrypoint {
           const tool=this.tools(c).find(t=>t.name===params.name);if(!tool)bad();await check(tool.inputSchema,params.arguments);
           const a=params.arguments;
           c=this.context(c.identity,request,a.project??c.project);
-          if(['get_event_subscription','delete_event_subscription'].includes(params.name)){
+          if(['get_event_subscription','delete_event_subscription','list_event_subscriptions'].includes(params.name)){
             if(!c.scopes.includes('events:subscribe')){
               result=nodeFrom({content:[{type:'text',text:'Authorize event subscription access to continue.'}],isError:true,_meta:{'mcp/www_authenticate':[eventScopeChallenge(c).headers.get('WWW-Authenticate')]}});break;
             }
             const store=this.store();
-            const value=params.name==='get_event_subscription'?await store.subscriptionStatus(c.project,c.worker,a.subscription_id):await store.unsubscribe(c.project,c.worker,a.subscription_id);
+            const value=params.name==='list_event_subscriptions'?await store.listSubscriptions(c.project,c.worker):params.name==='get_event_subscription'?await store.subscriptionStatus(c.project,c.worker,a.subscription_id):await store.unsubscribe(c.project,c.worker,a.subscription_id);
             result=nodeFrom({content:[{type:'text',text:JSON.stringify(value)}],structuredContent:value,isError:false});break;
           }
           const store=this.store();

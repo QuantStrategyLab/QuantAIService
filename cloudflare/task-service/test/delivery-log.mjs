@@ -1,0 +1,95 @@
+import assert from 'node:assert/strict';
+import {readFile} from 'node:fs/promises';
+import {callbackHost, classifyDelivery, deliveryLog, emitEventLog, shortSubscriptionId} from '../src/delivery-log.mjs';
+
+const fullId = 'sub_' + 'ab'.repeat(32);
+const taskId = '11111111-1111-4111-8111-111111111111';
+const secretUrl = 'https://user:keep-out@delivery-probe.example:8443/hooks/v1?access=synthetic-marker#frag';
+
+for (const host of ['123456789.hooks.example.test', 'synthetic-token-abcdef.hooks.example.test']) {
+  assert.equal(callbackHost('https://' + host + '/hook'), 'redacted-host');
+  const direct = deliveryLog({message: 'event_delivery', callback_host: host});
+  assert.equal(JSON.parse(direct).message, 'event_delivery_redacted');
+  assert.ok(!direct.includes(host));
+}
+
+assert.equal(callbackHost(secretUrl), 'redacted-host');
+assert.equal(callbackHost('not a url'), 'invalid-host');
+assert.equal(shortSubscriptionId(fullId), 'sub_abababababab');
+assert.equal(shortSubscriptionId('github-10001:client'), 'sub_unknown');
+
+const line = deliveryLog({
+  message: 'event_delivery',
+  subscription: shortSubscriptionId(fullId),
+  callback_host: callbackHost(secretUrl),
+  event: 'task.requested',
+  task_id: taskId,
+  attempt: 2,
+  http_status: 410,
+  error_class: 'client_error',
+  latency_ms: 18,
+  url: secretUrl,
+  secret: 'whsec_synthetic',
+  principal: 'github-10001:synthetic-client',
+  signature: 'v1,aaaa',
+});
+const parsed = JSON.parse(line);
+assert.equal(parsed.subscription, 'sub_abababababab');
+assert.equal(parsed.callback_host, 'redacted-host');
+assert.equal(parsed.http_status, 410);
+assert.equal(parsed.error_class, 'client_error');
+assert.equal(parsed.attempt, 2);
+assert.ok(!line.includes(fullId.slice(16)));
+assert.ok(!line.includes('hooks'));
+assert.ok(!line.includes('synthetic-marker'));
+assert.ok(!line.includes('keep-out'));
+assert.ok(!line.includes('whsec_'));
+assert.ok(!line.includes('github-'));
+assert.ok(!line.includes('webhook-signature'));
+assert.ok(!line.includes('v1,'));
+
+const leaked = JSON.parse(deliveryLog({message: 'event_delivery', callback_host: secretUrl, event: 'task.requested'}));
+assert.equal(leaked.message, 'event_delivery_redacted');
+assert.ok(!JSON.stringify(leaked).includes('synthetic-marker'));
+assert.ok(!JSON.stringify(leaked).includes('whsec_'));
+
+assert.equal(classifyDelivery(Object.assign(new Error(secretUrl), {name: 'TimeoutError'}), 0), 'timeout');
+assert.equal(classifyDelivery(Object.assign(new Error(secretUrl), {name: 'AbortError'}), 0), 'timeout');
+assert.equal(classifyDelivery(Object.assign(new Error(secretUrl), {name: 'TypeError'}), 0), 'network');
+assert.equal(classifyDelivery(null, 204), null);
+assert.equal(classifyDelivery(null, 410), 'client_error');
+assert.equal(classifyDelivery(null, 429), 'rate_limited');
+assert.equal(classifyDelivery(null, 503), 'server_error');
+assert.equal(classifyDelivery(null, 0), 'network');
+
+const empty = deliveryLog({
+  message: 'enqueue_empty',
+  event: 'task.requested',
+  task_id: taskId,
+  matching_subscriptions: 1,
+});
+assert.equal(JSON.parse(empty).message, 'enqueue_empty');
+assert.equal(JSON.parse(empty).matching_subscriptions, 1);
+
+const warned = [];
+const originalWarn = console.warn;
+console.warn = (...args) => warned.push(args.join(' '));
+try {
+  emitEventLog({message: 'enqueue_empty', event: 'task.requested', task_id: taskId, matching_subscriptions: 2});
+} finally {
+  console.warn = originalWarn;
+}
+assert.equal(warned.length, 1);
+assert.equal(JSON.parse(warned[0]).message, 'enqueue_empty');
+
+const config = JSON.parse(await readFile('wrangler.example.jsonc', 'utf8'));
+assert.equal(config.observability.enabled, true);
+assert.equal(config.observability.logs.enabled, true);
+assert.equal(config.observability.logs.head_sampling_rate, 1);
+assert.equal(config.observability.logs.invocation_logs, false);
+assert.equal(config.observability.traces, undefined);
+const raw = await readFile('wrangler.example.jsonc', 'utf8');
+assert.ok(!raw.includes('whsec_'));
+assert.ok(!raw.includes('github-'));
+
+console.log('PASS delivery log redaction and workers log config');
