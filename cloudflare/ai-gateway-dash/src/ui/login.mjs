@@ -1,15 +1,9 @@
-/** Login page: GitHub OAuth 2.0 only.
-
-  The only action is a link to the existing `/login` OAuth start route. There is
-  no project selector, token field, password, email or SSO input. The page
-  renders one of nine states from the query contract:
-
-    ?state=idle|redirecting|verifying|denied|cancel|error|expired|signedout|unavailable
-
-  An explicit but unknown state fails closed to `error`. Without `state`, the
-  existing callback redirect `?error=` is classified by `classifyLoginError`.
-  Query values are never reflected into the document; the state is reduced to a
-  fixed enum and the correlation references are synthetic `...-DEMO` values.
+/** Login uses the existing /login route and free-text callback error contract.
+ * The server emits no progress, sign-out confirmation or availability signal.
+ * Ignore ?state= (including the nine design states); it cannot attest to server
+ * state. Error-query notices are explicitly unverified link hints, never proof
+ * of membership, session revocation or completed steps. Only a local click can
+ * set the transient busy button; pageshow clears it on return.
  */
 
 import { LOGIN_LOCALES } from "./login-locales.mjs";
@@ -19,23 +13,14 @@ import { BOOT_SCRIPT } from "./shared.mjs";
 
 export const LOGIN_STATES = {
   idle: { tone: null, btn: "go", steps: ["na", "na", "na"] },
-  redirecting: { tone: "info", btn: "busy", steps: ["run", "wait", "wait"] },
-  verifying: { tone: "info", btn: "verify", steps: ["done", "run", "wait"] },
-  denied: { tone: "bad", btn: "retry", steps: ["done", "fail", "na"], ref: "AUTH-DENIED · 7F3A-DEMO" },
-  cancel: { tone: "warn", btn: "go", steps: ["stop", "na", "na"] },
-  error: { tone: "bad", btn: "retry", steps: ["fail", "na", "na"], ref: "AUTH-CALLBACK · 2C91-DEMO" },
+  denied: { tone: "bad", btn: "retry", steps: ["na", "na", "na"] },
+  cancel: { tone: "warn", btn: "go", steps: ["na", "na", "na"] },
+  error: { tone: "bad", btn: "retry", steps: ["na", "na", "na"] },
   expired: { tone: "warn", btn: "go", steps: ["na", "na", "na"] },
-  signedout: { tone: "info", btn: "go", steps: ["na", "na", "na"] },
-  unavailable: { tone: "unk", btn: "off", steps: ["na", "na", "na"], ref: "AUTH-CONFIG · 0000-DEMO" },
 };
 
 export function resolveLoginState(search) {
   const params = new URLSearchParams(String(search || ""));
-  const explicit = params.get("state");
-  if (explicit !== null) {
-    const candidate = explicit.trim();
-    return Object.prototype.hasOwnProperty.call(LOGIN_STATES, candidate) ? candidate : "error";
-  }
   const kind = classifyLoginError(params.get("error"));
   return kind === "none" ? "idle" : kind;
 }
@@ -112,7 +97,7 @@ export function loginHTML() {
       <h1 data-i18n="l_title">${tx("l_title")}</h1>
       <p class="sub" data-i18n="l_desc">${tx("l_desc")}</p>
 
-      <div class="note" id="note" role="status" aria-live="polite"><b id="note-t"></b><span id="note-d"></span><span class="ref" id="note-r"></span></div>
+      <div class="note" id="note" role="status" aria-live="polite"><b id="note-t"></b><span id="note-d"></span></div>
 
       <a class="gh" id="gh" href="/login">
         <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
@@ -166,13 +151,11 @@ function renderState(t){
   note.setAttribute("aria-live","polite");
   setText(document.getElementById("note-t"),"");
   setText(document.getElementById("note-d"),"");
-  setText(document.getElementById("note-r"),"");
   if(spec.tone){
     note.className="note on "+spec.tone;
     if(spec.tone==="bad"){note.setAttribute("role","alert");note.setAttribute("aria-live","assertive");}
     setText(document.getElementById("note-t"),t["n_"+state+"_t"]);
-    setText(document.getElementById("note-d"),t["n_"+state]);
-    if(spec.ref)setText(document.getElementById("note-r"),t.ref+" "+spec.ref);
+    setText(document.getElementById("note-d"),t.n_source+" "+t["n_"+state]);
   }
   var gh=document.getElementById("gh");
   gh.removeAttribute("aria-busy");

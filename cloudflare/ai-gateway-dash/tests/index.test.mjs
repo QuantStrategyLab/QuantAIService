@@ -146,7 +146,6 @@ test("codex quota severity is based on low remaining quota", () => {
   assert.equal(codexRemainingClass({ remaining_percent: 8 }), "err");
 });
 
-
 test("human audit display trusts backend decision fields", () => {
   assert.equal(requiresHumanAudit({ human_review_required: false, risk: "critical" }), false);
   assert.equal(requiresHumanAudit({ human_review_required: true, risk: "low" }), true);
@@ -420,7 +419,6 @@ test("dashboard callback requires dedicated session signing secret", async (t) =
   assert.doesNotMatch(callback.headers.get("set-cookie") || "", /dash_session=/);
 });
 
-
 test("sessions issued before KV binding require re-login", async (t) => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (input) => {
@@ -614,53 +612,28 @@ test("login page exposes GitHub OAuth as the only sign-in action", () => {
   assert.match(page, /setAttribute\("role","alert"\)/);
   assert.match(page, /\/v1\/ai\/\*/);
   assert.doesNotMatch(page, /\/v2\/ai/);
-  assert.match(page, /<code>read:user<\/code>/);
+  assert.doesNotMatch(page, /read:user/);
   assert.match(page, /<code>read:org<\/code>/);
   assert.match(page, /<code>dashboard:read<\/code>/);
 });
 
-test("login states cover every approved state with fake correlation ids", () => {
-  assert.deepEqual(Object.keys(LOGIN_STATES), [
-    "idle", "redirecting", "verifying", "denied", "cancel", "error", "expired", "signedout", "unavailable",
-  ]);
-  const tones = new Set([null, "info", "bad", "warn", "unk"]);
-  const buttons = new Set(["go", "retry", "busy", "verify", "off"]);
-  const markers = new Set(["done", "run", "wait", "fail", "stop", "na"]);
+test("login states expose only unverified callback notices and a recovery action", () => {
+  assert.deepEqual(Object.keys(LOGIN_STATES), ["idle", "denied", "cancel", "error", "expired"]);
   for (const [name, spec] of Object.entries(LOGIN_STATES)) {
-    assert.ok(tones.has(spec.tone), name);
-    assert.ok(buttons.has(spec.btn), name);
-    assert.equal(spec.steps.length, 3, name);
-    for (const marker of spec.steps) assert.ok(markers.has(marker), name);
-    if (spec.ref !== undefined) assert.match(spec.ref, /^AUTH-[A-Z]+ · [0-9A-F]{4}-DEMO$/, name);
+    assert.ok([null, "bad", "warn"].includes(spec.tone), name);
+    assert.ok(["go", "retry"].includes(spec.btn), name);
+    assert.deepEqual(spec.steps, ["na", "na", "na"]);
+    assert.equal(spec.ref, undefined);
   }
-  assert.equal(LOGIN_STATES.idle.tone, null);
-  assert.equal(LOGIN_STATES.unavailable.btn, "off");
-  assert.deepEqual(LOGIN_STATES.unavailable.steps, ["na", "na", "na"]);
-  const refs = Object.values(LOGIN_STATES).map((spec) => spec.ref).filter(Boolean);
-  assert.deepEqual(refs, [
-    "AUTH-DENIED · 7F3A-DEMO",
-    "AUTH-CALLBACK · 2C91-DEMO",
-    "AUTH-CONFIG · 0000-DEMO",
-  ]);
 });
 
-test("login state resolution fails closed and never reflects raw query text", () => {
+test("login error classification never reflects raw query text", () => {
   assert.equal(resolveLoginState(""), "idle");
-  for (const state of Object.keys(LOGIN_STATES)) {
-    assert.equal(resolveLoginState("?state=" + state), state);
-  }
-  assert.equal(resolveLoginState("?state="), "error");
-  assert.equal(resolveLoginState("?state=unknown"), "error");
-  assert.equal(resolveLoginState("?state=__proto__"), "error");
-  assert.equal(resolveLoginState("?state=constructor"), "error");
   assert.equal(resolveLoginState("?error=not_a_member"), "denied");
   assert.equal(resolveLoginState("?error=access_denied"), "cancel");
   assert.equal(resolveLoginState("?error=session_expired"), "expired");
   assert.equal(resolveLoginState("?error=%3Cscript%3Ealert(1)%3C%2Fscript%3E"), "error");
-  assert.equal(resolveLoginState("?state=denied&error=access_denied"), "denied");
-  assert.equal(resolveLoginState("?state=unavailable&error=not_a_member"), "unavailable");
-  const resolved = resolveLoginState("?error=anything");
-  assert.equal(Object.prototype.hasOwnProperty.call(LOGIN_STATES, resolved), true);
+  assert.equal(resolveLoginState("?state=unavailable&error=not_a_member"), "denied");
 });
 
 test("login locales keep zh-CN and en key, text and placeholder parity", () => {
@@ -703,7 +676,7 @@ test("step copy renders placeholders as code elements, never as markup", () => {
   const page = loginHTML();
   const second = /<p data-i18n-rich="f2p">([\s\S]*?)<\/p>/.exec(page);
   assert.ok(second);
-  assert.match(second[1], /只请求 <code>read:user<\/code> 与 <code>read:org<\/code>/);
+  assert.match(second[1], /只请求 <code>read:org<\/code>/);
   assert.doesNotMatch(second[1], /\{/);
   const third = /<p data-i18n-rich="f3p">([\s\S]*?)<\/p>/.exec(page);
   assert.ok(third);
@@ -722,7 +695,9 @@ test("login redesign leaves the dashboard output untouched", () => {
   assert.match(page, /qg-lang/);
   assert.match(page, /qg-theme/);
   assert.doesNotMatch(page, /innerHTML\s*=/);
-  assert.doesNotMatch(page, /每一次调用/);
+  // The shared dictionary deliberately includes legacy login copy. Check
+  // visible dashboard markup, rather than rejecting its embedded dictionary.
+  assert.doesNotMatch(page.split("var I18N=")[0], /每一次调用/);
   assert.doesNotMatch(page, /class="gh" id="gh"/);
   assert.doesNotMatch(page, /AUTH-DENIED/);
 });
@@ -881,4 +856,52 @@ test("egress requirement stays unverified in both languages without observations
   assert.equal(/<span class="lamp st-unk" aria-hidden="true"><\/span><span data-i18n="d_chip">/.test(page), true);
   assert.equal(LOCALES.en.d_chip, "egress · SG · unverified");
   assert.equal(LOCALES["zh-CN"].d_chip, "出口 · SG · 未验证");
+});
+
+test("login never publishes invented diagnostic references", () => {
+  assert.equal(/DEMO|AUTH-DENIED|AUTH-CALLBACK|AUTH-CONFIG/.test(loginHTML()), false);
+  for (const spec of Object.values(LOGIN_STATES)) assert.equal(spec.ref, undefined);
+});
+
+test("query states cannot fabricate server progress or override callback errors", () => {
+  for (const state of ["idle", "redirecting", "verifying", "denied", "cancel", "error", "expired", "signedout", "unavailable", "unknown", "", "__proto__", "constructor"]) {
+    assert.equal(resolveLoginState("?state=" + state), "idle", state);
+    assert.equal(resolveLoginState("?state=" + state + "&error=not_a_member"), "denied", state);
+  }
+  for (const spec of Object.values(LOGIN_STATES)) {
+    assert.deepEqual(spec.steps, ["na", "na", "na"]);
+    assert.ok(["go", "retry"].includes(spec.btn));
+  }
+});
+
+test("scope copy matches the existing minimal OAuth request in both dictionaries", async () => {
+  const response = await worker.fetch(new Request("https://dash.example/login"), { GITHUB_OAUTH_CLIENT_ID: "synthetic-client" });
+  const scope = new URL(response.headers.get("Location")).searchParams.get("scope");
+  assert.equal(scope, "read:org");
+  for (const locale of ["zh-CN", "en"]) {
+    for (const copy of [LOGIN_LOCALES[locale].f2p, LOCALES[locale].login_f2p]) {
+      assert.equal(copy.includes(scope), true);
+      assert.equal(/read:user|团队|team/.test(copy), false);
+    }
+  }
+});
+
+test("login small text and brand mark meet AA contrast in both themes", async () => {
+  const { LOGIN_CSS } = await import("../src/ui/login-styles.mjs");
+  const luminance = (hex) => hex.match(/[0-9a-f]{2}/gi).map(c => {
+    const v = parseInt(c, 16) / 255;
+    return v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;
+  }).reduce((sum, v, i) => sum + v * [0.2126, 0.7152, 0.0722][i], 0);
+  for (const theme of ["light", "dark"]) {
+    const block = LOGIN_CSS.match(new RegExp("\\[data-theme=" + theme + "\\]\\{([^}]+)"))[1];
+    const tokens = Object.fromEntries([...block.matchAll(/(--[a-z0-9]+):(#\w{6})/gi)].map(m => [m[1], m[2]]));
+    const warningBackground = "#" + [1, 3, 5].map(i => Math.round(
+      parseInt(tokens["--warn"].slice(i, i + 2), 16) * 0.09 +
+      parseInt(tokens["--panel"].slice(i, i + 2), 16) * 0.91
+    ).toString(16).padStart(2, "0")).join("");
+    for (const [fg, bg] of [[tokens["--warn"], warningBackground], [tokens["--ink3"], tokens["--bg"]], [tokens["--ink3"], tokens["--panel"]], [tokens["--sig"], tokens["--panel"]], [theme === "light" ? "#ffffff" : "#160a02", tokens["--sig"]]]) {
+      const a = luminance(fg), b = luminance(bg);
+      assert.ok((Math.max(a,b)+0.05)/(Math.min(a,b)+0.05) >= 4.5, theme + " small text contrast");
+    }
+  }
 });

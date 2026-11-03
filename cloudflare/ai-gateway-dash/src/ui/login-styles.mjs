@@ -12,8 +12,8 @@ export const LOGIN_CSS = `
   --r:2px;
 }
 [data-theme=light]{
-  --bg:#E9E6DF; --panel:#F4F2EC; --panel2:#ECE9E1; --ink:#1B1A17; --ink2:#55524A; --ink3:#7A766C;
-  --line:#CFCABE; --line2:#B7B1A3; --sig:#D4470B; --ok:#2F7D4F; --warn:#9A6508; --bad:#B42318; --unk:#5F6375;
+  --bg:#E9E6DF; --panel:#F4F2EC; --panel2:#ECE9E1; --ink:#1B1A17; --ink2:#55524A; --ink3:#69655D;
+  --line:#CFCABE; --line2:#B7B1A3; --sig:#C73D08; --ok:#2F7D4F; --warn:#805200; --bad:#B42318; --unk:#5F6375;
   --grid:rgba(27,26,23,.05);
 }
 [data-theme=dark]{
