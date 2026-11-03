@@ -1,117 +1,257 @@
 /** Login page: GitHub OAuth 2.0 only.
 
-  The only action is an anchor to the existing `/login` OAuth start route. There
-  is no project selector, token field, password, email or SSO input. The denied
-  / cancelled / failed states are derived from the existing `?error=` redirect
-  produced by the OAuth callback.
+  The only action is a link to the existing `/login` OAuth start route. There is
+  no project selector, token field, password, email or SSO input. The page
+  renders one of nine states from the query contract:
+
+    ?state=idle|redirecting|verifying|denied|cancel|error|expired|signedout|unavailable
+
+  An explicit but unknown state fails closed to `error`. Without `state`, the
+  existing callback redirect `?error=` is classified by `classifyLoginError`.
+  Query values are never reflected into the document; the state is reduced to a
+  fixed enum and the correlation references are synthetic `...-DEMO` values.
  */
 
-import { LOCALES } from "./locales.mjs";
-import { CSS } from "./styles.mjs";
+import { LOGIN_LOCALES } from "./login-locales.mjs";
+import { LOGIN_CSS } from "./login-styles.mjs";
 import { classifyLoginError, escapeHtml, jsObjectLiteral } from "./format.mjs";
 import { BOOT_SCRIPT } from "./shared.mjs";
 
-const zh = LOCALES["zh-CN"];
+export const LOGIN_STATES = {
+  idle: { tone: null, btn: "go", steps: ["na", "na", "na"] },
+  redirecting: { tone: "info", btn: "busy", steps: ["run", "wait", "wait"] },
+  verifying: { tone: "info", btn: "verify", steps: ["done", "run", "wait"] },
+  denied: { tone: "bad", btn: "retry", steps: ["done", "fail", "na"], ref: "AUTH-DENIED · 7F3A-DEMO" },
+  cancel: { tone: "warn", btn: "go", steps: ["stop", "na", "na"] },
+  error: { tone: "bad", btn: "retry", steps: ["fail", "na", "na"], ref: "AUTH-CALLBACK · 2C91-DEMO" },
+  expired: { tone: "warn", btn: "go", steps: ["na", "na", "na"] },
+  signedout: { tone: "info", btn: "go", steps: ["na", "na", "na"] },
+  unavailable: { tone: "unk", btn: "off", steps: ["na", "na", "na"], ref: "AUTH-CONFIG · 0000-DEMO" },
+};
 
-function text(key) {
-  return escapeHtml(zh[key] ?? key);
+export function resolveLoginState(search) {
+  const params = new URLSearchParams(String(search || ""));
+  const explicit = params.get("state");
+  if (explicit !== null) {
+    const candidate = explicit.trim();
+    return Object.prototype.hasOwnProperty.call(LOGIN_STATES, candidate) ? candidate : "error";
+  }
+  const kind = classifyLoginError(params.get("error"));
+  return kind === "none" ? "idle" : kind;
+}
+
+/** Split locale copy on {placeholder} so it renders as <code>, never as HTML. */
+export function stepSegments(template) {
+  const source = String(template ?? "");
+  const segments = [];
+  const pattern = /\{([^}]+)\}/g;
+  let cursor = 0;
+  let match = pattern.exec(source);
+  while (match !== null) {
+    if (match.index > cursor) {
+      segments.push({ type: "text", value: source.slice(cursor, match.index) });
+    }
+    segments.push({ type: "code", value: match[1] });
+    cursor = match.index + match[0].length;
+    match = pattern.exec(source);
+  }
+  if (cursor < source.length) {
+    segments.push({ type: "text", value: source.slice(cursor) });
+  }
+  return segments;
+}
+
+function richText(template) {
+  return stepSegments(template)
+    .map((segment) => (segment.type === "code"
+      ? "<code>" + escapeHtml(segment.value) + "</code>"
+      : escapeHtml(segment.value)))
+    .join("");
 }
 
 export function loginHTML() {
+  const t = LOGIN_LOCALES["zh-CN"];
+  const tx = (key) => escapeHtml(t[key]);
+
   return `<!doctype html>
 <html lang="zh-CN" data-theme="light">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>${text("brand")}</title>
+<title>${tx("l_title")} · ${tx("brand")}</title>
 <script>${BOOT_SCRIPT}</script>
-<style>${CSS}</style>
+<script>(function(){try{var q=new URLSearchParams(location.search),l=q.get("lang"),t=q.get("theme");if(l==="zh-CN"||l==="en")document.documentElement.lang=l;if(t==="light"||t==="dark")document.documentElement.setAttribute("data-theme",t);}catch(e){}})();</script>
+<style>${LOGIN_CSS}</style>
 </head>
-<body data-view="login">
-<section class="login" aria-label="${text("login_kicker")}">
+<body>
+<section class="login">
   <div class="l-art">
-    <div class="brand"><span class="mark" aria-hidden="true">QG</span><span data-i18n="brand">${text("brand")}</span></div>
+    <div class="brand"><span class="mark" aria-hidden="true">QG</span><span data-i18n="brand">${tx("brand")}</span></div>
+    <div class="tools">
+      <button class="iconbtn js-lang" type="button" data-i18n-aria="switch_to_en" aria-label="${tx("switch_to_en")}">EN</button>
+      <button class="iconbtn js-theme" type="button" data-i18n-aria="use_dark" aria-label="${tx("use_dark")}">◐</button>
+    </div>
     <svg class="routes" viewBox="0 0 560 520" preserveAspectRatio="xMaxYMid meet" aria-hidden="true" id="routes"></svg>
     <div>
-      <h2><span data-i18n="login_head_1">${text("login_head_1")}</span><br><em data-i18n="login_head_2">${text("login_head_2")}</em></h2>
-      <p data-i18n="login_sub">${text("login_sub")}</p>
+      <h2><span data-i18n="l_head_1">${tx("l_head_1")}</span><br><em data-i18n="l_head_2">${tx("l_head_2")}</em><span data-i18n="l_head_dot">${tx("l_head_dot")}</span></h2>
+      <p data-i18n="l_sub">${tx("l_sub")}</p>
     </div>
     <div class="l-stat">
-      <div><span data-i18n="login_s1">${text("login_s1")}</span><b class="mono" data-i18n="login_stat1">${text("login_stat1")}</b></div>
-      <div><span data-i18n="login_s2">${text("login_s2")}</span><b class="mono" data-i18n="login_stat2">${text("login_stat2")}</b></div>
-      <div><span data-i18n="login_s3">${text("login_s3")}</span><b class="mono" data-i18n="login_stat3">${text("login_stat3")}</b></div>
+      <div><span data-i18n="l_s1">${tx("l_s1")}</span><b class="mono">GitHub OAuth 2.0</b></div>
+      <div><span data-i18n="l_s2">${tx("l_s2")}</span><b class="mono">dashboard:read</b></div>
+      <div><span data-i18n="l_s3">${tx("l_s3")}</span><b class="mono">/v1/ai/*</b></div>
     </div>
   </div>
-  <div class="l-form">
+  <main class="l-form">
     <div class="tools">
-      <button class="iconbtn js-lang" type="button" data-i18n-aria="lang_label" aria-label="${text("lang_label")}">EN</button>
-      <button class="iconbtn js-theme" type="button" data-i18n-aria="theme_label" aria-label="${text("theme_label")}">◐</button>
+      <button class="iconbtn js-lang" type="button" data-i18n-aria="switch_to_en" aria-label="${tx("switch_to_en")}">EN</button>
+      <button class="iconbtn js-theme" type="button" data-i18n-aria="use_dark" aria-label="${tx("use_dark")}">◐</button>
     </div>
     <div class="l-card">
-      <span class="lbl" data-i18n="login_kicker">${text("login_kicker")}</span>
-      <h3 data-i18n="login_title">${text("login_title")}</h3>
-      <p class="sub" data-i18n="login_desc">${text("login_desc")}</p>
-      <div class="alert" id="alert" role="alert" aria-live="assertive"><b id="alert-t"></b><span id="alert-d"></span></div>
+      <span class="lbl" data-i18n="l_kicker">${tx("l_kicker")}</span>
+      <h1 data-i18n="l_title">${tx("l_title")}</h1>
+      <p class="sub" data-i18n="l_desc">${tx("l_desc")}</p>
+
+      <div class="note" id="note" role="status" aria-live="polite"><b id="note-t"></b><span id="note-d"></span><span class="ref" id="note-r"></span></div>
+
       <a class="gh" id="gh" href="/login">
         <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
         <span class="spin" aria-hidden="true"></span>
-        <span id="gh-l" data-i18n="login_go">${text("login_go")}</span>
+        <span id="gh-l">${tx("l_go")}</span>
         <span class="ar" aria-hidden="true">→</span>
       </a>
-      <div class="only" data-i18n="login_only">${text("login_only")}</div>
+      <div class="only" data-i18n="l_only">${tx("l_only")}</div>
+
       <section class="pn flow" aria-labelledby="flow-h">
-        <div class="pn-h"><h3 id="flow-h" data-i18n="login_flow_title">${text("login_flow_title")}</h3><span class="lbl">OAuth 2.0</span></div>
-        <ol>
-          <li><span class="n">01</span><b data-i18n="login_f1">${text("login_f1")}</b><p data-i18n="login_f1p">${text("login_f1p")}</p></li>
-          <li><span class="n">02</span><b data-i18n="login_f2">${text("login_f2")}</b><p data-i18n="login_f2p">${text("login_f2p")}</p></li>
-          <li><span class="n">03</span><b data-i18n="login_f3">${text("login_f3")}</b><p data-i18n="login_f3p">${text("login_f3p")}</p></li>
+        <div class="pn-h"><h3 id="flow-h" data-i18n="f_title">${tx("f_title")}</h3><span class="lbl">OAuth 2.0</span></div>
+        <ol id="steps">
+          <li class="step"><span class="n">01</span><b data-i18n="f1">${tx("f1")}</b><span class="st"></span><p data-i18n-rich="f1p">${richText(t.f1p)}</p></li>
+          <li class="step"><span class="n">02</span><b data-i18n="f2">${tx("f2")}</b><span class="st"></span><p data-i18n-rich="f2p">${richText(t.f2p)}</p></li>
+          <li class="step"><span class="n">03</span><b data-i18n="f3">${tx("f3")}</b><span class="st"></span><p data-i18n-rich="f3p">${richText(t.f3p)}</p></li>
         </ol>
       </section>
-      <div class="legal"><span class="lamp st-ok" aria-hidden="true"></span><span data-i18n="login_legal">${text("login_legal")}</span></div>
+      <div class="legal"><svg viewBox="0 0 12 12" aria-hidden="true"><rect x="2" y="5" width="8" height="6"/><path d="M4 5V3.5a2 2 0 0 1 4 0V5"/></svg><span data-i18n="l_legal">${tx("l_legal")}</span></div>
     </div>
-  </div>
+  </main>
 </section>
 <script>
-var I18N=${jsObjectLiteral(LOCALES)};
+var I18N=${jsObjectLiteral(LOGIN_LOCALES)};
+var LOGIN_STATES=${jsObjectLiteral(LOGIN_STATES)};
 ${classifyLoginError.toString()}
+${stepSegments.toString()}
+${resolveLoginState.toString()}
 var root=document.documentElement;
 var lang=root.lang==="en"?"en":"zh-CN";
 var theme=root.getAttribute("data-theme")==="dark"?"dark":"light";
-var t=I18N[lang]||I18N["zh-CN"];
+var state=resolveLoginState(location.search);
+var navigating=false;
+
+function setText(node,value){if(node)node.textContent=value;}
+
+function renderRich(node,template){
+  var fragment=document.createDocumentFragment();
+  stepSegments(template).forEach(function(segment){
+    if(segment.type==="code"){var code=document.createElement("code");code.textContent=segment.value;fragment.appendChild(code);}
+    else{fragment.appendChild(document.createTextNode(segment.value));}
+  });
+  while(node.firstChild)node.removeChild(node.firstChild);
+  node.appendChild(fragment);
+}
+
+function renderState(t){
+  var spec=LOGIN_STATES[state]||LOGIN_STATES.error;
+  var note=document.getElementById("note");
+  note.className="note";
+  note.setAttribute("role","status");
+  note.setAttribute("aria-live","polite");
+  setText(document.getElementById("note-t"),"");
+  setText(document.getElementById("note-d"),"");
+  setText(document.getElementById("note-r"),"");
+  if(spec.tone){
+    note.className="note on "+spec.tone;
+    if(spec.tone==="bad"){note.setAttribute("role","alert");note.setAttribute("aria-live","assertive");}
+    setText(document.getElementById("note-t"),t["n_"+state+"_t"]);
+    setText(document.getElementById("note-d"),t["n_"+state]);
+    if(spec.ref)setText(document.getElementById("note-r"),t.ref+" "+spec.ref);
+  }
+  var gh=document.getElementById("gh");
+  gh.removeAttribute("aria-busy");
+  gh.removeAttribute("aria-disabled");
+  gh.tabIndex=0;
+  gh.setAttribute("href","/login");
+  var labels={go:t.l_go,retry:t.l_retry,busy:t.l_busy,verify:t.l_verify,off:t.l_off};
+  setText(document.getElementById("gh-l"),labels[spec.btn]);
+  if(spec.btn==="busy"||spec.btn==="verify")gh.setAttribute("aria-busy","true");
+  if(spec.btn==="off"){gh.setAttribute("aria-disabled","true");gh.tabIndex=-1;gh.removeAttribute("href");}
+  var statusLabels={done:t.s_done,run:t.s_run,wait:t.s_wait,fail:t.s_fail,stop:t.s_stop,na:t.s_na};
+  document.querySelectorAll("#steps .step").forEach(function(item,index){
+    var key=spec.steps[index]||"na";
+    var slot=item.querySelector(".st");
+    item.classList.toggle("cur",key==="run"||key==="fail"||key==="stop");
+    while(slot.firstChild)slot.removeChild(slot.firstChild);
+    if(state!=="idle"){
+      var dot=document.createElement("i");
+      dot.className="dot "+key;
+      dot.setAttribute("aria-hidden","true");
+      slot.appendChild(dot);
+      slot.appendChild(document.createTextNode(statusLabels[key]));
+    }
+  });
+}
+
 function apply(){
-  t=I18N[lang]||I18N["zh-CN"];
+  var t=I18N[lang]||I18N["zh-CN"];
   root.lang=lang;
   root.setAttribute("data-theme",theme);
-  document.querySelectorAll("[data-i18n]").forEach(function(node){var key=node.getAttribute("data-i18n");if(t[key]!==undefined)node.textContent=t[key];});
-  document.querySelectorAll("[data-i18n-aria]").forEach(function(node){var key=node.getAttribute("data-i18n-aria");if(t[key]!==undefined)node.setAttribute("aria-label",t[key]);});
-  document.querySelectorAll(".js-lang").forEach(function(button){button.textContent=lang==="zh-CN"?"EN":"中";button.setAttribute("aria-label",t.lang_label);});
-  document.querySelectorAll(".js-theme").forEach(function(button){button.setAttribute("aria-label",t.theme_label);});
-  document.title=t.brand;
-  renderError();
+  document.querySelectorAll("[data-i18n]").forEach(function(node){
+    var key=node.getAttribute("data-i18n");
+    if(t[key]!==undefined)node.textContent=t[key];
+  });
+  document.querySelectorAll("[data-i18n-rich]").forEach(function(node){
+    var key=node.getAttribute("data-i18n-rich");
+    if(t[key]!==undefined)renderRich(node,t[key]);
+  });
+  document.querySelectorAll(".js-lang").forEach(function(button){
+    button.textContent=lang==="zh-CN"?"EN":"中";
+    button.setAttribute("aria-label",lang==="zh-CN"?t.switch_to_en:t.switch_to_zh);
+  });
+  document.querySelectorAll(".js-theme").forEach(function(button){
+    button.setAttribute("aria-label",theme==="dark"?t.use_light:t.use_dark);
+  });
+  document.title=t.l_title+" · "+t.brand;
+  renderState(t);
 }
-function renderError(){
-  var raw="";
-  try{raw=new URLSearchParams(location.search).get("error")||"";}catch(e){raw="";}
-  var kind=classifyLoginError(raw);
-  var alert=document.getElementById("alert");
-  if(!alert)return;
-  if(kind==="none"){alert.className="alert";document.getElementById("alert-t").textContent="";document.getElementById("alert-d").textContent="";return;}
-  var titleKey="err_error_t",detailKey="err_error";
-  if(kind==="denied"){titleKey="err_denied_t";detailKey="err_denied";}
-  if(kind==="cancel"){titleKey="err_cancel_t";detailKey="err_cancel";}
-  if(kind==="expired"){titleKey="err_expired_t";detailKey="err_expired";}
-  alert.className="alert on"+(kind==="cancel"||kind==="expired"?" warn":"");
-  document.getElementById("alert-t").textContent=t[titleKey];
-  document.getElementById("alert-d").textContent=t[detailKey];
-}
-document.querySelectorAll(".js-lang").forEach(function(button){button.addEventListener("click",function(){lang=lang==="zh-CN"?"en":"zh-CN";try{localStorage.setItem("qg-lang",lang);}catch(e){}apply();});});
-document.querySelectorAll(".js-theme").forEach(function(button){button.addEventListener("click",function(){theme=theme==="dark"?"light":"dark";try{localStorage.setItem("qg-theme",theme);}catch(e){}apply();});});
-(function busy(){
+
+document.querySelectorAll(".js-lang").forEach(function(button){
+  button.addEventListener("click",function(){
+    lang=lang==="zh-CN"?"en":"zh-CN";
+    try{localStorage.setItem("qg-lang",lang);}catch(e){}
+    apply();
+  });
+});
+document.querySelectorAll(".js-theme").forEach(function(button){
+  button.addEventListener("click",function(){
+    theme=theme==="dark"?"light":"dark";
+    try{localStorage.setItem("qg-theme",theme);}catch(e){}
+    apply();
+  });
+});
+
+(function signIn(){
   var gh=document.getElementById("gh");
-  if(!gh)return;
-  gh.addEventListener("click",function(){gh.setAttribute("aria-busy","true");var label=document.getElementById("gh-l");if(label)label.textContent=t.login_busy;});
-  window.addEventListener("pageshow",function(){gh.removeAttribute("aria-busy");var label=document.getElementById("gh-l");if(label)label.textContent=t.login_go;});
+  gh.addEventListener("click",function(event){
+    var spec=LOGIN_STATES[state]||LOGIN_STATES.error;
+    if(navigating||spec.btn==="off"||spec.btn==="busy"||spec.btn==="verify"){
+      event.preventDefault();
+      return;
+    }
+    navigating=true;
+    gh.setAttribute("aria-busy","true");
+    setText(document.getElementById("gh-l"),(I18N[lang]||I18N["zh-CN"]).l_busy);
+  });
+  window.addEventListener("pageshow",function(){navigating=false;apply();});
 })();
+
 (function routes(){
   var svg=document.getElementById("routes");
   if(!svg)return;

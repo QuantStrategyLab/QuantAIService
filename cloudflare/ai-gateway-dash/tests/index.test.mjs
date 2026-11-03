@@ -70,7 +70,8 @@ import worker, {
   requiresHumanAudit,
 } from "../src/index.mjs";
 import { LOCALES } from "../src/ui/locales.mjs";
-import { loginHTML } from "../src/ui/login.mjs";
+import { LOGIN_STATES, loginHTML, resolveLoginState, stepSegments } from "../src/ui/login.mjs";
+import { LOGIN_LOCALES } from "../src/ui/login-locales.mjs";
 import { dashboardHTML } from "../src/ui/dashboard.mjs";
 import {
   classifyLoginError,
@@ -581,13 +582,149 @@ test("login page exposes GitHub OAuth as the only sign-in action", () => {
   const page = loginHTML();
   assert.equal((page.match(/href="\/login"/g) || []).length, 1);
   assert.match(page, /class="gh" id="gh" href="\/login"/);
-  assert.doesNotMatch(page, /<form\b/i);
-  assert.doesNotMatch(page, /<input\b/i);
-  assert.doesNotMatch(page, /<select\b/i);
-  assert.doesNotMatch(page, /type="password"/i);
-  assert.doesNotMatch(page, /type="email"/i);
-  assert.match(page, /id="alert" role="alert"/);
+  assert.doesNotMatch(page, /<(?:form|input|select|textarea)\b/i);
+  assert.doesNotMatch(page, /type="(?:password|email)"/i);
+  assert.doesNotMatch(page, /autocomplete="(?:current-password|username)"/i);
+  assert.doesNotMatch(page, /mailto:|name="token"/i);
+  assert.doesNotMatch(page, /<(?:link|img|iframe|object|embed)\b/i);
+  assert.doesNotMatch(page, /(?:href|src)\s*=\s*["']?https?:/i);
+  assert.doesNotMatch(page, /@import/i);
+  assert.match(page, /<html lang="zh-CN" data-theme="light">/);
+  assert.match(page, /<title>使用 GitHub 登录 · QSL 网关<\/title>/);
+  assert.match(page, /id="note" role="status" aria-live="polite"/);
+  assert.match(page, /aria-labelledby="flow-h"/);
+  assert.match(page, /class="legal"><svg viewBox="0 0 12 12" aria-hidden="true">/);
+  assert.doesNotMatch(page, /st-ok|lamp/);
   assert.match(page, /function classifyLoginError/);
+  assert.match(page, /function resolveLoginState/);
+  assert.match(page, /function stepSegments/);
+  assert.match(page, /resolveLoginState\(location\.search\)/);
+  assert.doesNotMatch(page, /innerHTML/);
+  assert.match(page, /textContent/);
+  assert.match(page, /qg-lang/);
+  assert.match(page, /qg-theme/);
+  const storageKeys = [...page.matchAll(/localStorage\.(?:getItem|setItem)\("([^"]+)"/g)].map((match) => match[1]);
+  assert.deepEqual([...new Set(storageKeys)].sort(), ["qg-lang", "qg-theme"]);
+  assert.match(page, /root\.lang=lang/);
+  assert.match(page, /document\.title=t\.l_title\+" · "\+t\.brand/);
+  assert.match(page, /gh\.tabIndex=-1/);
+  assert.match(page, /gh\.removeAttribute\("href"\)/);
+  assert.match(page, /aria-disabled/);
+  assert.match(page, /spec\.tone==="bad"/);
+  assert.match(page, /setAttribute\("role","alert"\)/);
+  assert.match(page, /\/v1\/ai\/\*/);
+  assert.doesNotMatch(page, /\/v2\/ai/);
+  assert.match(page, /<code>read:user<\/code>/);
+  assert.match(page, /<code>read:org<\/code>/);
+  assert.match(page, /<code>dashboard:read<\/code>/);
+});
+
+test("login states cover every approved state with fake correlation ids", () => {
+  assert.deepEqual(Object.keys(LOGIN_STATES), [
+    "idle", "redirecting", "verifying", "denied", "cancel", "error", "expired", "signedout", "unavailable",
+  ]);
+  const tones = new Set([null, "info", "bad", "warn", "unk"]);
+  const buttons = new Set(["go", "retry", "busy", "verify", "off"]);
+  const markers = new Set(["done", "run", "wait", "fail", "stop", "na"]);
+  for (const [name, spec] of Object.entries(LOGIN_STATES)) {
+    assert.ok(tones.has(spec.tone), name);
+    assert.ok(buttons.has(spec.btn), name);
+    assert.equal(spec.steps.length, 3, name);
+    for (const marker of spec.steps) assert.ok(markers.has(marker), name);
+    if (spec.ref !== undefined) assert.match(spec.ref, /^AUTH-[A-Z]+ · [0-9A-F]{4}-DEMO$/, name);
+  }
+  assert.equal(LOGIN_STATES.idle.tone, null);
+  assert.equal(LOGIN_STATES.unavailable.btn, "off");
+  assert.deepEqual(LOGIN_STATES.unavailable.steps, ["na", "na", "na"]);
+  const refs = Object.values(LOGIN_STATES).map((spec) => spec.ref).filter(Boolean);
+  assert.deepEqual(refs, [
+    "AUTH-DENIED · 7F3A-DEMO",
+    "AUTH-CALLBACK · 2C91-DEMO",
+    "AUTH-CONFIG · 0000-DEMO",
+  ]);
+});
+
+test("login state resolution fails closed and never reflects raw query text", () => {
+  assert.equal(resolveLoginState(""), "idle");
+  for (const state of Object.keys(LOGIN_STATES)) {
+    assert.equal(resolveLoginState("?state=" + state), state);
+  }
+  assert.equal(resolveLoginState("?state="), "error");
+  assert.equal(resolveLoginState("?state=unknown"), "error");
+  assert.equal(resolveLoginState("?state=__proto__"), "error");
+  assert.equal(resolveLoginState("?state=constructor"), "error");
+  assert.equal(resolveLoginState("?error=not_a_member"), "denied");
+  assert.equal(resolveLoginState("?error=access_denied"), "cancel");
+  assert.equal(resolveLoginState("?error=session_expired"), "expired");
+  assert.equal(resolveLoginState("?error=%3Cscript%3Ealert(1)%3C%2Fscript%3E"), "error");
+  assert.equal(resolveLoginState("?state=denied&error=access_denied"), "denied");
+  assert.equal(resolveLoginState("?state=unavailable&error=not_a_member"), "unavailable");
+  const resolved = resolveLoginState("?error=anything");
+  assert.equal(Object.prototype.hasOwnProperty.call(LOGIN_STATES, resolved), true);
+});
+
+test("login locales keep zh-CN and en key, text and placeholder parity", () => {
+  const zhKeys = Object.keys(LOGIN_LOCALES["zh-CN"]).sort();
+  const enKeys = Object.keys(LOGIN_LOCALES.en).sort();
+  assert.deepEqual(enKeys, zhKeys);
+  for (const [locale, dictionary] of Object.entries(LOGIN_LOCALES)) {
+    for (const [key, value] of Object.entries(dictionary)) {
+      assert.equal(typeof value, "string", locale + "." + key);
+      assert.doesNotMatch(value, /[<>]/, locale + "." + key);
+      assert.doesNotMatch(value, /innerHTML|@/, locale + "." + key);
+    }
+  }
+  for (const key of zhKeys) {
+    const zhPlaceholders = [...LOGIN_LOCALES["zh-CN"][key].matchAll(/\{([^}]+)\}/g)].map((match) => match[1]);
+    const enPlaceholders = [...LOGIN_LOCALES.en[key].matchAll(/\{([^}]+)\}/g)].map((match) => match[1]);
+    assert.deepEqual(enPlaceholders, zhPlaceholders, key);
+  }
+  for (const state of Object.keys(LOGIN_STATES)) {
+    if (state === "idle") continue;
+    assert.equal(typeof LOGIN_LOCALES["zh-CN"]["n_" + state], "string", state);
+    assert.equal(typeof LOGIN_LOCALES["zh-CN"]["n_" + state + "_t"], "string", state);
+    assert.equal(typeof LOGIN_LOCALES.en["n_" + state], "string", state);
+    assert.equal(typeof LOGIN_LOCALES.en["n_" + state + "_t"], "string", state);
+  }
+});
+
+test("step copy renders placeholders as code elements, never as markup", () => {
+  assert.deepEqual(stepSegments("no placeholders"), [{ type: "text", value: "no placeholders" }]);
+  assert.deepEqual(stepSegments("only {read:user}"), [
+    { type: "text", value: "only " },
+    { type: "code", value: "read:user" },
+  ]);
+  assert.deepEqual(stepSegments("{a} and {b}"), [
+    { type: "code", value: "a" },
+    { type: "text", value: " and " },
+    { type: "code", value: "b" },
+  ]);
+  assert.deepEqual(stepSegments(""), []);
+  const page = loginHTML();
+  const second = /<p data-i18n-rich="f2p">([\s\S]*?)<\/p>/.exec(page);
+  assert.ok(second);
+  assert.match(second[1], /只请求 <code>read:user<\/code> 与 <code>read:org<\/code>/);
+  assert.doesNotMatch(second[1], /\{/);
+  const third = /<p data-i18n-rich="f3p">([\s\S]*?)<\/p>/.exec(page);
+  assert.ok(third);
+  assert.match(third[1], /仅授予 <code>dashboard:read<\/code>/);
+  assert.doesNotMatch(third[1], /\{/);
+});
+
+test("login redesign leaves the dashboard output untouched", () => {
+  const page = dashboardHTML();
+  assert.match(page, /var ROUTES=\{/);
+  assert.match(page, /health:"\/v1\/ai\/health"/);
+  assert.match(page, /diagnoses:"\/diagnoses"/);
+  assert.match(page, /not_configured/);
+  assert.match(page, /进程内 · 5 分钟窗口/);
+  assert.match(page, /process-local · 5-min window/);
+  assert.match(page, /qg-lang/);
+  assert.match(page, /qg-theme/);
+  assert.doesNotMatch(page, /innerHTML\s*=/);
+  assert.doesNotMatch(page, /每一次调用/);
+  assert.doesNotMatch(page, /class="gh" id="gh"/);
+  assert.doesNotMatch(page, /AUTH-DENIED/);
 });
 
 test("OAuth error redirects are classified without reflecting raw text", () => {
