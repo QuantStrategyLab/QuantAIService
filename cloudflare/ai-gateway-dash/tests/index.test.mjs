@@ -70,7 +70,8 @@ import worker, {
   requiresHumanAudit,
 } from "../src/index.mjs";
 import { LOCALES } from "../src/ui/locales.mjs";
-import { loginHTML } from "../src/ui/login.mjs";
+import { LOGIN_STATES, loginHTML, resolveLoginState, stepSegments } from "../src/ui/login.mjs";
+import { LOGIN_LOCALES } from "../src/ui/login-locales.mjs";
 import { dashboardHTML } from "../src/ui/dashboard.mjs";
 import {
   classifyLoginError,
@@ -144,7 +145,6 @@ test("codex quota severity is based on low remaining quota", () => {
   assert.equal(codexRemainingClass({ remaining_percent: 30 }), "warn");
   assert.equal(codexRemainingClass({ remaining_percent: 8 }), "err");
 });
-
 
 test("human audit display trusts backend decision fields", () => {
   assert.equal(requiresHumanAudit({ human_review_required: false, risk: "critical" }), false);
@@ -419,7 +419,6 @@ test("dashboard callback requires dedicated session signing secret", async (t) =
   assert.doesNotMatch(callback.headers.get("set-cookie") || "", /dash_session=/);
 });
 
-
 test("sessions issued before KV binding require re-login", async (t) => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (input) => {
@@ -581,13 +580,126 @@ test("login page exposes GitHub OAuth as the only sign-in action", () => {
   const page = loginHTML();
   assert.equal((page.match(/href="\/login"/g) || []).length, 1);
   assert.match(page, /class="gh" id="gh" href="\/login"/);
-  assert.doesNotMatch(page, /<form\b/i);
-  assert.doesNotMatch(page, /<input\b/i);
-  assert.doesNotMatch(page, /<select\b/i);
-  assert.doesNotMatch(page, /type="password"/i);
-  assert.doesNotMatch(page, /type="email"/i);
-  assert.match(page, /id="alert" role="alert"/);
+  assert.doesNotMatch(page, /<(?:form|input|select|textarea)\b/i);
+  assert.doesNotMatch(page, /type="(?:password|email)"/i);
+  assert.doesNotMatch(page, /autocomplete="(?:current-password|username)"/i);
+  assert.doesNotMatch(page, /mailto:|name="token"/i);
+  assert.doesNotMatch(page, /<(?:link|img|iframe|object|embed)\b/i);
+  assert.doesNotMatch(page, /(?:href|src)\s*=\s*["']?https?:/i);
+  assert.doesNotMatch(page, /@import/i);
+  assert.match(page, /<html lang="zh-CN" data-theme="light">/);
+  assert.match(page, /<title>使用 GitHub 登录 · QSL 网关<\/title>/);
+  assert.match(page, /id="note" role="status" aria-live="polite"/);
+  assert.match(page, /aria-labelledby="flow-h"/);
+  assert.match(page, /class="legal"><svg viewBox="0 0 12 12" aria-hidden="true">/);
+  assert.doesNotMatch(page, /st-ok|lamp/);
   assert.match(page, /function classifyLoginError/);
+  assert.match(page, /function resolveLoginState/);
+  assert.match(page, /function stepSegments/);
+  assert.match(page, /resolveLoginState\(location\.search\)/);
+  assert.doesNotMatch(page, /innerHTML/);
+  assert.match(page, /textContent/);
+  assert.match(page, /qg-lang/);
+  assert.match(page, /qg-theme/);
+  const storageKeys = [...page.matchAll(/localStorage\.(?:getItem|setItem)\("([^"]+)"/g)].map((match) => match[1]);
+  assert.deepEqual([...new Set(storageKeys)].sort(), ["qg-lang", "qg-theme"]);
+  assert.match(page, /root\.lang=lang/);
+  assert.match(page, /document\.title=t\.l_title\+" · "\+t\.brand/);
+  assert.match(page, /gh\.tabIndex=-1/);
+  assert.match(page, /gh\.removeAttribute\("href"\)/);
+  assert.match(page, /aria-disabled/);
+  assert.match(page, /spec\.tone==="bad"/);
+  assert.match(page, /setAttribute\("role","alert"\)/);
+  assert.match(page, /\/v1\/ai\/\*/);
+  assert.doesNotMatch(page, /\/v2\/ai/);
+  assert.doesNotMatch(page, /read:user/);
+  assert.match(page, /<code>read:org<\/code>/);
+  assert.match(page, /<code>dashboard:read<\/code>/);
+});
+
+test("login states expose only unverified callback notices and a recovery action", () => {
+  assert.deepEqual(Object.keys(LOGIN_STATES), ["idle", "denied", "cancel", "error", "expired"]);
+  for (const [name, spec] of Object.entries(LOGIN_STATES)) {
+    assert.ok([null, "bad", "warn"].includes(spec.tone), name);
+    assert.ok(["go", "retry"].includes(spec.btn), name);
+    assert.deepEqual(spec.steps, ["na", "na", "na"]);
+    assert.equal(spec.ref, undefined);
+  }
+});
+
+test("login error classification never reflects raw query text", () => {
+  assert.equal(resolveLoginState(""), "idle");
+  assert.equal(resolveLoginState("?error=not_a_member"), "denied");
+  assert.equal(resolveLoginState("?error=access_denied"), "cancel");
+  assert.equal(resolveLoginState("?error=session_expired"), "expired");
+  assert.equal(resolveLoginState("?error=%3Cscript%3Ealert(1)%3C%2Fscript%3E"), "error");
+  assert.equal(resolveLoginState("?state=unavailable&error=not_a_member"), "denied");
+});
+
+test("login locales keep zh-CN and en key, text and placeholder parity", () => {
+  const zhKeys = Object.keys(LOGIN_LOCALES["zh-CN"]).sort();
+  const enKeys = Object.keys(LOGIN_LOCALES.en).sort();
+  assert.deepEqual(enKeys, zhKeys);
+  for (const [locale, dictionary] of Object.entries(LOGIN_LOCALES)) {
+    for (const [key, value] of Object.entries(dictionary)) {
+      assert.equal(typeof value, "string", locale + "." + key);
+      assert.doesNotMatch(value, /[<>]/, locale + "." + key);
+      assert.doesNotMatch(value, /innerHTML|@/, locale + "." + key);
+    }
+  }
+  for (const key of zhKeys) {
+    const zhPlaceholders = [...LOGIN_LOCALES["zh-CN"][key].matchAll(/\{([^}]+)\}/g)].map((match) => match[1]);
+    const enPlaceholders = [...LOGIN_LOCALES.en[key].matchAll(/\{([^}]+)\}/g)].map((match) => match[1]);
+    assert.deepEqual(enPlaceholders, zhPlaceholders, key);
+  }
+  for (const state of Object.keys(LOGIN_STATES)) {
+    if (state === "idle") continue;
+    assert.equal(typeof LOGIN_LOCALES["zh-CN"]["n_" + state], "string", state);
+    assert.equal(typeof LOGIN_LOCALES["zh-CN"]["n_" + state + "_t"], "string", state);
+    assert.equal(typeof LOGIN_LOCALES.en["n_" + state], "string", state);
+    assert.equal(typeof LOGIN_LOCALES.en["n_" + state + "_t"], "string", state);
+  }
+});
+
+test("step copy renders placeholders as code elements, never as markup", () => {
+  assert.deepEqual(stepSegments("no placeholders"), [{ type: "text", value: "no placeholders" }]);
+  assert.deepEqual(stepSegments("only {read:user}"), [
+    { type: "text", value: "only " },
+    { type: "code", value: "read:user" },
+  ]);
+  assert.deepEqual(stepSegments("{a} and {b}"), [
+    { type: "code", value: "a" },
+    { type: "text", value: " and " },
+    { type: "code", value: "b" },
+  ]);
+  assert.deepEqual(stepSegments(""), []);
+  const page = loginHTML();
+  const second = /<p data-i18n-rich="f2p">([\s\S]*?)<\/p>/.exec(page);
+  assert.ok(second);
+  assert.match(second[1], /只请求 <code>read:org<\/code>/);
+  assert.doesNotMatch(second[1], /\{/);
+  const third = /<p data-i18n-rich="f3p">([\s\S]*?)<\/p>/.exec(page);
+  assert.ok(third);
+  assert.match(third[1], /仅授予 <code>dashboard:read<\/code>/);
+  assert.doesNotMatch(third[1], /\{/);
+});
+
+test("login redesign leaves the dashboard output untouched", () => {
+  const page = dashboardHTML();
+  assert.match(page, /var ROUTES=\{/);
+  assert.match(page, /health:"\/v1\/ai\/health"/);
+  assert.match(page, /diagnoses:"\/diagnoses"/);
+  assert.match(page, /not_configured/);
+  assert.match(page, /进程内 · 5 分钟窗口/);
+  assert.match(page, /process-local · 5-min window/);
+  assert.match(page, /qg-lang/);
+  assert.match(page, /qg-theme/);
+  assert.doesNotMatch(page, /innerHTML\s*=/);
+  // The shared dictionary deliberately includes legacy login copy. Check
+  // visible dashboard markup, rather than rejecting its embedded dictionary.
+  assert.doesNotMatch(page.split("var I18N=")[0], /每一次调用/);
+  assert.doesNotMatch(page, /class="gh" id="gh"/);
+  assert.doesNotMatch(page, /AUTH-DENIED/);
 });
 
 test("OAuth error redirects are classified without reflecting raw text", () => {
@@ -744,4 +856,52 @@ test("egress requirement stays unverified in both languages without observations
   assert.equal(/<span class="lamp st-unk" aria-hidden="true"><\/span><span data-i18n="d_chip">/.test(page), true);
   assert.equal(LOCALES.en.d_chip, "egress · SG · unverified");
   assert.equal(LOCALES["zh-CN"].d_chip, "出口 · SG · 未验证");
+});
+
+test("login never publishes invented diagnostic references", () => {
+  assert.equal(/DEMO|AUTH-DENIED|AUTH-CALLBACK|AUTH-CONFIG/.test(loginHTML()), false);
+  for (const spec of Object.values(LOGIN_STATES)) assert.equal(spec.ref, undefined);
+});
+
+test("query states cannot fabricate server progress or override callback errors", () => {
+  for (const state of ["idle", "redirecting", "verifying", "denied", "cancel", "error", "expired", "signedout", "unavailable", "unknown", "", "__proto__", "constructor"]) {
+    assert.equal(resolveLoginState("?state=" + state), "idle", state);
+    assert.equal(resolveLoginState("?state=" + state + "&error=not_a_member"), "denied", state);
+  }
+  for (const spec of Object.values(LOGIN_STATES)) {
+    assert.deepEqual(spec.steps, ["na", "na", "na"]);
+    assert.ok(["go", "retry"].includes(spec.btn));
+  }
+});
+
+test("scope copy matches the existing minimal OAuth request in both dictionaries", async () => {
+  const response = await worker.fetch(new Request("https://dash.example/login"), { GITHUB_OAUTH_CLIENT_ID: "synthetic-client" });
+  const scope = new URL(response.headers.get("Location")).searchParams.get("scope");
+  assert.equal(scope, "read:org");
+  for (const locale of ["zh-CN", "en"]) {
+    for (const copy of [LOGIN_LOCALES[locale].f2p, LOCALES[locale].login_f2p]) {
+      assert.equal(copy.includes(scope), true);
+      assert.equal(/read:user|团队|team/.test(copy), false);
+    }
+  }
+});
+
+test("login small text and brand mark meet AA contrast in both themes", async () => {
+  const { LOGIN_CSS } = await import("../src/ui/login-styles.mjs");
+  const luminance = (hex) => hex.match(/[0-9a-f]{2}/gi).map(c => {
+    const v = parseInt(c, 16) / 255;
+    return v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;
+  }).reduce((sum, v, i) => sum + v * [0.2126, 0.7152, 0.0722][i], 0);
+  for (const theme of ["light", "dark"]) {
+    const block = LOGIN_CSS.match(new RegExp("\\[data-theme=" + theme + "\\]\\{([^}]+)"))[1];
+    const tokens = Object.fromEntries([...block.matchAll(/(--[a-z0-9]+):(#\w{6})/gi)].map(m => [m[1], m[2]]));
+    const warningBackground = "#" + [1, 3, 5].map(i => Math.round(
+      parseInt(tokens["--warn"].slice(i, i + 2), 16) * 0.09 +
+      parseInt(tokens["--panel"].slice(i, i + 2), 16) * 0.91
+    ).toString(16).padStart(2, "0")).join("");
+    for (const [fg, bg] of [[tokens["--warn"], warningBackground], [tokens["--ink3"], tokens["--bg"]], [tokens["--ink3"], tokens["--panel"]], [tokens["--sig"], tokens["--panel"]], [theme === "light" ? "#ffffff" : "#160a02", tokens["--sig"]]]) {
+      const a = luminance(fg), b = luminance(bg);
+      assert.ok((Math.max(a,b)+0.05)/(Math.min(a,b)+0.05) >= 4.5, theme + " small text contrast");
+    }
+  }
 });
