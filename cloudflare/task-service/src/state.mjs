@@ -106,7 +106,8 @@ export class TaskStore extends DurableObject {
       url TEXT NOT NULL, secret TEXT NOT NULL, previous_secret TEXT, previous_expires REAL,
       expires REAL NOT NULL, start_seq INTEGER NOT NULL, created REAL NOT NULL, deleted REAL,
       last_attempt_at REAL, last_status INTEGER, last_error_class TEXT,
-      consecutive_failures INTEGER NOT NULL DEFAULT 0, expiry_logged INTEGER NOT NULL DEFAULT 0);
+      consecutive_failures INTEGER NOT NULL DEFAULT 0, expiry_logged INTEGER NOT NULL DEFAULT 0,
+      ttl_seconds INTEGER, non_expiring INTEGER NOT NULL DEFAULT 0);
       CREATE TABLE IF NOT EXISTS event_deliveries (
       subscription TEXT NOT NULL, seq INTEGER NOT NULL, body TEXT NOT NULL,
       status TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0,
@@ -117,6 +118,9 @@ export class TaskStore extends DurableObject {
     ensureColumn(this.sql, 'subscriptions', 'last_error_class', 'TEXT');
     ensureColumn(this.sql, 'subscriptions', 'consecutive_failures', 'INTEGER NOT NULL DEFAULT 0');
     ensureColumn(this.sql, 'subscriptions', 'expiry_logged', 'INTEGER NOT NULL DEFAULT 0');
+    // Additive TTL columns: older Durable Object SQLite rows keep delivering with non_expiring=0.
+    ensureColumn(this.sql, 'subscriptions', 'ttl_seconds', 'INTEGER');
+    ensureColumn(this.sql, 'subscriptions', 'non_expiring', 'INTEGER NOT NULL DEFAULT 0');
   }
 
   fetch() {
@@ -354,13 +358,28 @@ export class TaskStore extends DurableObject {
     if(existing===null||existing>Date.now()+10)await this.ctx.storage.setAlarm(Date.now()+10);
   }
 
-  #eventAccess(owner,identity) {
-    if(identity.provider!=='dot')return false;
+  async #eventAccess(owner,identity) {
+    if(identity.provider!=='dot'||typeof identity.grantId!=='string'||!identity.grantId||!identity.scopes?.includes('events:subscribe'))return false;
+    // Provider 1.2.4 persists grants under this key. No bearer token is stored.
+    // Do not cache authority across admissions, sends, retries or restarts.
+    let grant;
+    try { grant=await this.env.OAUTH_KV.get(`grant:github-${identity.githubUserId}:${identity.grantId}`,{type:'json'}); }
+    catch { return false; }
+    if(!grant||grant.id!==identity.grantId||grant.userId!==`github-${identity.githubUserId}`||grant.clientId!==identity.clientId||grant.resource!==identity.resource||
+      !Array.isArray(grant.scope)||!grant.scope.includes('events:subscribe')||
+      (grant.expiresAt!==undefined&&(!Number.isFinite(grant.expiresAt)||grant.expiresAt<=now())))return false;
     let project;try{project=workerContext(this.env,identity,owner);}catch{return false;}
     const client=this.env.AUTH_CLIENTS?.[identity.clientId];
     if(!project||project.project!==owner||client?.provider!=='dot'||!client.scopes?.includes('events:subscribe'))return false;
     let admissions;try{admissions=JSON.parse(this.env.ADMISSIONS_JSON??'[]');}catch{return false;}
     return admissions.some(a=>a.githubUserId===identity.githubUserId&&a.ownerId===project.ownerId&&a.clientIds.includes(identity.clientId)&&a.providers.includes('dot')&&a.scopes.includes('events:subscribe'));
+  }
+
+  async #liveSubscription(owner) {
+    for(const sub of this.sql.exec('SELECT * FROM subscriptions WHERE owner=? AND deleted IS NULL AND (non_expiring=1 OR expires>?)',owner,now()).toArray()){
+      if(await this.#eventAccess(owner,JSON.parse(sub.identity_json))&&this.#subscriptionLive(sub))return true;
+    }
+    return false;
   }
 
   #log(fields) {
@@ -372,13 +391,19 @@ export class TaskStore extends DurableObject {
 
   recentEventLogs() { return [...(this.eventLogs ?? [])]; }
 
-  #publicSubscription(id, row, owner) {
-    const accessible = row && row.deleted === null && row.expires > now() && this.#eventAccess(owner, JSON.parse(row.identity_json));
+  // Live means not deleted and either non-expiring or still before the granted expiry.
+  // Expired rows are never silently extended or treated as a continuing refresh target.
+  #subscriptionLive(row, timestamp = now()) {
+    return Boolean(row && row.deleted === null && (Number(row.non_expiring) === 1 || row.expires > timestamp));
+  }
+
+  async #publicSubscription(id, row, owner) {
+    const accessible = this.#subscriptionLive(row) && await this.#eventAccess(owner, JSON.parse(row.identity_json));
     return {
       id, status: !row || row.deleted !== null ? 'gone' : accessible ? 'active' : 'inactive', event: 'task.requested',
       callback_host: row?.url ? callbackHost(row.url) : null,
       created_at: row ? new Date(row.created * 1000).toISOString() : null,
-      expires_at: row ? new Date(row.expires * 1000).toISOString() : null,
+      expires_at: row && !row.non_expiring ? new Date(Math.round(row.expires * 1000)).toISOString() : null,
       deleted_at: row?.deleted ? new Date(row.deleted * 1000).toISOString() : null,
       last_attempt_at: row?.last_attempt_at ? new Date(row.last_attempt_at * 1000).toISOString() : null,
       last_status: Number.isInteger(row?.last_status) ? row.last_status : null,
@@ -390,19 +415,17 @@ export class TaskStore extends DurableObject {
   async subscribe(owner,principal,identity,params) {
     return this.ctx.blockConcurrencyWhile(async()=>{
       this.#policy(owner);
-      if(!this.#eventAccess(owner,identity))denied('event access denied');
+      if(!await this.#eventAccess(owner,identity))denied('event access denied');
       if(!object(params)||Object.keys(params).some(k=>!['name','arguments','delivery','cursor','ttlMs'].includes(k))||params.name!=='task.requested'||!object(params.arguments)||Object.keys(params.arguments).join(',')!=='project'||params.arguments.project!==owner||params.cursor!=null)invalid('invalid event request');
       const delivery=params.delivery;
       if(!object(delivery)||Object.keys(delivery).sort().join(',')!=='mode,secret,url'||delivery.mode!=='webhook')invalid('webhook required');
       try{callbackURL(delivery.url);signingKey(delivery.secret);}catch{invalid('invalid webhook destination or key');}
-      const ttl=params.ttlMs??3600000;
-      if(!Number.isSafeInteger(ttl)||ttl<1000)invalid('invalid ttlMs');
-      const expires=now()+Math.min(ttl/1000,3600);
+      const ttl=Object.hasOwn(params,'ttlMs')?params.ttlMs:3600000;
+      if(ttl!==null&&(!Number.isSafeInteger(ttl)||ttl<1||!Number.isFinite(new Date(Date.now()+ttl).getTime())))invalid('invalid ttlMs');
+      const nonExpiring=ttl===null?1:0,ttlSeconds=nonExpiring?null:ttl/1000;
+      let expires;
       const identityText=JSON.stringify(identity);
       const subscription='sub_'+await digest(JSON.stringify([principal,delivery.url,'task.requested',{project:owner}]));
-      const old=this.sql.exec('SELECT * FROM subscriptions WHERE id=?',subscription).toArray()[0];
-      const count=this.sql.exec('SELECT COUNT(*) AS n FROM subscriptions WHERE principal=? AND owner=? AND deleted IS NULL AND expires>?',principal,owner,now()).one().n;
-      if(!old&&count>=4)invalid('subscription limit reached');
       const challenge=crypto.randomUUID(),id='msg_verification_'+crypto.randomUUID(),body=JSON.stringify({type:'verification',challenge});
       const verifyStarted=Date.now();
       const verifyLog=(errorClass,httpStatus)=>this.#log({message:'subscription_verification_failed',subscription:shortSubscriptionId(subscription),callback_host:callbackHost(delivery.url),event:'verification',http_status:httpStatus,error_class:errorClass,latency_ms:Date.now()-verifyStarted});
@@ -411,45 +434,56 @@ export class TaskStore extends DurableObject {
       catch(error){verifyLog(classifyDelivery(error,0),null);fail('CallbackEndpointError','transport_failed');}
       let response;try{response=await reply.json();}catch{response=null;}
       if(!reply.ok||response?.challenge!==challenge){verifyLog(reply.ok?'challenge_failed':classifyDelivery(null,reply.status),reply.status);fail('CallbackEndpointError','challenge_failed');}
-      if(!this.#eventAccess(owner,identity))denied('event access revoked');
-      const continuing=old&&old.deleted===null&&old.expires>now();
-      this.ctx.storage.transactionSync(()=>{
+      if(!await this.#eventAccess(owner,identity))denied('event access revoked');
+      const continuing=this.ctx.storage.transactionSync(()=>{
+        const timestamp=now();
+        // Grant the full lifetime only after successful callback verification.
+        expires=nonExpiring?0:timestamp+ttlSeconds;
+        if(!nonExpiring&&!Number.isFinite(new Date(expires*1000).getTime()))invalid('invalid ttlMs');
+        const count=this.sql.exec('SELECT COUNT(*) AS n FROM subscriptions WHERE principal=? AND owner=? AND id!=? AND deleted IS NULL AND (non_expiring=1 OR expires>?)',principal,owner,subscription,timestamp).one().n;
+        if(count>=4)invalid('subscription limit reached');
+        const old=this.sql.exec('SELECT * FROM subscriptions WHERE id=?',subscription).toArray()[0];
+        const continuing=this.#subscriptionLive(old,timestamp)&&JSON.parse(old.identity_json).grantId===identity.grantId;
         const start=continuing?old.start_seq:this.sql.exec('SELECT COALESCE(MAX(seq),0) AS n FROM events').one().n;
         const rotate=continuing&&old.secret!==delivery.secret;
         const previous=rotate?old.secret:continuing?old.previous_secret:null;
-        const until=rotate?Math.min(now()+60,old.expires,expires):continuing?Math.min(old.previous_expires??0,expires):null;
+        const oldBound=old&&Number(old.non_expiring)===1?now()+60:old?.expires;
+        const newBound=nonExpiring?now()+60:expires;
+        const until=rotate?Math.min(now()+60,oldBound,newBound):continuing?Math.min(old.previous_expires??0,newBound):null;
         if(!continuing)this.sql.exec('DELETE FROM event_deliveries WHERE subscription=?',subscription);
-        this.sql.exec(`INSERT INTO subscriptions(id,principal,owner,identity_json,url,secret,previous_secret,previous_expires,expires,start_seq,created,deleted)
-          VALUES(?,?,?,?,?,?,?,?,?,?,?,NULL) ON CONFLICT(id) DO UPDATE SET identity_json=excluded.identity_json,secret=excluded.secret,
-          previous_secret=excluded.previous_secret,previous_expires=excluded.previous_expires,expires=excluded.expires,start_seq=excluded.start_seq,deleted=NULL`,
-          subscription,principal,owner,identityText,delivery.url,delivery.secret,previous,until,expires,start,continuing?old.created:now());
+        this.sql.exec(`INSERT INTO subscriptions(id,principal,owner,identity_json,url,secret,previous_secret,previous_expires,expires,start_seq,created,deleted,ttl_seconds,non_expiring)
+          VALUES(?,?,?,?,?,?,?,?,?,?,?,NULL,?,?) ON CONFLICT(id) DO UPDATE SET identity_json=excluded.identity_json,secret=excluded.secret,
+          previous_secret=excluded.previous_secret,previous_expires=excluded.previous_expires,expires=excluded.expires,start_seq=excluded.start_seq,deleted=NULL,
+          ttl_seconds=excluded.ttl_seconds,non_expiring=excluded.non_expiring`,
+          subscription,principal,owner,identityText,delivery.url,delivery.secret,previous,until,expires,start,continuing?old.created:now(),ttlSeconds,nonExpiring);
         this.sql.exec('UPDATE subscriptions SET expiry_logged=0 WHERE id=?',subscription);
+        return continuing;
       });
       this.#log({message:continuing?'subscription_refreshed':'subscription_subscribed',subscription:shortSubscriptionId(subscription),callback_host:callbackHost(delivery.url),event:'task.requested'});
       await this.#wake();
-      return {id:subscription,refreshBefore:new Date(expires*1000).toISOString(),cursor:null,truncated:false};
+      return {id:subscription,refreshBefore:nonExpiring?null:new Date(Math.round(expires*1000)).toISOString(),cursor:null,truncated:false};
     });
   }
 
-  subscriptionStatus(owner,principal,id) {
+  async subscriptionStatus(owner,principal,id) {
     this.#policy(owner);key(id,'subscription ID required');
     const row=this.sql.exec('SELECT * FROM subscriptions WHERE id=?',id).toArray()[0];
     if(row&&(row.owner!==owner||row.principal!==principal))denied('subscription access denied');
     return this.#publicSubscription(id,row,owner);
   }
 
-  listSubscriptions(owner,principal) {
+  async listSubscriptions(owner,principal) {
     this.#policy(owner);
     if(typeof principal!=='string'||!principal)denied('subscription access denied');
     const rows=this.sql.exec('SELECT * FROM subscriptions WHERE principal=? AND owner=? ORDER BY created DESC LIMIT 20',principal,owner).toArray();
-    return {subscriptions:rows.map(row=>this.#publicSubscription(row.id,row,owner))};
+    return {subscriptions:await Promise.all(rows.map(row=>this.#publicSubscription(row.id,row,owner)))};
   }
 
   async unsubscribe(owner,principal,id) {
     return this.ctx.blockConcurrencyWhile(async()=>{
-      const old=this.subscriptionStatus(owner,principal,id),deleted=old.status!=='gone';
+      const old=await this.subscriptionStatus(owner,principal,id),deleted=old.status!=='gone';
       if(deleted)this.ctx.storage.transactionSync(()=>{this.sql.exec('UPDATE subscriptions SET deleted=?,secret=?,previous_secret=NULL WHERE id=?',now(),'',id);this.sql.exec('DELETE FROM event_deliveries WHERE subscription=?',id);});
-      return {...this.subscriptionStatus(owner,principal,id),deleted};
+      return {...await this.subscriptionStatus(owner,principal,id),deleted};
     });
   }
 
@@ -473,47 +507,65 @@ export class TaskStore extends DurableObject {
     const apiJobs=[],nativeJobs=[];
     await this.ctx.blockConcurrencyWhile(async()=>{
       const timestamp=now();
-      this.ctx.storage.transactionSync(()=>{
-        for(const task of this.sql.exec("SELECT * FROM tasks WHERE status IN ('queued','submitting','running') OR (status='cancel_requested' AND ((json_extract(request,'$.mode')='api' AND handle IS NULL) OR (provider='dot' AND json_extract(request,'$.mode')='agent' AND worker IS NULL AND attempt IS NULL)))").toArray()){
+      for(const candidate of this.sql.exec("SELECT * FROM tasks WHERE status IN ('queued','submitting','running') OR (status='cancel_requested' AND ((json_extract(request,'$.mode')='api' AND handle IS NULL) OR (provider='dot' AND json_extract(request,'$.mode')='agent' AND worker IS NULL AND attempt IS NULL)))").toArray()){
+        const active=candidate.provider==='dot'&&candidate.status==='queued'?await this.#liveSubscription(candidate.owner):false;
+        this.ctx.storage.transactionSync(()=>{
+          const task=this.#row(candidate.owner,candidate.id),timestamp=now();
           const unclaimedDot=task.provider==='dot'&&JSON.parse(task.request).mode==='agent'&&!task.worker&&!task.attempt;
-          if(task.status==='cancel_requested'&&unclaimedDot){this.#state(task.id,'cancelled',{error:task.error});continue;}
+          if(task.status==='cancel_requested'&&unclaimedDot){this.#state(task.id,'cancelled',{error:task.error});return;}
           if(task.status==='submitting'||task.status==='cancel_requested'){
-            if(this.apiInFlight.has(task.id)||this.nativeInFlight.has(task.id))continue;
+            if(this.apiInFlight.has(task.id)||this.nativeInFlight.has(task.id))return;
             // Crash before acceptance is unknown, never an instruction to submit a new task.
-            this.#state(task.id,'outcome_unknown',{error:'acceptance_unknown'});continue;
+            this.#state(task.id,'outcome_unknown',{error:'acceptance_unknown'});return;
           }
-          if(task.deadline<=timestamp){this.#state(task.id,task.status==='queued'||unclaimedDot?'cancelled':'cancel_requested',{error:task.status==='queued'?'deadline_before_submission':'deadline_exceeded'});continue;}
-          if(task.status!=='queued')continue;
+          if(task.deadline<=timestamp){this.#state(task.id,task.status==='queued'||unclaimedDot?'cancelled':'cancel_requested',{error:task.status==='queued'?'deadline_before_submission':'deadline_exceeded'});return;}
+          if(task.status!=='queued')return;
           this.#state(task.id,'submitting');
-          if(JSON.parse(task.request).mode==='api'){this.apiInFlight.add(task.id);apiJobs.push(task);continue;}
-          if(task.provider!=='dot'){this.nativeInFlight.add(task.id);nativeJobs.push({...task,change:'requested'});continue;}
-          const active=this.sql.exec('SELECT * FROM subscriptions WHERE owner=? AND deleted IS NULL AND expires>?',task.owner,timestamp).toArray().some(s=>this.#eventAccess(task.owner,JSON.parse(s.identity_json)));
-          if(task.provider!=='dot'||!active){this.#state(task.id,'failed',{error:'submission_rejected'});continue;}
+          if(JSON.parse(task.request).mode==='api'){this.apiInFlight.add(task.id);apiJobs.push(task);return;}
+          if(task.provider!=='dot'){this.nativeInFlight.add(task.id);nativeJobs.push({...task,change:'requested'});return;}
+          if(task.provider!=='dot'||!active){this.#state(task.id,'failed',{error:'submission_rejected'});return;}
           // Pure durable event acceptance has no remote side effect between these writes.
           this.#state(task.id,'running',{handle:JSON.stringify({task_id:task.id,acceptance:'event_pending',model_verification:'unavailable'})});
-        }
-        const matchedOwners=new Set();
-        for(const sub of this.sql.exec('SELECT * FROM subscriptions WHERE deleted IS NULL').toArray()){
-          if(sub.expires<=timestamp){
-            if(!sub.expiry_logged){
+        });
+      }
+      const matchedOwners=new Set();
+      const matchedCounts=new Map();
+      for(const candidate of this.sql.exec('SELECT * FROM subscriptions WHERE deleted IS NULL').toArray()){
+        const accessible=await this.#eventAccess(candidate.owner,JSON.parse(candidate.identity_json));
+        this.ctx.storage.transactionSync(()=>{
+          const sub=this.sql.exec('SELECT * FROM subscriptions WHERE id=?',candidate.id).one();
+          if(sub.deleted!==null)return;
+          if(!this.#subscriptionLive(sub)){
+            if(!Number(sub.non_expiring)&&!sub.expiry_logged){
               this.#log({message:'subscription_expired',subscription:shortSubscriptionId(sub.id),callback_host:callbackHost(sub.url),event:'task.requested'});
               this.sql.exec('UPDATE subscriptions SET expiry_logged=1 WHERE id=?',sub.id);
             }
-            this.sql.exec('DELETE FROM event_deliveries WHERE subscription=?',sub.id);continue;
+            this.sql.exec('DELETE FROM event_deliveries WHERE subscription=?',sub.id);return;
           }
-          if(!this.#eventAccess(sub.owner,JSON.parse(sub.identity_json))){this.sql.exec('DELETE FROM event_deliveries WHERE subscription=?',sub.id);continue;}
+          if(!accessible){this.sql.exec('DELETE FROM event_deliveries WHERE subscription=?',sub.id);return;}
           matchedOwners.add(sub.owner);
+          matchedCounts.set(sub.owner,(matchedCounts.get(sub.owner)??0)+1);
           const pending=this.sql.exec("SELECT COUNT(*) AS n FROM event_deliveries WHERE subscription=? AND status='pending'",sub.id).one().n;
           const rows=this.sql.exec(`SELECT e.seq,e.status,e.created,t.id,t.owner,t.revision FROM events e JOIN tasks t ON t.id=e.task_id
             WHERE t.owner=? AND t.provider='dot' AND e.seq>? AND e.status IN ('queued','message','cancel_requested')
             AND t.status IN ('running','cancel_requested','outcome_unknown') ORDER BY e.seq LIMIT ?`,sub.owner,sub.start_seq,Math.max(0,128-pending)).toArray();
           for(const e of rows){const body=JSON.stringify({eventId:'evt_'+e.seq,name:'task.requested',timestamp:new Date(e.created*1000).toISOString(),cursor:null,data:{task_id:e.id,project:e.owner,revision:e.revision,change:e.status}});this.sql.exec('INSERT OR IGNORE INTO event_deliveries(subscription,seq,body) VALUES(?,?,?)',sub.id,e.seq,body);}
           if(rows.length)this.sql.exec('UPDATE subscriptions SET start_seq=? WHERE id=?',rows.at(-1).seq,sub.id);
-        }
+        });
+      }
+      this.ctx.storage.transactionSync(()=>{
         const fresh=this.sql.exec(`SELECT e.seq,t.id AS task_id,t.owner FROM events e JOIN tasks t ON t.id=e.task_id
           WHERE t.provider='dot' AND e.status IN ('queued','message','cancel_requested') AND COALESCE(e.fanout_noted,0)=0 AND e.created>=? LIMIT 32`,timestamp-3600).toArray();
         for(const event of fresh){
+          const matches=matchedCounts.get(event.owner)??0;
           if(!matchedOwners.has(event.owner))this.#log({message:'event_unmatched',event:'task.requested',task_id:event.task_id,matching_subscriptions:0});
+          else if(!this.sql.exec('SELECT COUNT(*) AS n FROM event_deliveries WHERE seq=?',event.seq).one().n){
+            const task=this.sql.exec('SELECT status FROM tasks WHERE id=?',event.task_id).toArray()[0];
+            // Terminal tasks are intentionally skipped by the enqueue query; only warn when a live match still failed to queue.
+            if(task&&['running','cancel_requested','outcome_unknown'].includes(task.status)){
+              this.#log({message:'enqueue_empty',event:'task.requested',task_id:event.task_id,matching_subscriptions:matches});
+            }
+          }
           this.sql.exec('UPDATE events SET fanout_noted=1 WHERE seq=?',event.seq);
         }
       });
@@ -526,12 +578,18 @@ export class TaskStore extends DurableObject {
         this.sql.exec("INSERT INTO native_notifications(seq,status) VALUES(?,'sending')",event.seq);
         nativeJobs.push(event);
       }
-      const deliveries=this.sql.exec(`SELECT d.*,s.url,s.secret,s.previous_secret,s.previous_expires,s.owner,s.identity_json,s.expires,s.deleted FROM event_deliveries d JOIN subscriptions s ON s.id=d.subscription
+      const deliveries=this.sql.exec(`SELECT d.*,s.url,s.secret,s.previous_secret,s.previous_expires,s.owner,s.identity_json,s.expires,s.deleted,s.non_expiring FROM event_deliveries d JOIN subscriptions s ON s.id=d.subscription
         WHERE d.status='pending' AND d.next_attempt<=? ORDER BY d.seq LIMIT 4`,timestamp).toArray();
       for(const row of deliveries){
-        if(row.deleted!==null||row.expires<=now()||!this.#eventAccess(row.owner,JSON.parse(row.identity_json)))continue;
+        if(row.deleted!==null||!this.#subscriptionLive(row)||!await this.#eventAccess(row.owner,JSON.parse(row.identity_json)))continue;
         let status=0,failure=null;const started=Date.now();
-        try{const reply=await fetch(row.url,{method:'POST',headers:await signedHeaders(row.subscription,row.secret,'evt_'+row.seq,row.body,row.previous_expires>now()?row.previous_secret:null),body:row.body,redirect:'manual',signal:AbortSignal.timeout(2000)});status=reply.status;await reply.body?.cancel();}catch(error){failure=error;}
+        try{
+          const headers=await signedHeaders(row.subscription,row.secret,'evt_'+row.seq,row.body,row.previous_expires>now()?row.previous_secret:null);
+          // Signing and grant reads yield. Check current authority and lifetime at every send.
+          const current=this.sql.exec('SELECT * FROM subscriptions WHERE id=?',row.subscription).toArray()[0];
+          if(!current||!await this.#eventAccess(current.owner,JSON.parse(current.identity_json))||!this.#subscriptionLive(current))continue;
+          const reply=await fetch(row.url,{method:'POST',headers,body:row.body,redirect:'manual',signal:AbortSignal.timeout(2000)});status=reply.status;await reply.body?.cancel();
+        }catch(error){failure=error;}
         const attempts=row.attempts+1,transient=status===0||status===429||status>=500;
         const state=status>=200&&status<300?'sent':transient&&attempts<5?'pending':'stopped';
         const httpStatus=status>=100&&status<=599?status:null;
