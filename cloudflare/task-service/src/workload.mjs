@@ -1,7 +1,7 @@
 // Existing GitHub Actions caller grants, restricted to one configured project and REST resource.
 const ISSUER = 'https://token.actions.githubusercontent.com';
 const JWKS_URL = ISSUER + '/.well-known/jwks';
-const TASK_SCOPES = ['tasks:read', 'tasks:submit'];
+const TASK_SCOPES = ['tasks:read', 'tasks:submit', 'tasks:list'];
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const numericID = value => typeof value === 'string' && /^[1-9][0-9]*$/.test(value);
 const rejected = () => {throw new Error('workload_token_rejected');};
@@ -147,6 +147,7 @@ export async function authenticateGitHubWorkload(token, env, config, decoded) {
 
 export function workloadOperation(request) {
   const path = new URL(request.url).pathname;
+  if (request.method === 'GET' && ['/v1/tasks', '/v1/tasks/stats'].includes(path)) return 'tasks:list';
   return request.method === 'POST' && (path === '/v1/tasks' || /^\/v1\/tasks\/[^/]+\/(messages|cancel)$/.test(path)) ? 'tasks:submit'
     : request.method === 'GET' && (/^\/v1\/tasks\/[^/]+(\/events)?$/.test(path)) ? 'tasks:read' : null;
 }
