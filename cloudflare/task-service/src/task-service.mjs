@@ -1,3 +1,4 @@
+import {taskQuery} from './task-metadata.mjs';
 import {imageMaterials} from './image-materials.mjs';
 import {workerContext,workerProjects} from './projects.mjs';
 import {eventCatalog} from './webhooks.mjs';
@@ -65,6 +66,11 @@ export class TaskService extends WorkerEntrypoint {
       if(!url.pathname.startsWith('/v1/tasks'))return ordinary({error:'not_found'},404);
       const store=this.store(), path=url.pathname, key=request.headers.get('Idempotency-Key');
       if(request.method==='GET'){
+        if(path==='/v1/tasks'||path==='/v1/tasks/stats'){
+          this.scope(c,'tasks:list');if(c.provider!==null)denied();if((await request.text()).length)bad();
+          const stats=path==='/v1/tasks/stats',query=taskQuery(url.searchParams,stats);
+          return ordinary(stats?await store.metadataStats(c.project,query):await store.listMetadata(c.project,query));
+        }
         this.scope(c,'tasks:read');if(c.provider!==null)this.scope(c,'tasks:work');if((await request.text()).length)bad();
         if(path==='/v1/tasks/lookup'){
           const digest=request.headers.get('X-Request-SHA256');if(!/^[a-f0-9]{64}$/.test(digest??''))bad();

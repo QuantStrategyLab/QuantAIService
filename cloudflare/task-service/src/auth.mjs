@@ -11,13 +11,13 @@ import {githubWorkloadToken, authenticateGitHubWorkload, workloadOperation} from
 // Names come from existing server-controlled grants. Never rename an admitted alias.
 const validProvider = (value) => value===null || typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(value);
 // Preserve the current Python service's scope vocabulary.
-export const SCOPES = ['tasks:read', 'tasks:submit', 'tasks:work', 'events:subscribe', 'offline_access'];
+export const SCOPES = ['tasks:list', 'tasks:read', 'tasks:submit', 'tasks:work', 'events:subscribe', 'offline_access'];
 const TRUST_HEADERS = ['authorization', 'x-owner-id', 'x-owner', 'x-project-id', 'x-project',
   'x-provider', 'x-user-id', 'x-github-user-id', 'x-authenticated-identity', 'x-organization'];
 const escape = (value) => String(value).replace(/[&<>"']/g, (char) => `&#${char.charCodeAt(0)};`);
 const deny = (error, status = 403) => Response.json({ error }, { status, headers: { 'Cache-Control': 'no-store' } });
 const requiredScopesFor = (request, isMcp) => [isMcp ? 'tasks:work'
-  : (['GET', 'HEAD'].includes(request.method) ? 'tasks:read' : 'tasks:submit')];
+  : (['GET', 'HEAD'].includes(request.method) ? (['/v1/tasks', '/v1/tasks/stats'].includes(new URL(request.url).pathname) ? 'tasks:list' : 'tasks:read') : 'tasks:submit')];
 const advertisedScopesFor = (resource, request, env) => {
   if (!resource.endsWith('/mcp')) return requiredScopesFor(request, false);
   const configured = Object.values(env.AUTH_CLIENTS ?? {}).filter((client) =>

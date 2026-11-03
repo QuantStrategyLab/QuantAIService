@@ -48,6 +48,22 @@ REST 机器调用方可使用 GitHub Actions OIDC JWT。`TaskClient` 分别配�
 GitHub 通常不提供 OAuth scope；权限取自有限 grant，如 token 显式带 scope 则只取交集。GitHub 签名的 `repository_owner` 必须等于准确仓库 `project` 的所属组织；`PROJECT_CONTEXTS.ownerId` 是既有内部身份名，可以与 GitHub 组织名不同，进入 RPC 时原样保留，不为迁移改名。内部 RPC 的 `githubUserId` 对机器调用方沿用 GitHub 签名 `actor_id` 的数字形状，仅作身份记录，不能据此授予权限；`provider` 固定为 null。外部提供的身份、项目、组织和 provider 头在进入服务绑定前删除。业务 `mode` 仍由既有项目策略选择 Dot 或已明确启用的 API，本鉴权不会启用任何 provider。
 
 REST 机器入口中，`tasks:read` 允许 `GET /v1/tasks/lookup`、`GET /v1/tasks/{id}` 和 `GET /v1/tasks/{id}/events?after={seq}`；`tasks:submit` 允许 `POST /v1/tasks`、`POST /v1/tasks/{id}/messages` 和 `POST /v1/tasks/{id}/cancel`。
+### 只读任务列表与统计
+
+`GET /v1/tasks` 和 `GET /v1/tasks/stats` 要求服务端 workload grant 显式包含 `tasks:list`。原有 `tasks:read`、`tasks:submit` 不获得列表权限，token 只能缩小 grant 的 scope。仅含 `tasks:list` 的 grant 不能读取任务内容、提交、取消、追加消息、领取或回传任务。查询始终限于 grant 绑定的项目，provider 身份不能访问。OAuth 调用方同样须经 client、admission 和 grant 显式准入此 scope。
+
+列表支持可选参数 `since`、`provider`、`status`、`limit`、`cursor`。`since` 是含时区的 ISO 8601 时间戳，按创建时间筛选，包含边界值；省略时从 Unix epoch 开始。`limit` 默认 50，超过 200 按 200 处理。结果按创建时间降序、ID 降序排列。将响应的 `next_cursor` 作为下一页 `cursor`，保持筛选条件；`next_cursor: null` 表示结束。游标使用服务端持久化密钥认证加密，不包含可解码的项目、租户或任务标识，绑定项目、筛选条件和排序。篡改、跨项目、筛选不匹配及旧版游标均返回相同的通用 400；升级后须从第一页开始。分页期间任务状态仍可变化。参数格式错误或重复返回 400，未知 provider 返回空列表。
+
+响应含 `tasks` 和 `next_cursor`。每条任务仅含 `id`、`provider`、`status`、`created_at`、`claimed_at`、`completed_at`、`error_code`。时间戳为 UTC ISO 字符串或 null。`completed_at` 表示进入任一终态的时间，包括失败和取消。新领取记录准确的 `claimed_at`；旧任务无法可靠恢复领取时间，保留 null。旧终态任务使用已有的最终更新时间。
+
+`error_code` 仅返回 `deadline_before_submission`、`deadline_exceeded`、`acceptance_unknown`、`submission_rejected`、`output_schema_mismatch`；其他存储错误统一映射为 `unknown_error`，无错误时为 null。接口不返回 prompt、结果、handle、调用方身份或凭据。
+
+统计仅支持可选的 `since`，含义与列表相同。每次最多读取 1,001 条索引记录：匹配任务不超过 1,000 条时单遍计算精确计数；超过时返回通用 400，不返回部分统计，调用方应缩小 `since` 范围。响应的 `counts` 按 provider 和 status 分组，每项含 `provider`、`status`、`count`；`stuck` 包含 `claimed_not_completed`、`queued_over_threshold` 和二者之和 `total`。`queued_threshold_minutes` 为 15，对应源码常量 `STUCK_QUEUE_MINUTES`。
+
+`claimed_not_completed` 统计明确领取且仍处于非终态的任务，包括有 attempt 但领取时间未知的旧任务；失败和取消属于终态。`queued_over_threshold` 统计仍在 queued 状态且排队超过 15 分钟的任务。没有匹配任务时，`counts` 为空数组，stuck 计数为零。
+
+两个接口都返回 `Cache-Control: no-store`，查询不写任务、不调用 provider、不调度任务。既有 Durable Object SQLite 初始化时添加可空的生命周期列，补齐无筛选、仅 provider、仅 status、provider+status 四种组合的项目/创建时间/ID 索引，并在初始化阶段一次性生成持久化游标密钥。查询阶段不生成或轮换密钥；列表通过索引范围直接定位分页边界，每次最多读取 `limit+1` 条匹配记录。离线 `npm test` 使用合成 ID、本地签名 workload token 和模拟 JWKS 覆盖授权、隔离、筛选、分页、统计和迁移。
+
 
 消息沿用原 SDK 的 JSON `text`、可选 `materials` 与稳定幂等键，同键同正文不重复增加 revision，同键异文返回409；终态和已请求取消的任务不接受新消息。事件沿用原递增 seq 游标，无新事件返回成功空数组；游标无效返回400，未知任务404。取消 body 必须为 `{}`，保留既有幂等及终态语义，不能把已失败任务改称已取消。
 
