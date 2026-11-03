@@ -18,6 +18,17 @@ const fixture = Base => class extends Base {
     initializeTaskMetadata(this.sql);
     initializeTaskMetadata(this.sql);
   }
+  async measureMetadata(owner, query, stats=false) {
+    const sql=this.sql, cursors=[];
+    this.sql={exec(...args){const cursor=sql.exec(...args);cursors.push(cursor);return cursor;}};
+    let result, error;
+    try {result=await (stats?this.metadataStats(owner,query):this.listMetadata(owner,query));}
+    catch (e) {error=e.name;}
+    finally {this.sql=sql;}
+    return {result,error,cost:cursors.map(c=>({read:c.rowsRead,written:c.rowsWritten}))};
+  }
+  reinitialize() {initializeTaskMetadata(this.sql);}
+  dump() {return ['tasks','events','messages'].map(table=>this.sql.exec(`SELECT * FROM ${table} ORDER BY rowid`).toArray());}
   sizes() {return ['tasks','events','messages'].map(table=>this.sql.exec(`SELECT COUNT(*) AS n FROM ${table}`).one().n);}
   async alarm() {}
 };

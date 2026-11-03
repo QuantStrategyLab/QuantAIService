@@ -181,3 +181,84 @@ test('default limit is 50 and explicit limits are capped at 200',async()=>{
   const first=await body(await request('/v1/tasks?limit=999',bearer));assert.equal(first.tasks.length,200);assert.ok(first.next_cursor);
   const next=await body(await request('/v1/tasks?limit=200&cursor='+first.next_cursor,bearer));assert.equal(next.tasks.length,6);assert.equal(next.next_cursor,null);
 });
+
+// Regressions adapted from the exact-head list/stats review probes.
+test('cursor conceals identity and rejects tamper, foreign projects and changed filters',async()=>{
+  const before=await store.dump();
+  const page=await body(await request('/v1/tasks?limit=1'));
+  const cursor=page.next_cursor;
+  for(const encoding of ['utf8','latin1','hex','base64','base64url']) {
+    const decoded=Buffer.from(cursor,'base64url').toString(encoding);
+    for(const marker of [owner,project,Buffer.from(owner).toString('hex'),Buffer.from(project).toString('base64')])
+      assert.ok(!decoded.includes(marker),'cursor must not disclose internal identity');
+  }
+  const data=Buffer.from(cursor,'base64url');
+  for(const index of [0,Math.floor(data.length/2),data.length-1]) {
+    const changed=Buffer.from(data);changed[index]^=1;
+    const response=await request('/v1/tasks?cursor='+changed.toString('base64url'));
+    assert.equal(response.status,400);assert.deepEqual(await response.json(),{error:'invalid arguments'});
+  }
+  for(const path of ['?status=queued','?provider=dot','?since='+encodeURIComponent(iso(old))])
+    assert.equal((await request('/v1/tasks'+path+'&cursor='+cursor)).status,400);
+  assert.equal((await request('/v1/tasks?cursor='+cursor,token(grants[2]))).status,400);
+  const expected=await body(await request('/v1/tasks?limit=1&cursor='+cursor));
+  await store.reinitialize();
+  assert.deepEqual((await body(await request('/v1/tasks?limit=1&cursor='+cursor))).tasks,expected.tasks);
+  assert.equal((await request('/v1/tasks?cursor='+Buffer.from(JSON.stringify([project,0,null,null,1e99,'zzzz'])).toString('base64url'))).status,400);
+  assert.deepEqual(await store.dump(),before);
+});
+
+test('5000-row history has bounded list reads for every filter and deep pages',async()=>{
+  await store.seed(Array.from({length:5000},(_,i)=>({id:'synthetic-load-'+String(i).padStart(5,'0'),owner:project,
+    provider:'dot',status:'queued',created:old-100-i})));
+  const measurements=[];
+  for(const filters of [{},{status:'invalid_output'},{provider:'missing'},{provider:'missing',status:'failed'},
+    {status:'queued'},{provider:'dot'},{provider:'dot',status:'queued'}]) {
+    let cursor=null;
+    for(let page=0;page<3;page++) {
+      const measured=await store.measureMetadata(project,{since:0,provider:null,status:null,limit:1,...filters,cursor});
+      assert.equal(measured.error,undefined);
+      measurements.push({filters,page,cost:measured.cost});
+      assert.ok(measured.cost.every(c=>c.read<=16),'tiny pages must seek instead of scan history');
+      assert.ok(measured.cost.every(c=>c.written===0));
+      cursor=measured.result.next_cursor;if(!cursor)break;
+    }
+  }
+  let cursor=null, total=0, pages=0;
+  do {
+    const measured=await store.measureMetadata(project,{since:0,provider:null,status:null,limit:200,cursor});
+    assert.equal(measured.error,undefined);
+    assert.ok(measured.cost.every(c=>c.read<=410),'later pages must seek directly to their boundary');
+    assert.ok(measured.cost.every(c=>c.written===0));
+    total+=measured.result.tasks.length;pages++;cursor=measured.result.next_cursor;
+  } while(cursor);
+  assert.equal(total,5010);assert.equal(pages,26);
+  console.log(JSON.stringify({probe:'bounded-list',measurements,deep_pages:pages,total}));
+});
+
+test('statistics stop at the scan budget without returning partial counts',async()=>{
+  const before=await store.dump();
+  const stats=await store.measureMetadata(project,{since:0},true);
+  console.log(JSON.stringify({probe:'bounded-statistics',cost:stats.cost,error:stats.error}));
+  assert.equal(stats.error,'ValueError','over-budget statistics must fail closed');
+  assert.ok(stats.cost.every(c=>c.read<=2010),'statistics must stop at the documented row budget');
+  assert.ok(stats.cost.every(c=>c.written===0));
+  const response=await request('/v1/tasks/stats');assert.equal(response.status,400);
+  assert.deepEqual(await response.json(),{error:'invalid arguments'});
+  const recent=await body(await request('/v1/tasks/stats?since='+encodeURIComponent(iso(old))));
+  assert.equal(recent.counts.reduce((n,c)=>n+c.count,0),10);
+  assert.deepEqual(await store.dump(),before);
+});
+
+test('statistics budget boundary preserves exact counts and project isolation',async()=>{
+  // Other project already has 206 tasks. Fill precisely to the budget.
+  await store.seed(Array.from({length:794},(_,i)=>({id:'synthetic-budget-'+i,owner:otherProject,
+    provider:'dot',status:'queued',created:old})));
+  const bearer=token(grants[2]);
+  const exact=await body(await request('/v1/tasks/stats',bearer));
+  assert.equal(exact.counts.reduce((n,c)=>n+c.count,0),1000);
+  assert.equal(exact.stuck.queued_over_threshold,1000);
+  await store.seed([{id:'synthetic-budget-over',owner:otherProject,provider:'dot',status:'queued',created:old}]);
+  assert.equal((await request('/v1/tasks/stats',bearer)).status,400);
+  assert.deepEqual((await body(await request('/v1/tasks/stats?since='+encodeURIComponent(iso(old+1)),bearer))).counts,[]);
+});
