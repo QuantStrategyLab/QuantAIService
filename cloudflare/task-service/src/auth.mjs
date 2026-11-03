@@ -83,7 +83,7 @@ export function createAuthApplication(config, { taskHandler } = {}) {
     issuer: config.origin,
     resources,
     scopesSupported: SCOPES,
-    accessTokenTTL: 900,
+    accessTokenTTL: 3600,
     // Pre-registered clients only until exact native-host registrations are approved.
     clientIdMetadataDocumentEnabled: false,
     allowTokenExchangeGrant: false,
