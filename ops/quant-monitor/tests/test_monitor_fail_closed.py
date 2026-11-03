@@ -1050,7 +1050,6 @@ class MonitorFailClosedTests(unittest.TestCase):
         self.assertIn("new_code", unknown)
 
     def test_telegram_transport_sends_plain_text_without_extra_escaping(self) -> None:
-        from urllib.parse import parse_qs
         from quant_monitor_domain import briefing_dispatch
 
         body = HEALTH_CYCLE._build_alert_body([
@@ -1062,9 +1061,10 @@ class MonitorFailClosedTests(unittest.TestCase):
         with mock.patch.object(briefing_dispatch.urllib.request, "urlopen") as urlopen:
             urlopen.return_value.__enter__.return_value = response
             outcome = briefing_dispatch.telegram_target_outcome(text=body, token="synthetic", chat_id="1")
-        payload = parse_qs(urlopen.call_args.args[0].data.decode("utf-8"))
+        payload = json.loads(urlopen.call_args.args[0].data.decode("utf-8"))
+        self.assertEqual(urlopen.call_args.args[0].get_header("Content-type"), "application/json")
         self.assertEqual(outcome, "sent")
-        self.assertEqual(payload["text"], [body])
+        self.assertEqual(payload["text"], body)
         self.assertNotIn("parse_mode", payload)
 
     def test_health_cycle_non_object_alert_state_is_a_cache_miss(self) -> None:

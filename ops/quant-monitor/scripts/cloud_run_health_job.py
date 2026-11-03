@@ -286,6 +286,8 @@ def refresh_cycle_inputs(input_store, root, *, mode):
 
 
 def main():
+    from quant_platform_kit.notifications import install_log_redaction
+    install_log_redaction(wrap_streams=True)
     mode = os.environ.get('MONITOR_MODE', 'preview')
     from google.cloud import storage
 

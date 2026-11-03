@@ -30,6 +30,11 @@ jobs:
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: '3.12'
+      - name: Install the existing pinned notification SDK
+        run: |
+          pin=$(cat ops/quant-monitor/qpk-runtime.sha)
+          [[ "$pin" =~ ^[0-9a-f]{40}$ ]]
+          python -m pip install "quant-platform-kit @ git+https://github.com/QuantStrategyLab/QuantPlatformKit.git@$pin"
       - name: Test routing and counts-only dry run with synthetic fixtures
         run: |
           python -m pip install ruff==0.15.22
@@ -61,6 +66,11 @@ jobs:
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: '3.12'
+      - name: Install the existing pinned notification SDK
+        run: |
+          pin=$(cat ops/quant-monitor/qpk-runtime.sha)
+          [[ "$pin" =~ ^[0-9a-f]{40}$ ]]
+          python -m pip install "quant-platform-kit @ git+https://github.com/QuantStrategyLab/QuantPlatformKit.git@$pin"
       - name: Mint read-only alert token for QuantStrategyLab
         id: qsl_alerts
         uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2

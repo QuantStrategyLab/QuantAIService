@@ -550,3 +550,9 @@ See the repository `CONTRIBUTING.md`.
 ## Security
 
 See the repository `SECURITY.md`. Do not open a public issue for a vulnerability.
+
+Telegram sends use QPK notification intents and metadata-only outcomes. Existing
+credential references remain unchanged. Environment-backed routes resolve the
+credential in the shared sender; existing in-memory credentials use the shared
+compatibility sender. Service entrypoints install log and stream redaction.
+Provider exceptions and request payloads are never persisted as delivery records.
