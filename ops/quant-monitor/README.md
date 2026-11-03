@@ -124,6 +124,18 @@ prefix IAM binding, preserving the monitor's existing schedule and state.
 | `GH_TOKEN` | No | none | Used by `gh` for repository fetch and issue creation. |
 | `QSL_GITHUB_REPO` | No | none | Default repository for non-strategy briefing issues; strategy evidence goes to the matching strategy repository. |
 
+### Diagnosis cloud storage configuration
+
+The cloud diagnosis workflow requires the protected repository Secret
+`QUANT_MONITOR_GCS_BUCKET`, passed to the same-named runtime environment variable.
+Set it to the already approved diagnosis-state bucket before adopting this change;
+this configuration does not create a bucket or grant access. Use a plain 3–63
+character name containing lowercase letters, digits, hyphens or underscores,
+starting and ending with a letter or digit. Dotted names and reserved Google
+names are rejected. No default resource is used. Missing or invalid values stop
+before workflow authentication, SDK credential discovery or state access.
+Configuration errors report a fixed reason without echoing the private value.
+
 ### Sentinel Secret maintenance
 
 The manual `sync_quant_sentinel_telegram.yml` workflow runs on a GitHub-hosted
