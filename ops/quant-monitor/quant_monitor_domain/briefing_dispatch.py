@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from .briefing_consumer import BriefingAction, BriefingConsumptionResult, BriefingFinding
-from .runtime_digest import prepare_runtime_digest
+from .runtime_digest import prepare_runtime_digest, runtime_error_text
 
 if TYPE_CHECKING:
     from quant_platform_kit.strategy_lifecycle.watch.strategy_watch import StrategyWatchFinding
@@ -481,16 +481,18 @@ def dispatch_runtime_digest(
     dry_run: bool = False,
     send_dry_run: bool = False,
 ) -> dict[str, Any]:
-    """Send one daily runtime projection, or preview it without persistence.
+    """Preview runtime facts; send only errors using the existing receipt ledger.
 
-    Health-cycle delivery state is reused. This does not confirm a health
-    fingerprint, open a GitHub issue, or call a model.
+    The protected runtime handoff remains the fact source for the central daily
+    pipeline. This function does not persist a candidate or send another daily
+    digest, and must never claim that preview means candidate adoption.
     """
     if send_dry_run:
         dry_run = True
     prepared = prepare_runtime_digest(projection)
     summary: dict[str, Any] = {
         "action": "runtime_digest",
+        "candidate_persisted": False,
         "telegram_sent": False,
         "github_issue": None,
         "errors": [],
@@ -509,6 +511,10 @@ def dispatch_runtime_digest(
         summary["skipped"].append("dry_run")
         summary["telegram_dry_run"] = prepared["text"]
         return summary
+    error_text = runtime_error_text(prepared, projection)
+    if error_text is None:
+        summary["skipped"].append("runtime_preview_only")
+        return summary
     token = _telegram_token()
     chat_ids = _telegram_chat_ids()
     if not token or not chat_ids:
@@ -521,7 +527,7 @@ def dispatch_runtime_digest(
         return summary
 
     def send_one(chat_id: str) -> str:
-        return telegram_target_outcome(text=prepared["text"], token=token, chat_id=chat_id)
+        return telegram_target_outcome(text=error_text, token=token, chat_id=chat_id)
 
     delivery = _health_cycle_module().deliver_telegram_targets(
         root,

@@ -550,7 +550,7 @@ class BriefingDispatchTests(unittest.TestCase):
                 "target": {"service": "lb-svc", "strategy_profile": "rot", "account_scope": "paper"},
                 "business_date": "2026-09-28",
                 "timezone": "Asia/Hong_Kong",
-                "status": "no_submission",
+                "status": "unknown",
                 "completeness": "complete",
                 "execution_lane": "paper",
                 "runs": [],
@@ -650,7 +650,7 @@ class BriefingDispatchTests(unittest.TestCase):
             "completeness": "complete",
             "read_errors": [],
             "unmatched_reports": [],
-            "records": [projection["records"][1]],
+            "records": [projection["records"][0]],
         }
         module = __import__("quant_monitor_domain.briefing_dispatch", fromlist=["_health_cycle_module"])._health_cycle_module()
         with tempfile.TemporaryDirectory() as tmp, patch.dict(
