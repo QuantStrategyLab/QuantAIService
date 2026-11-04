@@ -110,6 +110,22 @@ export function classifyLoginError(raw) {
   return "error";
 }
 
+/** Shared display-only masking for opaque identifiers.
+
+  Keep only a short, fixed suffix so a rendered reference is still usable for
+  support correlation without exposing an account name, email or other label.
+  Callers must validate shape first; masking never makes an invalid value safe
+  to display. Empty input stays empty so callers can treat "no reference"
+  separately from a masked one.
+ */
+export function maskIdentifier(value, visible = 4) {
+  const text = String(value ?? "").trim();
+  if (!text) return "";
+  const compact = text.replace(/\s+/g, "");
+  if (compact.length <= visible) return "••••";
+  return "••••" + compact.slice(-visible);
+}
+
 export function safeHttpUrl(value) {
   try {
     const url = new URL(value);
