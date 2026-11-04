@@ -18,6 +18,23 @@ spec = importlib.util.spec_from_file_location("runtime_paths", SCRIPT)
 assert spec and spec.loader
 m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
+REVIEWED_HELPERS = SCRIPT.parents[1] / "tests/fixtures/reviewed-helpers"
+
+
+def reviewed_helper(name):
+    frozen = REVIEWED_HELPERS / name
+    if name not in {"common_env.sh", "daily_briefing_pipeline.sh"}:
+        return (SCRIPT.parent / name).read_bytes()
+    data = frozen.read_bytes()
+    if name == "daily_briefing_pipeline.sh":
+        # Reuse the existing default line without copying its resource name into
+        # a new fixture. The pinned historical digest below validates the result.
+        default = next(line for line in (SCRIPT.parent / name).read_bytes().splitlines()
+                       if line.startswith(b"AAB="))
+        data = data.replace(b'AAB="<PROJECT_ID>"', default)
+    return data
+
+
 RUNTIME = m.base.RUNTIME_ROOT
 RELEASE = m.base.RELEASE_ROOT + "/" + "a" * 40
 MON = "/" + m.base.MONITOR
@@ -76,7 +93,7 @@ class FakeReader:
             return value
         name = path.rsplit("/", 1)[-1]
         if name in m.CODE_NAMES:
-            return (SCRIPT.parent / name).read_bytes()
+            return reviewed_helper(name)
         if name == "qpk-runtime.sha":
             return b"c" * 40 + b"\n"
         raise FileNotFoundError
@@ -91,6 +108,24 @@ def run(values=None, reader=None):
 
 
 class PathInspectionTests(unittest.TestCase):
+    def test_current_helpers_remain_unknown_without_a_reviewed_model(self):
+        class CurrentReader(FakeReader):
+            def read(self, path, *, environment=False):
+                if not environment and path.rsplit("/", 1)[-1] in m.CODE_NAMES:
+                    return (SCRIPT.parent / path.rsplit("/", 1)[-1]).read_bytes()
+                return super().read(path, environment=environment)
+
+        for unit in m.base.SERVICES:
+            with self.subTest(unit=unit):
+                service = run({unit: props(unit)}, CurrentReader())["services"][unit]
+                self.assertEqual(service["helper_model_status"], "unknown")
+                self.assertEqual(service["selected_call_roots"], {})
+                identity = service["static_adoption_identity"]
+                self.assertEqual(identity["status"], "unknown")
+                self.assertFalse(identity["interpreter_invoked"])
+                self.assertFalse(identity["import_execution_proof"])
+                self.assertEqual(identity["stop_reason"], "existing_non_path_precondition_unknown_or_false")
+
     def test_inactive_install_metadata_is_separate_and_does_not_upgrade_old_gates(self):
         self.assertTrue(hasattr(m.Reader, "inactive_install_metadata"))
         result = run()
@@ -284,7 +319,7 @@ class PathInspectionTests(unittest.TestCase):
                          "configuration_or_invocation_changed_or_unavailable")
 
     def test_receipt_pipeline_reviewed_paths_preserve_captured_roots(self):
-        digest = hashlib.sha256((SCRIPT.parent / "daily_briefing_pipeline.sh").read_bytes()).hexdigest()
+        digest = hashlib.sha256(reviewed_helper("daily_briefing_pipeline.sh")).hexdigest()
         self.assertEqual(digest, "220b93478f7b4bf7028cc5587d4607604236999587a3908ba11b751d3f1ee837")
         self.assertIn(digest, m.EXPECTED["daily_briefing_pipeline.sh"])
         self.assertTrue({
@@ -325,10 +360,10 @@ class PathInspectionTests(unittest.TestCase):
                          "existing_non_path_precondition_unknown_or_false")
         self.assertFalse(service["static_adoption_identity"]["import_execution_proof"])
 
-    def test_reviewed_helper_hashes_match_public_source(self):
+    def test_reviewed_helper_hashes_match_model_fixtures(self):
         for name, hashes in m.EXPECTED.items():
             self.assertIn(
-                hashlib.sha256((SCRIPT.parent / name).read_bytes()).hexdigest(), hashes
+                hashlib.sha256(reviewed_helper(name)).hexdigest(), hashes
             )
 
     def test_fixed_classes_reject_traversal_and_unknown_without_echo(self):
