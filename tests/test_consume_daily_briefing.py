@@ -996,6 +996,7 @@ def test_immutable_object_microseconds_dispatch_and_restart_dedupe(tmp_path, cap
 
     projection = json.loads(_projection_file(tmp_path).read_text())
     projection["observed_at"] = "2026-09-28T08:40:00.123456Z"
+    projection["records"][0]["status"] = "unknown"
     uri = "gs://synthetic/runtime_daily/longbridge/paper/2026-09-28/20260928T084000123456Z.json"
     with patch.dict("os.environ", {"QUANT_MONITOR_ROOT": str(tmp_path), "TELEGRAM_TOKEN": "synthetic",
                                   "GLOBAL_TELEGRAM_CHAT_ID": "synthetic-chat"}, clear=True), patch(
@@ -1104,7 +1105,7 @@ def test_multi_target_cli_preview_then_dispatch_survives_module_restart(tmp_path
                    for account in preview["accounts"])
         assert main(_multi_target_args(path, dispatch=True)) == 0
         delivered = json.loads(capsys.readouterr().out)
-        assert sent == [preview["text"]]
+        assert len(sent) == 1 and sent[0].startswith("【资产管理｜运行错误】")
         assert delivered["dispatch"]["telegram_sent"] is True
         original = state.read_bytes()
         # Reload the delivery module from disk, and reverse producer target order.
@@ -1117,7 +1118,7 @@ def test_multi_target_cli_preview_then_dispatch_survives_module_restart(tmp_path
         recovered = json.loads(capsys.readouterr().out)
         assert recovered["event_id"] == preview["event_id"]
         assert recovered["dispatch"]["skipped"] == ["duplicate_delivered"]
-        assert sent == [preview["text"]] and state.read_bytes() == original
+        assert len(sent) == 1 and sent[0].startswith("【资产管理｜运行错误】") and state.read_bytes() == original
 
 
 def test_multi_target_cli_failed_recipient_only_retries_after_restart(tmp_path, capsys):

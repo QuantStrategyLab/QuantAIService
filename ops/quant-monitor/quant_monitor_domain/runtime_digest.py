@@ -7,6 +7,7 @@ The projection's original status is translated; it is not recomputed.
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from datetime import date, datetime
 from typing import Any, Mapping, Sequence
@@ -137,6 +138,14 @@ def prepare_runtime_digest(payload: Mapping[str, Any]) -> dict[str, Any]:
         return _refused("unsafe_text")
     target_scope = sorted(account["target_key"] for account in accounts)
     sendable = len(text) <= TELEGRAM_TEXT_LIMIT
+    event_id = runtime_digest_event_id(_PLATFORM, business_date, target_scope)
+    # Keep error reservations distinct from historical healthy digest receipts.
+    # Use current structured evidence, never observation time or rendered text.
+    attention = sorted({note for account in accounts for note in account["attention"]})
+    error_scope = [attention, bool(payload.get("read_errors")),
+                   bool(payload.get("unmatched_reports")), payload["completeness"]]
+    if attention or any(error_scope[1:3]) or payload["completeness"] != "complete":
+        event_id = hashlib.sha256((event_id + "\nerror\n" + json.dumps(error_scope)).encode()).hexdigest()
     return {
         "ok": True,
         "platform": _PLATFORM,
@@ -145,12 +154,42 @@ def prepare_runtime_digest(payload: Mapping[str, Any]) -> dict[str, Any]:
         "observed_at": payload["observed_at"],
         "completeness": payload.get("completeness"),
         "target_scope": target_scope,
-        "event_id": runtime_digest_event_id(_PLATFORM, business_date, target_scope),
+        "event_id": event_id,
         "text": text,
         "sendable": sendable,
         "reason": None if sendable else "runtime_digest_too_long",
         "accounts": accounts,
     }
+
+
+def runtime_error_text(prepared: Mapping[str, Any], payload: Mapping[str, Any]) -> str | None:
+    """Project only approved status labels into the P10 error template.
+
+    Raw target identities, diagnostics and private source objects remain in the
+    existing protected handoff, never in an asset-management message.
+    """
+    reasons = sorted({note for account in prepared["accounts"] for note in account["attention"]})
+    if payload.get("read_errors"):
+        reasons.append("读取失败")
+    if payload.get("unmatched_reports"):
+        reasons.append("未匹配报告")
+    if prepared["completeness"] != "complete":
+        reasons.append("运行资料不完整")
+    if not reasons:
+        return None
+    observed = _parse_observed_at(prepared["observed_at"])
+    assert observed is not None
+    timestamp = observed.astimezone(ZoneInfo("Asia/Singapore")).strftime("%Y-%m-%d %H:%M:%S SGT")
+    return "\n".join((
+        "【资产管理｜运行错误】",
+        f"时间：{timestamp}",
+        "平台 / 策略：LongBridge / 策略名称未核实",
+        "问题：" + "；".join(dict.fromkeys(reasons)),
+        "影响：是否提交订单：未知；是否有待处理订单：未知",
+        "证据：运行投影；运行链接不可用",
+        "处理：核实原运行记录；未恢复前保持执行保护",
+        "事件：运行投影异常｜投递状态以回执为准",
+    ))
 
 
 def _reject(payload: Mapping[str, Any]) -> dict[str, Any] | None:

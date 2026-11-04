@@ -364,7 +364,7 @@ def read_fixture(uri):
         handle.write('\t'.join(sys.argv[1:]) + '\n')
     payload = {"platform": "longbridge", "observed_at": os.environ.get("RUNTIME_FIXTURE_OBSERVED_AT", day + "T00:00:00Z"), "completeness": "complete", "records": [{
         "target_key": key, "target": {"service": service, "strategy_profile": strategy, "account_scope": scope},
-        "business_date": day, "timezone": "UTC", "status": "market_closed", "completeness": "complete",
+        "business_date": day, "timezone": "UTC", "status": "unknown", "completeness": "complete",
         "execution_lane": "paper", "runs": [], "conflicts": [], "fills": {"source": "not_connected", "records": [], "count": None},
     }]}
     return json.dumps(payload).encode(), None
@@ -550,7 +550,7 @@ def _once_payload():
             "completeness": "complete", "records": [{
                 "target_key": TARGET,
                 "target": {"service": "synthetic-lb", "strategy_profile": "synthetic-profile", "account_scope": "paper"},
-                "business_date": "2026-10-08", "timezone": "UTC", "status": "market_closed",
+                "business_date": "2026-10-08", "timezone": "UTC", "status": "unknown",
                 "completeness": "complete", "execution_lane": "paper", "runs": [], "conflicts": [],
                 "fills": {"source": "not_connected", "records": [], "count": None}}]}
 
@@ -731,14 +731,13 @@ def test_once_actual_unknown_and_legacy_suppression_are_not_success(tmp_path, mo
     monkeypatch.setenv("GLOBAL_TELEGRAM_CHAT_ID", "-100123")
     from scripts import consume_daily_briefing as cli
     from quant_monitor_domain import briefing_dispatch as dispatch
-    from quant_monitor_domain.runtime_digest import prepare_runtime_digest
-    event = prepare_runtime_digest(_once_payload())["event_id"]
     raw = json.dumps(_once_payload()).encode()
     with patch.object(cli, "_read_gcs_object", return_value=(raw, None)), patch.object(dispatch, "telegram_target_outcome", return_value="unknown") as transport:
         first = module._child(SCRIPT.parents[3], "send", OBJECT, "2026-10-08", [TARGET])
         second = module._child(SCRIPT.parents[3], "send", OBJECT, "2026-10-08", [TARGET])
     assert not first["ok"] and not second["ok"] and not second["duplicate"]
     assert transport.call_count == 1
+    event = next(iter(json.loads(state.read_text())["deliveries"]))
     state.write_text(json.dumps({"fingerprint": event}), encoding="utf-8")
     with patch.object(cli, "_read_gcs_object", return_value=(raw, None)), patch.object(dispatch, "telegram_target_outcome") as transport:
         legacy = module._child(SCRIPT.parents[3], "send", OBJECT, "2026-10-08", [TARGET])

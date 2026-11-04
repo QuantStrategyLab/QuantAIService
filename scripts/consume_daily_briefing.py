@@ -857,7 +857,7 @@ def main(argv: list[str] | None = None, *, summary_context=None, review_context=
     parser.add_argument(
         "--dispatch",
         action="store_true",
-        help="Send Telegram / GitHub notifications per briefing severity",
+        help="Send briefing alerts; runtime inputs preview facts and send only errors",
     )
     parser.add_argument("--dry-run", action="store_true", help="Print dispatch actions without sending")
     parser.add_argument(
