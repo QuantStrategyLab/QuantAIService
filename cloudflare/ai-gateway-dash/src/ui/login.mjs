@@ -7,12 +7,15 @@
   Nine presentation states are implemented. The Worker callback reports
   outcomes through `?error=`; that result still wins over `?state=`. Both are
   plain, user-writable URL parameters, so neither is authenticated server
-  evidence: a handcrafted link can claim any outcome. Every URL-derived state
-  is therefore rendered as an unverified preview and never asserts a
-  server-side outcome (for example a cleared session, a denied membership or
-  an in-progress check). No state on this page creates or asserts a session,
-  and `unavailable` disables the only action. The backend gap is recorded in
-  QODER_REPORT.md rather than invented here.
+  evidence: a handcrafted link can claim any outcome. Copy is chosen by origin:
+  a callback `?error=` shows the production state title plus a neutral
+  "no session was created" detail, while a design-only `?state=` keeps the
+  unverified preview wording. Neither asserts a server-side outcome (for
+  example a cleared session, a denied membership or an in-progress check), and
+  progress markers for both stay "unverified" rather than "not started". No
+  state on this page creates or asserts a session, and `unavailable` disables
+  the only action. The backend gap is recorded in QODER_REPORT.md rather than
+  invented here.
 
   References are optional and must arrive as an opaque, validated token in
   `?ref=`; the page never synthesises a correlation ID. A validated reference
@@ -70,17 +73,32 @@ export function resolveLoginRef(search) {
   (`?error=` and `?state=`). Both are user-writable, so neither is
   authenticated server evidence: a handcrafted link can claim any outcome.
   Until the Worker provides a verifiable marker (for example a signed callback
-  result), every URL-derived state is client-attested and renders as an
-  unverified preview. `loginNotice` still accepts an explicit "server"
+  result), every URL-derived state is client-attested and renders without
+  server progress facts. `loginNotice` still accepts an explicit "server"
   attestation so a future authenticated source can opt in, but this resolver
   never returns it. */
 export function resolveLoginAttestation(_search) {
   return "client";
 }
 
+/** Classify which honest copy to show. This is not a trust level: a `?error=`
+  value is the Worker callback's production sign-in result and a `?state=`
+  value is a design-only preview selector, but both remain client-attested.
+  The distinction only decides whether the approved production wording or the
+  unverified preview wording is displayed. */
+export function resolveLoginOrigin(search) {
+  const params = new URLSearchParams(String(search || ""));
+  if (classifyLoginError(params.get("error")) !== "none") return "callback";
+  const requested = params.get("state");
+  return requested ? "design" : "none";
+}
+
 /** Resolve the notice copy for a state without letting an unattested URL state
-  reuse server-fact wording. Returns null for the idle state. */
-export function loginNotice(state, attestation, dictionary) {
+  reuse server-fact wording. Returns null for the idle state.
+
+  `origin` defaults to the conservative "design" preview: a caller that has not
+  classified its source never gets production copy by accident. */
+export function loginNotice(state, attestation, dictionary, origin = "design") {
   if (!state || state === "idle") return null;
   const key = Object.prototype.hasOwnProperty.call(LOGIN_STATES, state) ? state : "error";
   const spec = LOGIN_STATES[key];
@@ -93,6 +111,14 @@ export function loginNotice(state, attestation, dictionary) {
       attested: true,
     };
   }
+  if (origin === "callback") {
+    return {
+      tone: spec.tone,
+      title: dictionary["n_" + key + "_t"],
+      detail: dictionary.callback_detail,
+      attested: false,
+    };
+  }
   return {
     tone: spec.tone,
     title: dictionary.preview_prefix + dictionary["n_" + key + "_t"],
@@ -102,10 +128,13 @@ export function loginNotice(state, attestation, dictionary) {
 }
 
 /** Progress markers are server facts too. A client-attested state must not
-  show "in progress" or "failed" steps that the server never reported. */
+  show "not started", "in progress" or "failed" steps that the server never
+  reported; it shows a neutral "unverified" marker instead. Only a
+  server-attested state may render its real markers, including a genuine "na"
+  (not started) step. */
 export function loginSteps(state, attestation) {
   const key = Object.prototype.hasOwnProperty.call(LOGIN_STATES, state) ? state : "error";
-  if (attestation !== "server") return ["na", "na", "na"];
+  if (attestation !== "server") return ["unverified", "unverified", "unverified"];
   return LOGIN_STATES[key].steps.slice();
 }
 
@@ -212,6 +241,7 @@ ${stepSegments.toString()}
 ${maskIdentifier.toString()}
 ${resolveLoginState.toString()}
 ${resolveLoginAttestation.toString()}
+${resolveLoginOrigin.toString()}
 ${resolveLoginRef.toString()}
 ${loginNotice.toString()}
 ${loginSteps.toString()}
@@ -220,6 +250,7 @@ var lang=root.lang==="en"?"en":"zh-CN";
 var theme=root.getAttribute("data-theme")==="dark"?"dark":"light";
 var state=resolveLoginState(location.search);
 var attestation=resolveLoginAttestation(location.search);
+var origin=resolveLoginOrigin(location.search);
 var ref=resolveLoginRef(location.search);
 var navigating=false;
 
@@ -237,7 +268,7 @@ function renderRich(node,template){
 
 function renderState(t){
   var spec=LOGIN_STATES[state]||LOGIN_STATES.error;
-  var notice=loginNotice(state,attestation,t);
+  var notice=loginNotice(state,attestation,t,origin);
   var note=document.getElementById("note");
   note.className="note";
   note.setAttribute("role","status");
@@ -266,7 +297,7 @@ function renderState(t){
   if(attestation==="server"&&(spec.btn==="busy"||spec.btn==="verify"))gh.setAttribute("aria-busy","true");
   if(attestation!=="server"&&(spec.btn==="busy"||spec.btn==="verify"))gh.setAttribute("aria-disabled","true");
   if(spec.btn==="off"){gh.setAttribute("aria-disabled","true");gh.tabIndex=-1;gh.removeAttribute("href");}
-  var statusLabels={done:t.s_done,run:t.s_run,wait:t.s_wait,fail:t.s_fail,stop:t.s_stop,na:t.s_na};
+  var statusLabels={done:t.s_done,run:t.s_run,wait:t.s_wait,fail:t.s_fail,stop:t.s_stop,na:t.s_na,unverified:t.s_unverified};
   var steps=loginSteps(state,attestation);
   document.querySelectorAll("#steps .step").forEach(function(item,index){
     var key=steps[index]||"na";
