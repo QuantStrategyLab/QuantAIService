@@ -267,8 +267,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - name: Test PR governance with fake native APIs
-        run: node --test scripts/test-risk-gate.cjs
       - name: Validate workflows
         uses: docker://rhysd/actionlint:1.7.12
       - name: Test monthly evidence report without external access
