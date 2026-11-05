@@ -7,20 +7,19 @@ label clears that tier after review and checks. Agent clearance remains availabl
 for all high-risk source and does not claim owner confirmation. Agents never
 change `owner-approved` without a separate exact-candidate owner authorization.
 
-The trusted base workflow reads `.github/governance/policy.json` at the immutable
-PR base SHA. Only markers from a Bot through a listed Codex App are trusted; the
-newest marker must be well-formed, completed and clean on this head. Candidate
-policy edits cannot trust themselves. Missing evidence, changed evidence, a
-shared open PR head, stale base ancestry or incomplete file/rename evidence blocks
-clearance. The `ai-review` status must be required on the default branch.
+The gate is `.github/workflows/risk-gate.yml`, the same file every gate-carrying
+repository in the organization runs. It publishes `risk-gate`, `pr-template` and
+`ai-review`. A Codex receipt is trusted only from the connector login and only
+from the newest marker-bearing comment: it must be well-formed, completed and
+clean on this head. A missing receipt, unresolved findings, a base this head was
+not built on, or a second open pull request sharing the head blocks clearance.
+The gate does not evaluate required checks itself; native branch protection does,
+and the three contexts above are required on the default branch.
 
-The gate refreshes after Documentation check, Engineering governance,
-QuantAIService V2 CI and Review gate, and on native comment/check/status events.
-Base pushes, scheduled recovery and PR close/synchronize recovery use the same
-serialized per-PR writer. Tests run actual embedded workflow code with fake
-native APIs: `node --test scripts/test-risk-gate.cjs`. CI runs these tests in
-QuantAIService V2 CI. Local checks also include the Python suites listed in
-`AGENTS.md`, `python scripts/check_style.py --phase 2`, and actionlint.
+It re-evaluates on pull request events, on comment edits, on a push to the
+default branch, which dispatches one evaluation per open pull request, on a
+six-hour schedule and on manual dispatch. Local checks are the Python suites
+listed in `AGENTS.md`, `python scripts/check_style.py --phase 2`, and actionlint.
 
 ## First adoption
 
