@@ -2,7 +2,21 @@ name: PR risk gate
 
 on:
   pull_request_target:
-    types: [opened, reopened, synchronize, edited, labeled, unlabeled, ready_for_review]
+    types: [opened, reopened, synchronize, edited, labeled, unlabeled, ready_for_review, closed]
+  issue_comment:
+    types: [created, edited, deleted]
+  push:
+    branches: [main, master]
+  schedule:
+    - cron: '17 */6 * * *'
+  check_run:
+    types: [completed, rerequested]
+  check_suite:
+    types: [completed]
+  status:
+  workflow_run:
+    workflows: [Documentation check, Engineering governance, QuantAIService V2 CI, Review gate]
+    types: [completed, in_progress]
   workflow_dispatch:
     inputs:
       pr_number:
@@ -10,19 +24,138 @@ on:
         required: true
         type: string
 
-# No checkout, PR code execution, secret access, label writes or merge permission.
+# Trusted workflow only: no candidate code, label writes or merge permission.
 permissions:
   contents: read
   pull-requests: read
   issues: read
+  checks: read
   statuses: write
 
-concurrency:
-  group: risk-gate-${{ github.event.pull_request.number || inputs.pr_number }}
-  cancel-in-progress: true
-
 jobs:
+  # The `labeled` payload is the only authenticated record of which head a
+  # clearing label was added to. It is written here, in its own job with no
+  # concurrency group, because an evaluation can be superseded by a later event
+  # and the evidence must not depend on that run reaching its next step.
+  record_label:
+    name: Record the head a clearing label was added to
+    if: github.event_name == 'pull_request_target' && github.event.action == 'labeled'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: read
+      pull-requests: read
+      statuses: write
+    steps:
+      - name: Publish the label's head as an immutable commit status
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        env:
+          APPROVAL_OWNER: ${{ vars.RISK_GATE_OWNER }}
+        with:
+          script: |
+            try {
+            const label = context.payload.label?.name;
+            if (!['owner-approved', 'agent-approved'].includes(label)) return;
+            // Only the configured approver's label carries a claim.
+            if (!process.env.APPROVAL_OWNER || context.payload.sender?.login !== process.env.APPROVAL_OWNER) return;
+            const sha = context.payload.pull_request?.head?.sha;
+            // A closed pull request keeps no authority over a commit that
+            // another pull request may now use.
+            if (!sha || context.payload.pull_request?.state !== 'open') return;
+            // The pull request is part of the record: two PRs can share a
+            // commit, and an approval given on one must not clear the other.
+            const number = context.payload.pull_request?.number;
+            if (!number) return;
+            // The event id is part of the record too. A label can be revoked
+            // and added again later; without the id, moving the head back would
+            // revive the revoked approval, because the record and the live
+            // event would not be the same approval.
+            //
+            // The id has to come from this delivery, not from the newest event
+            // at execution time: a run queued for head A can start after the
+            // label was revoked and added again on head B, and taking the
+            // newest event would stamp B's approval onto A. The payload carries
+            // no event id, but a label change bumps `pull_request.updated_at`
+            // to the addition's own time, and that snapshot arrived with the
+            // head it records, so matching on that time names this addition.
+            const addedAt = context.payload.pull_request?.updated_at;
+            if (!addedAt) return;
+            const events = await github.paginate(github.rest.issues.listEvents, {
+              ...context.repo, issue_number: number, per_page: 100,
+            });
+            const matches = events.filter(event => event.event === 'labeled'
+              && event.label?.name === label
+              && event.actor?.login === process.env.APPROVAL_OWNER
+              && event.created_at === addedAt);
+            // Two additions in the same second cannot be told apart; recording
+            // either could credit the wrong head, so this delivery records
+            // nothing and the gate stays closed until a later addition.
+            if (matches.length !== 1) return;
+            const record = matches[0];
+            await github.rest.repos.createCommitStatus({
+              ...context.repo, sha, context: 'clearing-label', state: 'success',
+              description: `${label} for PR ${number} at event ${record.id} on this head`,
+            });
+            } catch { core.setFailed('Clearing-label evidence unavailable; approval blocked'); }
+
+  discover:
+    if: >-
+      (github.event_name != 'issue_comment' || github.event.issue.pull_request) &&
+      (github.event_name != 'status' ||
+       (github.event.context != 'risk-gate' && github.event.context != 'pr-template' && github.event.context != 'ai-review' && github.event.context != 'clearing-label'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+      statuses: read
+    outputs:
+      prs: ${{ steps.candidates.outputs.prs }}
+    steps:
+      - id: candidates
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        env:
+          PR_NUMBER: ${{ inputs.pr_number }}
+        with:
+          script: |
+            try {
+              const payload = context.payload;
+              let numbers = [payload.pull_request?.number || payload.issue?.number || Number(process.env.PR_NUMBER)].filter(Boolean);
+              const sweep = ['push', 'schedule'].includes(context.eventName)
+                || (context.eventName === 'pull_request_target' && payload.action === 'closed');
+              if (sweep || (context.eventName === 'pull_request_target' && payload.action === 'synchronize')) {
+                // Base/close recovery and collision release join the same per-PR writer.
+                const open = await github.paginate(github.rest.pulls.list,
+                  {...context.repo, state: 'open', per_page: 100});
+                if (sweep) numbers = open.map(pr => pr.number);
+                else for (const pr of open) {
+                  if (numbers.includes(pr.number)) continue;
+                  const {data} = await github.rest.repos.getCombinedStatusForRef({...context.repo, ref: pr.head.sha});
+                  const gate = data.statuses?.find(entry => entry.context === 'risk-gate');
+                  if (gate?.state === 'error' && /shares this head/.test(gate.description || '')) numbers.push(pr.number);
+                }
+              } else if (!numbers.length) {
+                const sha = payload.check_run?.head_sha || payload.check_suite?.head_sha || payload.workflow_run?.head_sha || payload.sha;
+                if (typeof sha !== 'string' || !/^[0-9a-f]{40}$/.test(sha)) throw new Error();
+                const associated = await github.paginate(github.rest.repos.listPullRequestsAssociatedWithCommit,
+                  {...context.repo, commit_sha: sha, per_page: 100});
+                numbers = associated.filter(pr => pr.state === 'open' && pr.head?.sha === sha).map(pr => pr.number);
+              }
+              if (numbers.some(number => !Number.isSafeInteger(number) || number < 1)) throw new Error();
+              core.setOutput('prs', JSON.stringify([...new Set(numbers)]));
+            } catch { core.setFailed('Candidate lookup unavailable; approval blocked'); }
+
   evaluate:
+    needs: [discover, record_label]
+    if: always() && needs.discover.result == 'success' && needs.record_label.result != 'failure' && needs.record_label.result != 'cancelled' && needs.discover.outputs.prs != '[]' && needs.discover.outputs.prs != ''
+    strategy:
+      fail-fast: false
+      matrix:
+        pr: ${{ fromJSON(needs.discover.outputs.prs) }}
+    # Comment, PR and check events resolve to the same PR writer across restarts.
+    concurrency:
+      group: risk-gate-${{ github.repository }}-${{ matrix.pr }}
+      cancel-in-progress: false
     name: Evaluate PR governance
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -30,24 +163,65 @@ jobs:
       - name: Publish risk-gate and PR template checks on the PR head
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
         env:
-          PR_NUMBER: ${{ inputs.pr_number }}
+          PR_NUMBER: ${{ matrix.pr }}
+          APPROVAL_OWNER: ${{ vars.RISK_GATE_OWNER }}
         with:
           script: |
-            // Executed only by the trusted base-branch workflow. Never load PR code.
-            const number = context.payload.pull_request?.number || Number(process.env.PR_NUMBER);
-            if (!Number.isSafeInteger(number) || number < 1) throw new Error('Invalid PR number');
+            // Only trusted base/default-branch workflow code executes; never load PR code.
             const repo = context.repo;
+            const fail = () => { throw new Error('Governance evidence unavailable'); };
+            const hash = value => typeof value === 'string' && /^[0-9a-f]{40}$/.test(value);
             const target = `${context.serverUrl}/${repo.owner}/${repo.repo}/actions/runs/${context.runId}`;
-            let sha;
-            const status = (name, state, description) => github.rest.repos.createCommitStatus({
-              ...repo, sha, context: name, state, description, target_url: target,
-            });
+            const number = Number(process.env.PR_NUMBER);
+            const APPROVAL_OWNER = process.env.APPROVAL_OWNER || '';
+            const isWorkflow = path => path.startsWith('.github/workflows/');
+            // Sensitive-path classification: match normalized lowercase snake_case paths.
+            // * never crosses /; ** does. No docs/tests exemption applies to this list.
+            const sensitiveGlobs = [
+              '**/*secret*', '**/*secret*/**', '**/*credential*', '**/*credential*/**',
+              '**/.env*', '**/*.pem', '**/*.key', '**/*.p12', '**/*.pfx',
+              '**/*iam*', '**/*iam*/**', '**/*service_account*', '**/*service_account*/**',
+              '**/*serviceaccount*', '**/*serviceaccount*/**', '**/*permission*', '**/*permission*/**',
+              '**/*role_binding*', '**/*role_binding*/**',
+              '**/*deploy*', '**/*deploy*/**', '**/*release*', '**/*release*/**',
+              '**/*.tf', '**/*.tfvars', '**/dockerfile*', '**/docker-compose*', '**/compose.y*ml',
+              '**/vercel.json', '**/wrangler.*', '**/firebase.json', '**/k8s/**', '**/kubernetes/**',
+              '**/*trad*', '**/*trad*/**', '**/*execution*', '**/*execution*/**',
+              '**/*executor*', '**/*executor*/**', '**/*order*', '**/*order*/**',
+              '**/*broker*', '**/*broker*/**', '**/*kelly*', '**/*kelly*/**',
+              '**/*stop*loss*', '**/*stop*loss*/**',
+              '.github/governance/**', '.github/workflows/risk-gate.yml', '**/codeowners',
+            ];
+            const normalize = path => path.replace(/([a-z0-9])([A-Z])/g, '$1_$2').toLowerCase();
+            function matchesGlob(path, glob) {
+              let pattern = '^';
+              for (let i = 0; i < glob.length; i++) {
+                const char = glob[i];
+                if (char === '*' && glob[i + 1] === '*') {
+                  i++;
+                  if (glob[i + 1] === '/') { pattern += '(?:.*/)?'; i++; }
+                  else pattern += '.*';
+                } else if (char === '*') pattern += '[^/]*';
+                else pattern += '\\^$.*+?()[]{}|'.includes(char) ? '\\' + char : char;
+              }
+              return new RegExp(pattern + '$').test(normalize(path));
+            }
+            const sensitivePath = path => sensitiveGlobs.some(glob => matchesGlob(path, glob));
             function highRisk(path) {
               const p = path.replace(/([a-z0-9])([A-Z])/g, '$1_$2').toLowerCase();
-              if (p.startsWith('.github/workflows/') || /(^|\/)codeowners$/.test(p)) return true;
+              if (p.startsWith('.github/governance/') || p.startsWith('.github/scripts/') || /(^|\/)codeowners$/.test(p)) return true;
               if (/(^|\/)(docs?|tests?|examples?|fixtures)(\/|$)/.test(p)) return false;
               if (/(^|\/)\.env(?:[./_-]|$)/.test(p)) return true;
-              if (/(^|[\/_.-])(trad(?:e|es|ing)|execution|executors?|orders?|brokers?|risk|deploy(?:ment)?|secrets?|credentials?|iam|runtime|strateg(?:y|ies))([\/_.-]|$)/.test(p)) return true;
+              // Runtime configuration decides behaviour the diff does not show.
+              if (/(^|[\/_.-])(config|configuration|settings)([\/_.-]|$)/.test(p)) return true;
+              // The dependency policy decides what merges unattended; the PR it
+              // judges must not be able to relax it. The same applies to any
+              // other script a trusted workflow runs to publish a required
+              // check: editing the script disables the check without touching a
+              // workflow file, and a diff alone cannot show who calls it.
+              if (/^\.github\/scripts\//.test(path)) return true;
+              if (/^scripts\/[^/]*(?:check|verify|validate|hygiene|lint)[^/]*\.(?:py|sh|js|cjs|mjs|ts)$/.test(p)) return true;
+              if (/(^|[\/_.-])(ai_service|aiservice|kelly|stop_loss|trad(?:e|es|ing)|execution|executors?|orders?|brokers?|risk|deploy(?:ment)?|secrets?|credentials?|iam|runtime|strateg(?:y|ies))([\/_.-]|$)/.test(p)) return true;
               return /(^|\/)(dockerfile(?:\..*)?|docker-compose[^/]*|compose\.ya?ml|vercel\.json|wrangler\.(?:toml|jsonc?)|firebase\.json)$/.test(p)
                 || /\.(?:tf|tfvars)$/.test(p);
             }
@@ -61,42 +235,184 @@ jobs:
                 && present(/what changed|summary|problem|changes|变更|改动/i)
                 && present(/how verified|verif|validat|test(?:ing| plan)?|验证|测试/i);
             }
-            try {
-              const { data: pr } = await github.rest.pulls.get({ ...repo, pull_number: number });
-              sha = pr.head.sha;
-              // Dependabot bodies use their own template; the risk-gate path check still applies below.
-              const isDependabot = pr.user?.login === 'dependabot[bot]';
-              await status('risk-gate', 'pending', 'Evaluating changed paths and owner approval');
-              await status('pr-template', 'pending', 'Checking AI, change and verification fields');
-              const files = await github.paginate(github.rest.pulls.listFiles, { ...repo, pull_number: number, per_page: 100 });
-              // GitHub caps this API at 3000 files. Incomplete diffs must not pass as low risk.
-              if (files.length !== pr.changed_files || files.length >= 3000) throw new Error('Incomplete PR file list');
-              const risky = files.some(file => [file.filename, file.previous_filename].filter(Boolean).some(highRisk));
-              let approved = false;
-              if (pr.labels.some(label => label.name === 'owner-approved')) {
-                const events = await github.paginate(github.rest.issues.listEvents, { ...repo, issue_number: number, per_page: 100 });
+
+            function cleanReview(comments, policy, sha) {
+              if (!Array.isArray(policy.codex_app_ids) || !policy.codex_app_ids.length
+                  || !policy.codex_app_ids.every(id => Number.isSafeInteger(id) && id > 0)) return false;
+              const entries = comments.filter(entry => entry.user?.type === 'Bot'
+                && policy.codex_app_ids.includes(entry.performed_via_github_app?.id)
+                && typeof entry.body === 'string' && entry.body.includes('codex-review-state:v1'));
+              if (!entries.length || entries.some(entry => !Number.isSafeInteger(entry.id)
+                  || !Number.isFinite(Date.parse(entry.updated_at)) || Date.parse(entry.updated_at) > Date.now())) return false;
+              entries.sort((a, b) => Date.parse(b.updated_at) - Date.parse(a.updated_at) || b.id - a.id);
+              if ((entries[0].body.match(/codex-review-state:v1/g) || []).length !== 1) return false;
+              const match = /<!-- codex-review-state:v1 (\{[^\n]*\}) -->/.exec(entries[0].body);
+              if (!match) return false;
+              let review;
+              try { review = JSON.parse(match[1]).code_review; } catch { return false; }
+              return review?.commit_sha === sha && review.status === 'completed'
+                && typeof review.has_any_findings === 'boolean' && review.has_unresolved_findings === false;
+            }
+            async function requiredChecks(number, branch) {
+              // GraphQL null means no classic rule; absent data/permission errors are unknown.
+              const data = await github.graphql(`query($owner:String!,$repo:String!,$number:Int!) {
+                repository(owner:$owner,name:$repo) { pullRequest(number:$number) { baseRef {
+                  branchProtectionRule { requiredStatusCheckContexts requiredStatusChecks { context app { databaseId } } }
+                } } }
+              }`, {...repo, number});
+              const ref = data.repository?.pullRequest?.baseRef;
+              if (!ref || !Object.hasOwn(ref, 'branchProtectionRule')) fail();
+              const rule = ref.branchProtectionRule;
+              if (rule !== null && (!Array.isArray(rule.requiredStatusChecks)
+                  || !Array.isArray(rule.requiredStatusCheckContexts))) fail();
+              const classic = rule?.requiredStatusChecks.map(check => ({context: check.context,
+                app: check.app === null ? null : check.app?.databaseId})) || [];
+              if (rule?.requiredStatusCheckContexts.some(name => !classic.some(check => check.context === name))) fail();
+              const rules = await github.paginate(github.rest.repos.getBranchRules, {...repo, branch, per_page: 100});
+              const required = [...classic];
+              for (const entry of rules) {
+                if (entry.type !== 'required_status_checks') continue;
+                if (!Array.isArray(entry.parameters?.required_status_checks)) fail();
+                for (const check of entry.parameters.required_status_checks) {
+                  required.push({context: check.context, app: check.integration_id ?? null});
+                }
+              }
+              if (!required.length || required.some(check => typeof check.context !== 'string' || !check.context
+                  || (check.app !== null && (!Number.isSafeInteger(check.app) || check.app <= 0)))) fail();
+              return {required, rules};
+            }
+            function checksGreen(evidence, sha, templateOK) {
+              return evidence.required.every(required => {
+                // These three contexts are produced here; cleanReview validates ai-review. Validate the template locally; risk-gate
+                // is this decision's output, never an input. Other required jobs are never exempt.
+                if (['risk-gate', 'pr-template', 'ai-review'].includes(required.context)) {
+                  return (required.app === null || required.app === 15368) && templateOK;
+                }
+                const checks = evidence.checks.filter(check => check.name === required.context
+                  && (required.app === null || check.app?.id === required.app)).sort((a, b) => b.id - a.id);
+                const statuses = evidence.statuses.filter(status => status.context === required.context).sort((a, b) => b.id - a.id);
+                if (checks.some(check => !Number.isSafeInteger(check.id)) || statuses.some(status => !Number.isSafeInteger(status.id))) return false;
+                // Legacy statuses do not expose their source App. They cannot satisfy App-bound
+                // requirements; leave enforcement closed rather than infer identity from a login.
+                if (required.app !== null && statuses.length) return false;
+                if (!checks.length && !statuses.length) return false;
+                return (!checks.length || (checks[0].head_sha === sha && checks[0].status === 'completed'
+                    && checks[0].conclusion === 'success'))
+                  && (!statuses.length || statuses[0].state === 'success');
+              });
+            }
+            function clearingLabel(events, statuses, labels, number) {
+              const onHead = {};
+              for (const name of ['owner-approved', 'agent-approved']) {
+                if (!labels.some(label => label.name === name)) continue;
                 const latest = events.filter(event => ['labeled', 'unlabeled'].includes(event.event)
-                  && event.label?.name === 'owner-approved').sort((a, b) => b.id - a.id)[0];
-                // A shared GitHub identity cannot distinguish the owner from their AI agents.
-                approved = latest?.event === 'labeled' && latest.actor?.login === 'Pigbibi';
+                  && event.label?.name === name).sort((a, b) => b.id - a.id)[0];
+                if (!latest || !Number.isSafeInteger(latest.id) || latest.event !== 'labeled'
+                    || !APPROVAL_OWNER || latest.actor?.login !== APPROVAL_OWNER) continue;
+                onHead[name] = statuses.some(entry => entry.context === 'clearing-label' && entry.state === 'success'
+                  && entry.description === `${name} for PR ${number} at event ${latest.id} on this head`);
               }
-              const { data: current } = await github.rest.pulls.get({ ...repo, pull_number: number });
-              if (current.head.sha !== sha || current.body !== pr.body
-                  || JSON.stringify(current.labels.map(x => x.name).sort()) !== JSON.stringify(pr.labels.map(x => x.name).sort())) {
-                throw new Error('PR changed during evaluation; wait for the latest event');
+              return onHead['owner-approved'] ? 'owner' : onHead['agent-approved'] ? 'agent' : null;
+            }
+            async function liveBase(baseRef, sha) {
+              const {data} = await github.rest.repos.getBranch({...repo, branch: baseRef});
+              const base = data.commit?.sha;
+              if (!hash(base)) fail();
+              const {data: cmp} = await github.rest.repos.compareCommits({...repo, base, head: sha});
+              return {base, contained: cmp.merge_base_commit?.sha === base};
+            }
+            async function noSharedHead(sha) {
+              const open = await github.paginate(github.rest.pulls.list, {...repo, state: 'open', per_page: 100});
+              if (open.some(pr => pr.number !== number && pr.head?.sha === sha)) {
+                const error = new Error('Shared head'); error.code = 'SHARED_HEAD'; throw error;
               }
-              const allowed = !risky || approved;
-              await status('risk-gate', allowed ? 'success' : 'failure', !risky ? 'Low-risk paths: no owner approval needed'
-                : approved ? 'High-risk paths: owner-approved label verified' : 'High-risk paths: needs-owner-approval; owner must add owner-approved');
-              const templateOK = isDependabot ? true : completeTemplate(pr.body);
-              await status('pr-template', templateOK ? 'success' : 'failure', isDependabot
-                ? 'Automated dependency update: PR template not required'
-                : templateOK ? 'AI, change and verification fields are filled in' : 'Fill in AI assistance, What changed and How verified sections');
-              if (!allowed || !templateOK) core.setFailed('Required PR governance checks did not pass');
-            } catch (error) {
-              if (sha) {
-                await status('risk-gate', 'error', 'Evaluation failed; inspect the trusted workflow run');
-                await status('pr-template', 'error', 'Evaluation failed; inspect the trusted workflow run');
+            }
+            {
+              let sha;
+              const status = async (name, state, description) => {
+                try {
+                  await github.rest.repos.createCommitStatus({
+                    ...repo, sha, context: name, state, description, target_url: target,
+                  });
+                } catch { fail(); }
+              };
+              try {
+                if (!Number.isSafeInteger(number) || number < 1) fail();
+                const args = {...repo, pull_number: number};
+                const readPR = async () => (await github.rest.pulls.get(args)).data;
+                const binding = pr => [pr.state, pr.head?.sha, pr.base?.sha, pr.base?.ref,
+                  pr.base?.repo?.full_name, pr.changed_files, pr.body, pr.labels];
+                const pr = await readPR();
+                // A closed PR cannot overwrite a live PR's commit statuses.
+                if (pr.state === 'closed') return;
+                sha = pr.head?.sha;
+                if (pr.state !== 'open' || !hash(sha) || !hash(pr.base?.sha) || !pr.base?.ref
+                    || pr.base.repo?.full_name?.toLowerCase() !== `${repo.owner}/${repo.repo}`.toLowerCase()) fail();
+                await noSharedHead(sha);
+                await status('risk-gate', 'pending', 'Evaluating current review, clearing label and required checks');
+                const templateOK = completeTemplate(pr.body);
+                await status('pr-template', templateOK ? 'success' : 'failure', templateOK
+                  ? 'AI, change and verification fields are filled in' : 'Fill in AI, change and verification sections');
+                const readFiles = async () => {
+                  const files = await github.paginate(github.rest.pulls.listFiles, {...args, per_page: 100});
+                  if (!Number.isSafeInteger(pr.changed_files) || pr.changed_files < 1
+                      || files.length !== pr.changed_files || files.length >= 3000
+                      || new Set(files.map(file => file.filename)).size !== files.length
+                      || files.some(file => typeof file.filename !== 'string' || !file.filename
+                        || !['added', 'modified', 'removed', 'renamed'].includes(file.status)
+                        || (file.previous_filename !== undefined && (typeof file.previous_filename !== 'string' || !file.previous_filename))
+                        || (file.status === 'renamed' && !file.previous_filename))) fail();
+                  return files;
+                };
+                const files = await readFiles();
+                const paths = files.flatMap(file => [file.filename, file.previous_filename].filter(Boolean));
+                const risky = paths.some(path => isWorkflow(path) || sensitivePath(path) || highRisk(path));
+                const {data: content} = await github.rest.repos.getContent({...repo,
+                  path: '.github/governance/policy.json', ref: pr.base.sha});
+                if (content.encoding !== 'base64' || typeof content.content !== 'string') fail();
+                const policy = JSON.parse(Buffer.from(content.content, 'base64').toString('utf8'));
+                const readEvidence = async () => ({
+                  ...await requiredChecks(number, pr.base.ref),
+                  comments: await github.paginate(github.rest.issues.listComments, {...repo, issue_number: number, per_page: 100}),
+                  checks: await github.paginate(github.rest.checks.listForRef, {...repo, ref: sha, filter: 'latest', per_page: 100}),
+                  statuses: (await github.paginate(github.rest.repos.listCommitStatusesForRef, {...repo, ref: sha, per_page: 100}))
+                    .filter(entry => !['risk-gate', 'pr-template', 'ai-review'].includes(entry.context)),
+                  events: await github.paginate(github.rest.issues.listEvents, {...repo, issue_number: number, per_page: 100}),
+                  live: await liveBase(pr.base.ref, sha),
+                });
+                const before = await readEvidence();
+                const reviewOK = before.live.contained && cleanReview(before.comments, policy, sha);
+                const checksOK = checksGreen(before, sha, templateOK);
+                const approval = clearingLabel(before.events, before.statuses, pr.labels, number);
+                const after = await readEvidence();
+                const currentFiles = await readFiles();
+                const current = await readPR();
+                if (JSON.stringify(binding(current)) !== JSON.stringify(binding(pr))
+                    || JSON.stringify(currentFiles) !== JSON.stringify(files)
+                    || JSON.stringify(before) !== JSON.stringify(after)) fail();
+                await noSharedHead(sha);
+                await status('ai-review', reviewOK ? 'success' : 'failure', reviewOK
+                  ? 'Trusted Codex App reviewed this head with no unresolved findings'
+                  : 'Exact-head clean Codex review and live-base ancestry required');
+                const allowed = reviewOK && checksOK && templateOK && (!risky || approval !== null);
+                const note = !risky ? 'Low-risk paths: review and required checks verified'
+                  : approval === 'owner' ? 'High-risk paths: owner-approved label verified'
+                  : approval === 'agent' ? 'High-risk paths: agent-approved, NOT confirmed by the owner'
+                  : 'High-risk paths: needs head-bound agent-approved or owner-approved';
+                await status('risk-gate', allowed ? 'success' : 'failure', allowed ? note
+                  : !reviewOK || !checksOK || !templateOK ? 'Approval blocked: review, template or required checks incomplete' : note);
+                if (!allowed) core.setFailed('Required PR governance checks did not pass');
+              } catch (error) {
+                if (hash(sha)) {
+                  const detail = error?.code === 'SHARED_HEAD'
+                    ? 'Another open pull request shares this head; statuses would collide'
+                    : 'Evidence unavailable or changed; approval blocked';
+                  try {
+                    await status('risk-gate', 'error', detail);
+                    await status('pr-template', 'error', detail);
+                    await status('ai-review', 'error', detail);
+                  } catch { /* Never expose transport diagnostics. */ }
+                }
+                core.setFailed('Governance evidence unavailable; approval blocked');
               }
-              throw error;
             }
