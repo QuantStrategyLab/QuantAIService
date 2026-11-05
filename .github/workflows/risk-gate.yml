@@ -180,9 +180,11 @@ jobs:
               // workflow file, and a diff alone cannot show who calls it.
               if (/^\.github\/scripts\//.test(path)) return true;
               if (/^scripts\/[^/]*(?:check|verify|validate|hygiene|lint)[^/]*\.(?:py|sh|js|cjs|mjs|ts)$/.test(p)) return true;
-              if (/(^|[\/_.-])(ai_service|aiservice|kelly|stop_loss|trad(?:e|es|ing)|execution|executors?|orders?|brokers?|risk|deploy(?:ment)?|secrets?|credentials?|iam|runtime|strateg(?:y|ies))([\/_.-]|$)/.test(p)) return true;
+              // Release, deployment, credential and live-trading tooling are named here
+              // because a diff alone rarely shows what a script changes at run time.
+              if (/(^|[\/_.-])(ai_service|aiservice|kelly|stop_loss|trad(?:e|es|ing)|execution|executors?|orders?|brokers?|risk|release|deploy(?:ment)?|secrets?|credentials?|iam|service_account|serviceaccount|permission|role_binding|k8s|kubernetes|runtime|strateg(?:y|ies))([\/_.-]|$)/.test(p)) return true;
               return /(^|\/)(dockerfile(?:\..*)?|docker-compose[^/]*|compose\.ya?ml|vercel\.json|wrangler\.(?:toml|jsonc?)|firebase\.json)$/.test(p)
-                || /\.(?:tf|tfvars)$/.test(p);
+                || /\.(?:tf|tfvars|pem|key|p12|pfx)$/.test(p);
             }
             // A repin keeps the action and changes only its ref. Swapping in a
             // different action is a different change and takes the normal tier.
