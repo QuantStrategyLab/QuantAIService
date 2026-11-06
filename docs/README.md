@@ -10,6 +10,10 @@
 - [Quant task routing (`task.routing.v1`)](scenario-provider-routing.md) · [中文](scenario-provider-routing.zh-CN.md): config-only categories/scenarios under `PROJECT_POLICIES[project].routing`, compatible with the private routing service contract.
 - [V2 guide index](upgrade-v2/README.md): current configuration references versus dated migration material.
 
+## Development controls
+
+- [PR governance and live deployment boundary](governance.md): trusted review, head-bound clearance, first adoption and the fixed deployment approval contract.
+
 ## Monitoring operations
 
 - [Security alert routing](security-alert-routing.md): hourly alert polling,
