@@ -44,7 +44,40 @@ directory has no `Codex Audit` workflow, so there is no daily schedule or
 `AI_OPERATIONAL_DIAGNOSIS_ENABLED` does not create a diagnosis run. The endpoints
 above only project ledger records that the origin service already holds.
 
-## Deploy
+## Protected Actions publish
+
+`Publish AiGateway dashboard` is a manual-only workflow in
+`.github/workflows/publish-ai-gateway-dash.yml`. Run it from the default branch.
+It accepts only its pinned, full reviewed source SHA; branches, short SHAs and
+other commits fail before checkout. Updating that pin requires a reviewed change.
+The Worker serves its dashboard directly from `src/index.mjs`; this directory has
+no `package.json` or separate frontend build. Wrangler is pinned in the workflow.
+
+The default `dry_run=true` runs the dashboard tests and Wrangler bundle validation
+without Cloudflare credentials or a publish. A non-dry run repeats bundle validation
+and uses the existing protected `production` Environment, including its required
+reviewer and main-only policy. Only the publish step receives the existing
+`CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` Environment secrets. Credentials
+must remain scoped to the approved dashboard target; their presence does not
+prove that their account or permissions are appropriate for a release.
+
+After merge, a **separate owner card** must approve the workflow revision, pinned
+source SHA and dashboard target before a live publish. This workflow change grants
+no deployment permission. The command deploys only the Worker and its embedded
+assets described by this directory's `wrangler.jsonc`. It does not synchronize
+Worker secrets or deploy the VPS. The existing reviewed Worker configuration is
+used as-is; confirm its bindings and target during release preparation.
+
+Runs are serialized and never automatically cancel a running publish. If a run
+fails or is interrupted after publish starts, its remote outcome is unknown:
+read back the target before considering any separately authorized retry. Raw
+Wrangler diagnostics are suppressed to keep private resource identifiers out of
+Actions logs. A completed command does not establish runtime acceptance.
+
+## Manual deployment reference
+
+The commands below are operator references and require separate authorization.
+
 
 ```bash
 cd cloudflare/ai-gateway-dash
