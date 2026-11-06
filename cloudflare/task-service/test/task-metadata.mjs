@@ -262,3 +262,11 @@ test('statistics budget boundary preserves exact counts and project isolation',a
   assert.equal((await request('/v1/tasks/stats',bearer)).status,400);
   assert.deepEqual((await body(await request('/v1/tasks/stats?since='+encodeURIComponent(iso(old+1)),bearer))).counts,[]);
 });
+
+// Liveness does not read task state or make provider requests.
+test('health is minimal, origin-bound and read-only', async()=>{
+  const reply=await request('/healthz',null);
+  assert.deepEqual(await body(reply),{status:'ok'});
+  assert.equal((await request('/healthz',null,{method:'POST'})).status,404);
+  assert.equal((await worker.fetch('https://other.example.test/healthz')).status,421);
+});
