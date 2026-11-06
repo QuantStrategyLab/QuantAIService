@@ -1,0 +1,119 @@
+name: Publish AiGateway dashboard
+
+# Publication requires a separate owner card after merge, bound to this workflow,
+# the reviewed source SHA and the dashboard target. Draft approval is not deploy approval.
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Full reviewed dashboard source SHA (only the pinned release is accepted)
+        type: string
+        required: true
+        default: 7eb49dd9b237345511c74f5693b94539775f5976
+      dry_run:
+        description: Validate locally only; no Cloudflare credentials or publish
+        type: boolean
+        required: true
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-ai-gateway-dash
+  cancel-in-progress: false
+
+env:
+  REVIEWED_SOURCE_SHA: 7eb49dd9b237345511c74f5693b94539775f5976
+  SOURCE_SHA: ${{ inputs.source_sha }}
+  DEFAULT_REF: refs/heads/${{ github.event.repository.default_branch }}
+  DRY_RUN: ${{ inputs.dry_run }}
+  WRANGLER_SEND_METRICS: 'false'
+  CI: 'true'
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Validate request
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REF" == "$DEFAULT_REF" ]]
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$SOURCE_SHA" == "$REVIEWED_SOURCE_SHA" ]]
+          [[ "$DRY_RUN" == true || "$DRY_RUN" == false ]]
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ env.REVIEWED_SOURCE_SHA }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+      - name: Test reviewed dashboard
+        run: |
+          set -euo pipefail
+          [[ "$(git rev-parse HEAD)" == "$REVIEWED_SOURCE_SHA" ]]
+          node --test cloudflare/ai-gateway-dash/tests/index.test.mjs
+      # No package.json exists in this Worker. Install the fixed CLI outside
+      # the source tree; neither install nor dry-run receives Cloudflare secrets.
+      - name: Install pinned Wrangler
+        run: |
+          set -euo pipefail
+          if ! npm install --prefix "$RUNNER_TEMP/ai-gateway-tools" --no-save wrangler@4.106.0 >/dev/null 2>&1; then
+            echo 'Wrangler installation failed.' >&2
+            exit 1
+          fi
+      - name: Validate dashboard bundle
+        working-directory: cloudflare/ai-gateway-dash
+        run: |
+          set -euo pipefail
+          [[ "$(git rev-parse HEAD)" == "$REVIEWED_SOURCE_SHA" ]]
+          if ! "$RUNNER_TEMP/ai-gateway-tools/node_modules/.bin/wrangler" deploy --dry-run --config wrangler.jsonc >/dev/null 2>&1; then
+            echo 'Dashboard bundle validation failed; tool diagnostics suppressed.' >&2
+            exit 1
+          fi
+
+  publish:
+    needs: validate
+    if: ${{ !inputs.dry_run }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Existing required reviewer and main-only policy; never create an unprotected Env.
+    environment: production
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ env.REVIEWED_SOURCE_SHA }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+      - name: Install pinned Wrangler
+        run: |
+          set -euo pipefail
+          if ! npm install --prefix "$RUNNER_TEMP/ai-gateway-tools" --no-save wrangler@4.106.0 >/dev/null 2>&1; then
+            echo 'Wrangler installation failed.' >&2
+            exit 1
+          fi
+      - name: Publish reviewed dashboard
+        working-directory: cloudflare/ai-gateway-dash
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REF" == "$DEFAULT_REF" ]]
+          [[ "$DRY_RUN" == false ]]
+          [[ "$SOURCE_SHA" == "$REVIEWED_SOURCE_SHA" ]]
+          [[ "$(git rev-parse HEAD)" == "$REVIEWED_SOURCE_SHA" ]]
+          [[ -n "$CLOUDFLARE_API_TOKEN" && -n "$CLOUDFLARE_ACCOUNT_ID" ]]
+          if ! "$RUNNER_TEMP/ai-gateway-tools/node_modules/.bin/wrangler" deploy --config wrangler.jsonc >/dev/null 2>&1; then
+            echo 'Dashboard publish failed; outcome requires readback before any retry.' >&2
+            exit 1
+          fi
+          echo 'Dashboard publish command completed; runtime acceptance requires separate readback.'
