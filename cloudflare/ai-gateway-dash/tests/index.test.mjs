@@ -70,7 +70,17 @@ import worker, {
   requiresHumanAudit,
 } from "../src/index.mjs";
 import { LOCALES } from "../src/ui/locales.mjs";
-import { LOGIN_STATES, loginHTML, resolveLoginState, stepSegments } from "../src/ui/login.mjs";
+import {
+  LOGIN_STATES,
+  loginHTML,
+  loginNotice,
+  loginSteps,
+  resolveLoginAttestation,
+  resolveLoginOrigin,
+  resolveLoginRef,
+  resolveLoginState,
+  stepSegments,
+} from "../src/ui/login.mjs";
 import { LOGIN_LOCALES } from "../src/ui/login-locales.mjs";
 import { dashboardHTML } from "../src/ui/dashboard.mjs";
 import {
@@ -78,6 +88,7 @@ import {
   escapeHtml,
   healthReadouts,
   jsObjectLiteral,
+  maskIdentifier,
   quotaRowModel,
   safeHttpUrl,
   tokensFromQuota,
@@ -608,7 +619,7 @@ test("login page exposes GitHub OAuth as the only sign-in action", () => {
   assert.match(page, /gh\.tabIndex=-1/);
   assert.match(page, /gh\.removeAttribute\("href"\)/);
   assert.match(page, /aria-disabled/);
-  assert.match(page, /spec\.tone==="bad"/);
+  assert.match(page, /notice\.tone==="bad"/);
   assert.match(page, /setAttribute\("role","alert"\)/);
   assert.match(page, /\/v1\/ai\/\*/);
   assert.doesNotMatch(page, /\/v2\/ai/);
@@ -617,13 +628,24 @@ test("login page exposes GitHub OAuth as the only sign-in action", () => {
   assert.match(page, /<code>dashboard:read<\/code>/);
 });
 
-test("login states expose only unverified callback notices and a recovery action", () => {
-  assert.deepEqual(Object.keys(LOGIN_STATES), ["idle", "denied", "cancel", "error", "expired"]);
-  for (const [name, spec] of Object.entries(LOGIN_STATES)) {
-    assert.ok([null, "bad", "warn"].includes(spec.tone), name);
-    assert.ok(["go", "retry"].includes(spec.btn), name);
-    assert.deepEqual(spec.steps, ["na", "na", "na"]);
-    assert.equal(spec.ref, undefined);
+test("login states match the approved nine-state table", () => {
+  assert.deepEqual(Object.keys(LOGIN_STATES), [
+    "idle", "redirecting", "verifying", "denied", "cancel", "error", "expired", "signedout", "unavailable",
+  ]);
+  const expected = {
+    idle: { tone: null, btn: "go", steps: ["na", "na", "na"] },
+    redirecting: { tone: "info", btn: "busy", steps: ["run", "wait", "wait"] },
+    verifying: { tone: "info", btn: "verify", steps: ["done", "run", "wait"] },
+    denied: { tone: "bad", btn: "retry", steps: ["done", "fail", "na"] },
+    cancel: { tone: "warn", btn: "go", steps: ["stop", "na", "na"] },
+    error: { tone: "bad", btn: "retry", steps: ["fail", "na", "na"] },
+    expired: { tone: "warn", btn: "go", steps: ["na", "na", "na"] },
+    signedout: { tone: "info", btn: "go", steps: ["na", "na", "na"] },
+    unavailable: { tone: "unk", btn: "off", steps: ["na", "na", "na"] },
+  };
+  assert.deepEqual(LOGIN_STATES, expected);
+  for (const spec of Object.values(LOGIN_STATES)) {
+    assert.equal(spec.ref, undefined, "references are runtime-only, never invented");
   }
 });
 
@@ -634,6 +656,190 @@ test("login error classification never reflects raw query text", () => {
   assert.equal(resolveLoginState("?error=session_expired"), "expired");
   assert.equal(resolveLoginState("?error=%3Cscript%3Ealert(1)%3C%2Fscript%3E"), "error");
   assert.equal(resolveLoginState("?state=unavailable&error=not_a_member"), "denied");
+});
+
+test("login state resolution accepts the nine design states and fails closed", () => {
+  assert.equal(resolveLoginState("?state=idle"), "idle");
+  for (const state of ["redirecting", "verifying", "denied", "cancel", "error", "expired", "signedout", "unavailable"]) {
+    assert.equal(resolveLoginState("?state=" + state), state);
+  }
+  for (const state of ["unknown", "__proto__", "constructor", "toString", "0", "idle "]) {
+    assert.equal(resolveLoginState("?state=" + state), "error", state);
+  }
+  assert.equal(resolveLoginState("?state="), "idle");
+  assert.equal(resolveLoginState("?state=verifying&error=access_denied"), "cancel");
+});
+
+test("unattested URL states render as an unverified preview, never as server facts", () => {
+  assert.equal(resolveLoginAttestation(""), "client");
+  assert.equal(resolveLoginAttestation("?state=idle"), "client");
+  assert.equal(resolveLoginAttestation("?state=verifying"), "client");
+  assert.equal(resolveLoginAttestation("?state=signedout"), "client");
+  assert.equal(resolveLoginAttestation("?state=unknown"), "client");
+  assert.equal(resolveLoginAttestation("?error=not_a_member"), "client");
+  assert.equal(resolveLoginAttestation("?state=verifying&error=access_denied"), "client");
+
+  for (const locale of ["zh-CN", "en"]) {
+    const dictionary = LOGIN_LOCALES[locale];
+    const verifying = loginNotice("verifying", "client", dictionary);
+    assert.equal(verifying.attested, false, locale);
+    assert.match(verifying.title, locale === "zh-CN" ? /未验证/ : /unverified/, locale);
+    assert.doesNotMatch(verifying.detail, /服务端校验组织成员身份|Checking organisation membership on the server/, locale);
+
+    const signedout = loginNotice("signedout", "client", dictionary);
+    assert.equal(signedout.attested, false, locale);
+    assert.doesNotMatch(signedout.detail, /服务端会话已清除|server session was cleared/, locale);
+    assert.match(signedout.detail, /尚未经服务端确认|not been confirmed by the server/, locale);
+
+    // The renderer can still draw server copy, but only when an authenticated
+    // source passes "server" explicitly. No URL resolver returns it.
+    const denied = loginNotice("denied", "server", dictionary);
+    assert.equal(denied.attested, true, locale);
+    assert.equal(denied.detail, dictionary.n_denied, locale);
+  }
+  assert.equal(loginNotice("idle", "client", LOGIN_LOCALES.en), null);
+  assert.equal(loginNotice("__proto__", "client", LOGIN_LOCALES.en).tone, "bad");
+  assert.deepEqual(loginSteps("__proto__", "server"), ["fail", "na", "na"]);
+
+  assert.deepEqual(loginSteps("verifying", "client"), ["unverified", "unverified", "unverified"]);
+  assert.deepEqual(loginSteps("verifying", "server"), ["done", "run", "wait"]);
+  assert.deepEqual(loginSteps("denied", "client"), ["unverified", "unverified", "unverified"]);
+  assert.deepEqual(loginSteps("denied", "server"), ["done", "fail", "na"]);
+  for (const locale of ["zh-CN", "en"]) {
+    for (const key of ["preview_busy", "preview_verify", "preview_off"]) {
+      assert.equal(typeof LOGIN_LOCALES[locale][key], "string", locale + "." + key);
+    }
+  }
+});
+
+test("writable error and state queries never attest a server outcome", () => {
+  const adverse = "?state=verifying&error=not_a_member";
+  assert.equal(resolveLoginState(adverse), "denied");
+  assert.equal(resolveLoginAttestation(adverse), "client");
+  for (const locale of ["zh-CN", "en"]) {
+    const dictionary = LOGIN_LOCALES[locale];
+    const notice = loginNotice(resolveLoginState(adverse), resolveLoginAttestation(adverse), dictionary);
+    assert.equal(notice.attested, false, locale);
+    assert.match(notice.title, locale === "zh-CN" ? /未验证/ : /unverified/, locale);
+    assert.match(notice.detail, locale === "zh-CN" ? /尚未经服务端确认/ : /not been confirmed by the server/, locale);
+    assert.doesNotMatch(
+      notice.detail,
+      locale === "zh-CN"
+        ? /不在授权的组织中|服务端会话已清除|正在服务端校验/
+        : /not in an authorised organisation|server session was cleared|Checking organisation membership on the server/,
+      locale,
+    );
+    assert.deepEqual(
+      loginSteps(resolveLoginState(adverse), resolveLoginAttestation(adverse)),
+      ["unverified", "unverified", "unverified"],
+      locale,
+    );
+  }
+  // A plain error query is equally writable and must not be trusted either.
+  assert.equal(resolveLoginAttestation("?error=not_a_member"), "client");
+  assert.equal(resolveLoginAttestation("?error=access_denied"), "client");
+  assert.equal(resolveLoginAttestation("?error=session_expired"), "client");
+});
+
+test("client-attested steps show an unverified marker, never not-started", () => {
+  // F1 regression: before this fix every non-idle URL state returned all-"na"
+  // and rendered "Not started/未开始" even after a real callback denial.
+  for (const state of ["redirecting", "verifying", "denied", "cancel", "error", "expired", "signedout", "unavailable"]) {
+    const steps = loginSteps(state, "client");
+    assert.deepEqual(steps, ["unverified", "unverified", "unverified"], state);
+    assert.equal(steps.includes("na"), false, state);
+  }
+  // Only an attested state may render a genuine "na" (not started) step.
+  assert.deepEqual(loginSteps("denied", "server"), ["done", "fail", "na"]);
+  assert.deepEqual(loginSteps("expired", "server"), ["na", "na", "na"]);
+  for (const locale of ["zh-CN", "en"]) {
+    assert.equal(LOGIN_LOCALES[locale].s_unverified, locale === "zh-CN" ? "未核实" : "Unverified");
+    assert.equal(LOGIN_LOCALES[locale].s_na, locale === "zh-CN" ? "未开始" : "Not started");
+  }
+  const page = loginHTML();
+  assert.match(page, /unverified:t\.s_unverified/);
+  assert.match(page, /var key=steps\[index\]\|\|"na"/);
+});
+
+test("worker callback errors use production copy while design states stay previews", () => {
+  // F2 regression: a real Worker `?error=` outcome must not say "Preview" and
+  // must carry the no-session wording; a design-only `?state=` keeps preview.
+  const memberDenied = "?error=" + encodeURIComponent("仅限 ORG 组织成员访问");
+  const missingCode = "?error=" + encodeURIComponent("缺少授权码");
+  assert.equal(resolveLoginState(memberDenied), "denied");
+  assert.equal(resolveLoginOrigin(memberDenied), "callback");
+  assert.equal(resolveLoginState(missingCode), "error");
+  assert.equal(resolveLoginOrigin(missingCode), "callback");
+  assert.equal(resolveLoginOrigin("?state=denied"), "design");
+  assert.equal(resolveLoginOrigin(""), "none");
+
+  for (const locale of ["zh-CN", "en"]) {
+    const dictionary = LOGIN_LOCALES[locale];
+    const callback = loginNotice("denied", "client", dictionary, resolveLoginOrigin(memberDenied));
+    assert.equal(callback.attested, false, locale);
+    assert.equal(callback.title, dictionary.n_denied_t, locale);
+    assert.equal(callback.detail, dictionary.callback_detail, locale);
+    assert.doesNotMatch(callback.title, /Preview|预览|unverified|未验证/i, locale);
+    assert.match(callback.detail, locale === "zh-CN" ? /未创建会话/ : /No session was created/, locale);
+    assert.match(callback.detail, locale === "zh-CN" ? /登录回调/ : /sign-in callback/, locale);
+
+    const preview = loginNotice("denied", "client", dictionary, "design");
+    assert.equal(preview.attested, false, locale);
+    assert.match(preview.title, locale === "zh-CN" ? /预览（未验证）/ : /Preview \(unverified\)/, locale);
+    assert.equal(preview.detail, dictionary.preview_detail, locale);
+  }
+
+  // A future authenticated source keeps the approved per-state copy.
+  assert.equal(
+    loginNotice("denied", "server", LOGIN_LOCALES.en, "callback").detail,
+    LOGIN_LOCALES.en.n_denied,
+  );
+});
+
+test("login renderer uses notice provenance instead of reading server copy directly", () => {
+  const page = loginHTML();
+  assert.match(page, /var attestation=resolveLoginAttestation\(location\.search\)/);
+  assert.match(page, /var origin=resolveLoginOrigin\(location\.search\)/);
+  assert.match(page, /function resolveLoginAttestation/);
+  assert.match(page, /function resolveLoginOrigin/);
+  assert.match(page, /function loginNotice/);
+  assert.match(page, /function loginSteps/);
+  assert.match(page, /loginNotice\(state,attestation,t,origin\)/);
+  assert.match(page, /loginSteps\(state,attestation\)/);
+  assert.match(page, /unverified:t\.s_unverified/);
+  assert.match(page, /t\["preview_"\+spec\.btn\]/);
+  assert.match(page, /attestation==="server"&&\(spec\.btn==="busy"\|\|spec\.btn==="verify"\)/);
+  assert.match(page, /attestation!=="server"&&\(spec\.btn==="busy"\|\|spec\.btn==="verify"\)/);
+  assert.doesNotMatch(page, /var key=spec\.steps\[index\]/);
+  assert.doesNotMatch(page, /setText\(document\.getElementById\("note-d"\),t\["n_"\+state\]\)/);
+  assert.doesNotMatch(page, /setText\(document\.getElementById\("note-t"\),t\["n_"\+state\+"_t"\]\)/);
+});
+
+test("login references accept only a validated opaque correlation token", () => {
+  assert.equal(resolveLoginRef(""), "");
+  assert.equal(resolveLoginRef("?ref=AUTH-DENIED · 7F3A-DEMO"), "••••DEMO");
+  assert.equal(resolveLoginRef("?ref=AUTH-CONFIG · 0000-DEMO"), "••••DEMO");
+  assert.equal(resolveLoginRef("?ref=octocat"), "");
+  assert.equal(resolveLoginRef("?ref=user@example.test"), "");
+  assert.equal(resolveLoginRef("?ref=<script>alert(1)</script>"), "");
+  assert.equal(resolveLoginRef("?ref=" + "A".repeat(200)), "");
+  assert.equal(resolveLoginRef("?ref=auth-denied · 7f3a-demo"), "");
+});
+
+test("shape-valid identity and secret-label references are masked before render", () => {
+  for (const raw of [
+    "ACCT-0001 · 7F3A-9C2D",
+    "GITHUB-TOKEN · 7F3A-9C2D",
+    "OPERATOR · 7F3A-9C2D",
+  ]) {
+    const masked = resolveLoginRef("?ref=" + encodeURIComponent(raw));
+    assert.match(masked, /^••••/, raw);
+    assert.notEqual(masked, raw, raw);
+    assert.doesNotMatch(masked, /ACCT-0001|GITHUB-TOKEN|OPERATOR|7F3A/, raw);
+  }
+  // The shared helper is the only masking path used by the login renderer.
+  assert.equal(maskIdentifier("ACCT-0001 · 7F3A-9C2D"), "••••9C2D");
+  assert.equal(maskIdentifier(""), "");
 });
 
 test("login locales keep zh-CN and en key, text and placeholder parity", () => {
@@ -659,6 +865,23 @@ test("login locales keep zh-CN and en key, text and placeholder parity", () => {
     assert.equal(typeof LOGIN_LOCALES.en["n_" + state], "string", state);
     assert.equal(typeof LOGIN_LOCALES.en["n_" + state + "_t"], "string", state);
   }
+});
+
+test("failure notices state that no session was created in both languages", () => {
+  for (const locale of ["zh-CN", "en"]) {
+    for (const state of ["denied", "cancel", "error"]) {
+      const copy = LOGIN_LOCALES[locale]["n_" + state];
+      assert.match(copy, locale === "zh-CN" ? /未创建会话/ : /No session was created/, locale + "." + state);
+    }
+  }
+});
+
+test("login renders references only from the validated ref parameter", () => {
+  const page = loginHTML();
+  assert.match(page, /var ref=resolveLoginRef\(location\.search\)/);
+  assert.match(page, /id="note-r"/);
+  assert.match(page, /if\(ref\)\{setText\(document\.getElementById\("note-r"\),t\.ref\+" "\+ref\);\}/);
+  assert.doesNotMatch(page, /DEMO|AUTH-DENIED|AUTH-CALLBACK|AUTH-CONFIG/);
 });
 
 test("step copy renders placeholders as code elements, never as markup", () => {
@@ -863,14 +1086,23 @@ test("login never publishes invented diagnostic references", () => {
   for (const spec of Object.values(LOGIN_STATES)) assert.equal(spec.ref, undefined);
 });
 
-test("query states cannot fabricate server progress or override callback errors", () => {
-  for (const state of ["idle", "redirecting", "verifying", "denied", "cancel", "error", "expired", "signedout", "unavailable", "unknown", "", "__proto__", "constructor"]) {
-    assert.equal(resolveLoginState("?state=" + state), "idle", state);
-    assert.equal(resolveLoginState("?state=" + state + "&error=not_a_member"), "denied", state);
-  }
+test("login presentation states never grant a session and unavailable fails closed", () => {
+  const page = loginHTML();
+  // The page has one navigation target and no credential or session write.
+  assert.equal((page.match(/href="\/login"/g) || []).length, 1);
+  assert.doesNotMatch(page, /dash_session|sessionStorage|document\.cookie/i);
+  // Unavailable removes the only action from the tab order and from navigation.
+  assert.match(page, /spec\.btn==="off"/);
+  assert.match(page, /gh\.removeAttribute\("href"\)/);
+  assert.match(page, /gh\.tabIndex=-1/);
+  assert.match(page, /aria-disabled/);
+  // Busy states are non-navigating; a click is suppressed.
+  assert.match(page, /spec\.btn==="busy"\|\|spec\.btn==="verify"/);
+  assert.match(page, /event\.preventDefault\(\)/);
+  // No state definition claims a successful session.
   for (const spec of Object.values(LOGIN_STATES)) {
-    assert.deepEqual(spec.steps, ["na", "na", "na"]);
-    assert.ok(["go", "retry"].includes(spec.btn));
+    assert.ok(["go", "retry", "busy", "verify", "off"].includes(spec.btn));
+    assert.notEqual(spec.btn, "done");
   }
 });
 

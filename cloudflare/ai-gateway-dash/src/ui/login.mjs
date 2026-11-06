@@ -1,28 +1,141 @@
-/** Login uses the existing /login route and free-text callback error contract.
- * The server emits no progress, sign-out confirmation or availability signal.
- * Ignore ?state= (including the nine design states); it cannot attest to server
- * state. Error-query notices are explicitly unverified link hints, never proof
- * of membership, session revocation or completed steps. Only a local click can
- * set the transient busy button; pageshow clears it on return.
+/** Login page: the approved "Signal Panel" sign-in screen.
+
+  One sign-in method only: a plain navigation to the Worker's existing
+  `/login` OAuth start endpoint. The page has no credential inputs and stores
+  nothing except the theme and language preferences.
+
+  Nine presentation states are implemented. The Worker callback reports
+  outcomes through `?error=`; that result still wins over `?state=`. Both are
+  plain, user-writable URL parameters, so neither is authenticated server
+  evidence: a handcrafted link can claim any outcome. Copy is chosen by origin:
+  a callback `?error=` shows the production state title plus a neutral
+  "no session was created" detail, while a design-only `?state=` keeps the
+  unverified preview wording. Neither asserts a server-side outcome (for
+  example a cleared session, a denied membership or an in-progress check), and
+  progress markers for both stay "unverified" rather than "not started". No
+  state on this page creates or asserts a session, and `unavailable` disables
+  the only action. The backend gap is recorded in QODER_REPORT.md rather than
+  invented here.
+
+  References are optional and must arrive as an opaque, validated token in
+  `?ref=`; the page never synthesises a correlation ID. A validated reference
+  is still redacted through the shared `maskIdentifier` helper before display,
+  because a shape-valid label can itself name an account or a secret.
  */
 
 import { LOGIN_LOCALES } from "./login-locales.mjs";
 import { LOGIN_CSS } from "./login-styles.mjs";
-import { classifyLoginError, escapeHtml, jsObjectLiteral } from "./format.mjs";
+import { classifyLoginError, escapeHtml, jsObjectLiteral, maskIdentifier } from "./format.mjs";
 import { BOOT_SCRIPT } from "./shared.mjs";
 
+/** state -> notice tone, button mode, step markers [s1, s2, s3]. */
 export const LOGIN_STATES = {
   idle: { tone: null, btn: "go", steps: ["na", "na", "na"] },
-  denied: { tone: "bad", btn: "retry", steps: ["na", "na", "na"] },
-  cancel: { tone: "warn", btn: "go", steps: ["na", "na", "na"] },
-  error: { tone: "bad", btn: "retry", steps: ["na", "na", "na"] },
+  redirecting: { tone: "info", btn: "busy", steps: ["run", "wait", "wait"] },
+  verifying: { tone: "info", btn: "verify", steps: ["done", "run", "wait"] },
+  denied: { tone: "bad", btn: "retry", steps: ["done", "fail", "na"] },
+  cancel: { tone: "warn", btn: "go", steps: ["stop", "na", "na"] },
+  error: { tone: "bad", btn: "retry", steps: ["fail", "na", "na"] },
   expired: { tone: "warn", btn: "go", steps: ["na", "na", "na"] },
+  signedout: { tone: "info", btn: "go", steps: ["na", "na", "na"] },
+  unavailable: { tone: "unk", btn: "off", steps: ["na", "na", "na"] },
 };
 
+const DESIGN_STATES = Object.keys(LOGIN_STATES);
+
+/** The callback error parameter wins over `?state=`; `?state=` only selects a
+  presentation state and an unknown value fails closed to `error`. Precedence
+  is about which label to show, not about trusting either parameter. */
 export function resolveLoginState(search) {
   const params = new URLSearchParams(String(search || ""));
   const kind = classifyLoginError(params.get("error"));
-  return kind === "none" ? "idle" : kind;
+  if (kind !== "none") return kind;
+  const requested = params.get("state");
+  if (requested === null || requested === "") return "idle";
+  return DESIGN_STATES.indexOf(requested) === -1 ? "error" : requested;
+}
+
+/** Accept only an opaque correlation token, never a username, email or free
+  text. The Worker does not emit references yet; when it does, they must use
+  this shape. Invalid or oversized values are dropped. A valid value is still
+  masked before it reaches the DOM because the label half can be an account or
+  secret name. */
+export function resolveLoginRef(search) {
+  const raw = new URLSearchParams(String(search || "")).get("ref");
+  if (!raw) return "";
+  const value = String(raw).trim();
+  if (value.length > 64) return "";
+  if (!/^[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)* · [0-9A-F]{4}(?:-[A-Z0-9]+)*$/.test(value)) return "";
+  return maskIdentifier(value);
+}
+
+/** Every state this page can read arrives through a plain URL parameter
+  (`?error=` and `?state=`). Both are user-writable, so neither is
+  authenticated server evidence: a handcrafted link can claim any outcome.
+  Until the Worker provides a verifiable marker (for example a signed callback
+  result), every URL-derived state is client-attested and renders without
+  server progress facts. `loginNotice` still accepts an explicit "server"
+  attestation so a future authenticated source can opt in, but this resolver
+  never returns it. */
+export function resolveLoginAttestation(_search) {
+  return "client";
+}
+
+/** Classify which honest copy to show. This is not a trust level: a `?error=`
+  value is the Worker callback's production sign-in result and a `?state=`
+  value is a design-only preview selector, but both remain client-attested.
+  The distinction only decides whether the approved production wording or the
+  unverified preview wording is displayed. */
+export function resolveLoginOrigin(search) {
+  const params = new URLSearchParams(String(search || ""));
+  if (classifyLoginError(params.get("error")) !== "none") return "callback";
+  const requested = params.get("state");
+  return requested ? "design" : "none";
+}
+
+/** Resolve the notice copy for a state without letting an unattested URL state
+  reuse server-fact wording. Returns null for the idle state.
+
+  `origin` defaults to the conservative "design" preview: a caller that has not
+  classified its source never gets production copy by accident. */
+export function loginNotice(state, attestation, dictionary, origin = "design") {
+  if (!state || state === "idle") return null;
+  const key = Object.prototype.hasOwnProperty.call(LOGIN_STATES, state) ? state : "error";
+  const spec = LOGIN_STATES[key];
+  if (!spec.tone) return null;
+  if (attestation === "server") {
+    return {
+      tone: spec.tone,
+      title: dictionary["n_" + key + "_t"],
+      detail: dictionary["n_" + key],
+      attested: true,
+    };
+  }
+  if (origin === "callback") {
+    return {
+      tone: spec.tone,
+      title: dictionary["n_" + key + "_t"],
+      detail: dictionary.callback_detail,
+      attested: false,
+    };
+  }
+  return {
+    tone: spec.tone,
+    title: dictionary.preview_prefix + dictionary["n_" + key + "_t"],
+    detail: dictionary.preview_detail,
+    attested: false,
+  };
+}
+
+/** Progress markers are server facts too. A client-attested state must not
+  show "not started", "in progress" or "failed" steps that the server never
+  reported; it shows a neutral "unverified" marker instead. Only a
+  server-attested state may render its real markers, including a genuine "na"
+  (not started) step. */
+export function loginSteps(state, attestation) {
+  const key = Object.prototype.hasOwnProperty.call(LOGIN_STATES, state) ? state : "error";
+  if (attestation !== "server") return ["unverified", "unverified", "unverified"];
+  return LOGIN_STATES[key].steps.slice();
 }
 
 /** Split locale copy on {placeholder} so it renders as <code>, never as HTML. */
@@ -97,7 +210,7 @@ export function loginHTML() {
       <h1 data-i18n="l_title">${tx("l_title")}</h1>
       <p class="sub" data-i18n="l_desc">${tx("l_desc")}</p>
 
-      <div class="note" id="note" role="status" aria-live="polite"><b id="note-t"></b><span id="note-d"></span></div>
+      <div class="note" id="note" role="status" aria-live="polite"><b id="note-t"></b><span id="note-d"></span><span class="ref" id="note-r"></span></div>
 
       <a class="gh" id="gh" href="/login">
         <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
@@ -122,13 +235,23 @@ export function loginHTML() {
 <script>
 var I18N=${jsObjectLiteral(LOGIN_LOCALES)};
 var LOGIN_STATES=${jsObjectLiteral(LOGIN_STATES)};
+var DESIGN_STATES=${jsObjectLiteral(DESIGN_STATES)};
 ${classifyLoginError.toString()}
 ${stepSegments.toString()}
+${maskIdentifier.toString()}
 ${resolveLoginState.toString()}
+${resolveLoginAttestation.toString()}
+${resolveLoginOrigin.toString()}
+${resolveLoginRef.toString()}
+${loginNotice.toString()}
+${loginSteps.toString()}
 var root=document.documentElement;
 var lang=root.lang==="en"?"en":"zh-CN";
 var theme=root.getAttribute("data-theme")==="dark"?"dark":"light";
 var state=resolveLoginState(location.search);
+var attestation=resolveLoginAttestation(location.search);
+var origin=resolveLoginOrigin(location.search);
+var ref=resolveLoginRef(location.search);
 var navigating=false;
 
 function setText(node,value){if(node)node.textContent=value;}
@@ -145,17 +268,20 @@ function renderRich(node,template){
 
 function renderState(t){
   var spec=LOGIN_STATES[state]||LOGIN_STATES.error;
+  var notice=loginNotice(state,attestation,t,origin);
   var note=document.getElementById("note");
   note.className="note";
   note.setAttribute("role","status");
   note.setAttribute("aria-live","polite");
   setText(document.getElementById("note-t"),"");
   setText(document.getElementById("note-d"),"");
-  if(spec.tone){
-    note.className="note on "+spec.tone;
-    if(spec.tone==="bad"){note.setAttribute("role","alert");note.setAttribute("aria-live","assertive");}
-    setText(document.getElementById("note-t"),t["n_"+state+"_t"]);
-    setText(document.getElementById("note-d"),t.n_source+" "+t["n_"+state]);
+  setText(document.getElementById("note-r"),"");
+  if(notice){
+    note.className="note on "+notice.tone;
+    if(notice.tone==="bad"){note.setAttribute("role","alert");note.setAttribute("aria-live","assertive");}
+    setText(document.getElementById("note-t"),notice.title);
+    setText(document.getElementById("note-d"),notice.detail);
+    if(ref){setText(document.getElementById("note-r"),t.ref+" "+ref);}
   }
   var gh=document.getElementById("gh");
   gh.removeAttribute("aria-busy");
@@ -163,12 +289,18 @@ function renderState(t){
   gh.tabIndex=0;
   gh.setAttribute("href","/login");
   var labels={go:t.l_go,retry:t.l_retry,busy:t.l_busy,verify:t.l_verify,off:t.l_off};
-  setText(document.getElementById("gh-l"),labels[spec.btn]);
-  if(spec.btn==="busy"||spec.btn==="verify")gh.setAttribute("aria-busy","true");
+  var buttonLabel=labels[spec.btn];
+  if(attestation!=="server"&&(spec.btn==="busy"||spec.btn==="verify"||spec.btn==="off")){
+    buttonLabel=t["preview_"+spec.btn];
+  }
+  setText(document.getElementById("gh-l"),buttonLabel);
+  if(attestation==="server"&&(spec.btn==="busy"||spec.btn==="verify"))gh.setAttribute("aria-busy","true");
+  if(attestation!=="server"&&(spec.btn==="busy"||spec.btn==="verify"))gh.setAttribute("aria-disabled","true");
   if(spec.btn==="off"){gh.setAttribute("aria-disabled","true");gh.tabIndex=-1;gh.removeAttribute("href");}
-  var statusLabels={done:t.s_done,run:t.s_run,wait:t.s_wait,fail:t.s_fail,stop:t.s_stop,na:t.s_na};
+  var statusLabels={done:t.s_done,run:t.s_run,wait:t.s_wait,fail:t.s_fail,stop:t.s_stop,na:t.s_na,unverified:t.s_unverified};
+  var steps=loginSteps(state,attestation);
   document.querySelectorAll("#steps .step").forEach(function(item,index){
-    var key=spec.steps[index]||"na";
+    var key=steps[index]||"na";
     var slot=item.querySelector(".st");
     item.classList.toggle("cur",key==="run"||key==="fail"||key==="stop");
     while(slot.firstChild)slot.removeChild(slot.firstChild);
