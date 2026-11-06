@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import threading
+import time
 from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib.metadata import PackageNotFoundError, version
@@ -25,14 +26,16 @@ from .notifications import NativeNotifications
 from .providers import ClaudeRoutineProvider, GrokWebhookProvider
 from .github_apps import GitHubApps, GitHubComments, validate_apps
 from .runtime import Conflict, NotFound, Policy, TaskRuntime
+from .dashboard import Dashboard
 from .transport import json_body
 from .worker_tools import worker_tools, tools_schema_sha256
 
 
 class Application:
-    def __init__(self, runtime, authorizer, events=None):
+    def __init__(self, runtime, authorizer, events=None, *, dashboard=None):
         self.runtime, self.auth, self.events = runtime, authorizer, events
         self.notifications = NativeNotifications(runtime)
+        self.dashboard = dashboard or Dashboard()
 
     def public_record(self, record):
         result = dict(record)
@@ -111,6 +114,18 @@ class Application:
                 raise NotFound('task not found') from None
             return 200, {'id': record['id']}
         principal = self.project_context(principal, selectors[0])
+        if path in {'/v2/ai/health', '/v2/ai/quota'}:
+            self.require(principal, 'dashboard:read')
+            if principal.provider:
+                raise PermissionError('worker credentials cannot read dashboard observations')
+            if method != 'GET':
+                return 405, {'error': 'method_not_allowed'}
+            if body is not None:
+                raise ValueError('dashboard reads take no body')
+            if path == '/v2/ai/health':
+                return 200, self.dashboard.health(principal.project)
+            policy = self.runtime.policies[principal.project]
+            return 200, self.dashboard.quotas(principal.project, set(policy.providers.values()))
         if path == '/v1/tasks' and method == 'POST':
             self.require(principal, 'tasks:submit')
             return 202, self.public_record(self.runtime.submit(principal.project, headers.get('Idempotency-Key'), body))
@@ -274,6 +289,9 @@ def validate_configuration(config):
         if 'projects' in grant and not grant_projects(grant) <= policies.keys():
             raise ValueError('worker project list must be explicitly admitted')
     Path(config['state_path'])
+    quota_path = config.get('dashboard_quota_path')
+    if quota_path is not None and (not isinstance(quota_path, str) or not Path(quota_path).is_absolute()):
+        raise ValueError('dashboard quota path must be absolute')
     limit = config.get('max_request_bytes', 2_000_000)
     if type(limit) is not int or not 1 <= limit <= 16_000_000:
         raise ValueError('invalid request size limit')
@@ -383,7 +401,7 @@ def build_application(config, *, github_key_loader=None, github_transport=None):
             raise ValueError('unsupported native provider')
     if config.get('github_apps') is not None:
         GitHubComments(runtime, GitHubApps(config, key_loader=github_key_loader, transport=github_transport))
-    return Application(runtime, auth, events)
+    return Application(runtime, auth, events, dashboard=Dashboard(config.get('dashboard_quota_path')))
 
 
 def make_server(application, port, *, max_request_bytes=2_000_000, mcp_log_level='INFO'):
@@ -404,6 +422,7 @@ def make_server(application, port, *, max_request_bytes=2_000_000, mcp_log_level
 
         def handle_request(self):
             self.connection.settimeout(15)
+            started = time.monotonic()
             extra = {}
             is_mcp = urlsplit(self.path).path == '/mcp'
             principal, diagnostics = None, AuthDiagnostics()
@@ -425,6 +444,8 @@ def make_server(application, port, *, max_request_bytes=2_000_000, mcp_log_level
                         and (length or any(len(self.headers.get_all(name, [])) != 1
                                            for name in ['Idempotency-Key', 'X-Request-SHA256']))):
                     raise ValueError('lookup requires single binding headers and no body')
+                if self.command == 'GET' and urlsplit(self.path).path in {'/v2/ai/health', '/v2/ai/quota'} and length:
+                    raise ValueError('dashboard reads take no body')
                 if discovery and length:
                     raise ValueError('discovery takes no body')
                 body = None
@@ -466,6 +487,18 @@ def make_server(application, port, *, max_request_bytes=2_000_000, mcp_log_level
             except Exception:
                 reason = 'internal_error'
                 status, payload = 500, {'error': 'internal_error'}
+            # Only the task HTTP surface feeds vitals. Dashboard polling,
+            # discovery and MCP/background activity do not inflate these samples.
+            parsed = urlsplit(self.path)
+            if principal is not None and (parsed.path == '/v1/tasks' or parsed.path.startswith('/v1/tasks/')):
+                selectors = parse_qs(parsed.query, keep_blank_values=True).get('project', [None])
+                if len(selectors) == 1:
+                    try:
+                        selected = application.project_context(principal, selectors[0])
+                    except PermissionError:
+                        pass
+                    else:
+                        application.dashboard.record(selected.project, (time.monotonic() - started) * 1000, status)
             provider_matched = None if principal is None else bool(application.events and principal.provider == application.events.provider_name)
             try:
                 encoded = b'' if status == 202 and payload is None else json_body(payload)

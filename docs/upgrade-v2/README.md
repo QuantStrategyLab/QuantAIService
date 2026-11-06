@@ -8,6 +8,8 @@
 2. Follow [worker project/owner scoping](../worker-project-scoping.md), including the explicit service-owner configuration for 2.0.9 and later. Projects and owner-wide grants have distinct version-specific rules.
 3. Use [scenario contracts](../scenario-contracts.md) for offline task templates and producer-bound inputs. Configure a separately approved HTTPS/identity/provider connection; source changes or examples do not create one.
 
+4. For read-only dashboard integration, use the [V2 health and quota contract](../dashboard-v2.md), with an explicit project-bound `dashboard:read` JWT grant. The legacy Worker still needs separate integration.
+
 ## Migration history
 
 The dated `quant.zh-CN.md`, `identity-inventory.zh-CN.md` and `retired-v1.zh-CN.md` files retain migration, login-inventory and retirement context. They contain version-specific or environment-specific statements and are not the current connection guide or proof of current login/deployment. In particular, the former shared-core/thin-wrapper design was superseded by the independent runtime baseline.

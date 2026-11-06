@@ -232,4 +232,4 @@ class JWTAuthorizer:
     def resource_metadata(self):
         return {'resource': self.resource, 'authorization_servers': [issuer for issuer in self.issuers
                     if issuer != 'https://token.actions.githubusercontent.com'],
-                'scopes_supported': ['tasks:read', 'tasks:submit', 'tasks:work', 'events:subscribe', 'offline_access']}
+                'scopes_supported': ['tasks:read', 'tasks:submit', 'tasks:work', 'events:subscribe', 'dashboard:read', 'offline_access']}
