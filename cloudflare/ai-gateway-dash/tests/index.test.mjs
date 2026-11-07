@@ -482,6 +482,92 @@ test("unauthenticated panel and diagnoses routes stay 401 JSON unauthorized", as
   }
 });
 
+test("panel proxy rejects truncated JSON that only looks like an object or array", async (t) => {
+  // Adversarial fixtures: first-char heuristics must not classify these as JSON.
+  const samples = ["{broken", "{", "[", "  {broken", "\n[1,2,"];
+  let index = 0;
+  const dashboard = await authenticatedDashboard(t, async () => {
+    return new Response(samples[index], {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  });
+  for (const sample of samples) {
+    const response = await worker.fetch(
+      new Request("https://dash.example/api/v1/ai/health", { headers: { Cookie: dashboard.cookie } }),
+      dashboard.env,
+    );
+    assert.equal(response.status, 502, sample);
+    assert.deepEqual(await response.json(), {
+      status: "error",
+      error: "origin returned a non-JSON body",
+      error_code: "origin_non_json",
+      origin_status: 200,
+    });
+    index += 1;
+  }
+});
+
+test("panel proxy still accepts valid empty object and array JSON bodies", async (t) => {
+  let body = "{}";
+  const dashboard = await authenticatedDashboard(t, async () => new Response(body, {
+    status: 200,
+    headers: { "Content-Type": "application/json" },
+  }));
+  for (const sample of ["{}", "[]", " {\n}\n", "\n[]\n"]) {
+    body = sample;
+    const response = await worker.fetch(
+      new Request("https://dash.example/api/v1/ai/quota", { headers: { Cookie: dashboard.cookie } }),
+      dashboard.env,
+    );
+    assert.equal(response.status, 200, sample);
+    assert.deepEqual(await response.json(), JSON.parse(sample));
+  }
+});
+
+test("panel proxy rejects redirects with the same bounded contract as diagnoses", async (t) => {
+  const dashboard = await authenticatedDashboard(t, async () => new Response(null, {
+    status: 302,
+    headers: { Location: "https://private.example/login?token=should-not-leak" },
+  }));
+  const response = await worker.fetch(
+    new Request("https://dash.example/api/v1/ai/health", { headers: { Cookie: dashboard.cookie } }),
+    dashboard.env,
+  );
+  assert.equal(response.status, 502);
+  const payload = await response.json();
+  assert.deepEqual(payload, {
+    status: "error",
+    error: "origin redirect rejected",
+    error_code: "upstream_redirect_rejected",
+    origin_status: 302,
+  });
+  assert.doesNotMatch(JSON.stringify(payload), /private\.example|token=|should-not-leak/);
+  const panelFetch = dashboard.gatewayCalls.find((call) => String(call.url).includes("/v1/ai/health"));
+  assert.ok(panelFetch);
+  assert.equal(panelFetch.init.redirect, "manual");
+});
+
+test("panel proxy response-body read failures stay generic and never echo secrets", async (t) => {
+  const secret = "syn-secret-host.example/token=leak-value";
+  const dashboard = await authenticatedDashboard(t, async () => ({
+    status: 200,
+    headers: { get() { return "application/json"; } },
+    async text() {
+      throw new Error(secret);
+    },
+  }));
+  const response = await worker.fetch(
+    new Request("https://dash.example/api/v1/ai/changes?days=7", { headers: { Cookie: dashboard.cookie } }),
+    dashboard.env,
+  );
+  assert.equal(response.status, 502);
+  const payload = await response.json();
+  assert.equal(payload.status, "error");
+  assert.equal(payload.error_code, "origin_response_unreadable");
+  assert.doesNotMatch(JSON.stringify(payload), /syn-secret-host|leak-value|token=/);
+});
+
 test("authenticated dashboard html ships codex remaining quota display", async (t) => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (input) => {

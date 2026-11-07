@@ -242,9 +242,19 @@ function originReadHeaders(env) {
   return { headers, token };
 }
 
-function looksLikeJsonBody(body) {
+function parseOriginJsonBody(body) {
   const trimmed = String(body || "").trim();
-  return trimmed.startsWith("{") || trimmed.startsWith("[");
+  if (!trimmed) return { ok: false, reason: "empty" };
+  try {
+    const parsed = JSON.parse(trimmed);
+    // Dashboard consumers expect a JSON object or array (including empty).
+    if (parsed === null || typeof parsed !== "object") {
+      return { ok: false, reason: "invalid" };
+    }
+    return { ok: true };
+  } catch (_error) {
+    return { ok: false, reason: "invalid" };
+  }
 }
 
 function proxyFailure(errorCode, error, { originStatus } = {}) {
@@ -271,7 +281,7 @@ async function proxyAPI(path, search, env) {
     if (message.includes("not allowed")) {
       return proxyFailure("route_not_allowed", message);
     }
-    return proxyFailure("proxy_misconfigured", message);
+    return proxyFailure("proxy_misconfigured", "dashboard proxy failed");
   }
 
   const { headers, token } = originReadHeaders(env);
@@ -284,16 +294,34 @@ async function proxyAPI(path, search, env) {
 
   let resp;
   try {
-    resp = await fetch(url, { headers });
+    // Match diagnoses: never follow redirects into private Location targets.
+    resp = await fetch(url, { headers, redirect: "manual" });
   } catch (_error) {
     return proxyFailure("origin_unreachable", "origin fetch failed");
   }
 
-  const body = await resp.text();
+  let body;
+  try {
+    body = await resp.text();
+  } catch (_error) {
+    return proxyFailure(
+      "origin_response_unreadable",
+      "origin response could not be read",
+      { originStatus: Number.isFinite(resp.status) ? resp.status : undefined },
+    );
+  }
+
   if (resp.status === 401 || resp.status === 403) {
     return proxyFailure(
       "origin_auth_failed",
       "后端认证失败：请同步 Dashboard API Token 与服务端静态访问 token",
+      { originStatus: resp.status },
+    );
+  }
+  if (resp.status >= 300 && resp.status < 400) {
+    return proxyFailure(
+      "upstream_redirect_rejected",
+      "origin redirect rejected",
       { originStatus: resp.status },
     );
   }
@@ -302,7 +330,7 @@ async function proxyAPI(path, search, env) {
       originStatus: resp.status,
     });
   }
-  if (!looksLikeJsonBody(body)) {
+  if (!parseOriginJsonBody(body).ok) {
     return proxyFailure("origin_non_json", "origin returned a non-JSON body", {
       originStatus: resp.status,
     });
@@ -598,11 +626,9 @@ export default {
       const apiPath = path.slice(4);
       try {
         return await proxyAPI(apiPath, url.search, env);
-      } catch (e) {
-        return proxyFailure(
-          "proxy_misconfigured",
-          String((e && e.message) || "proxy_misconfigured"),
-        );
+      } catch (_error) {
+        // Never echo exception text: synthetic host/token strings must not appear.
+        return proxyFailure("proxy_misconfigured", "dashboard proxy failed");
       }
     }
 
