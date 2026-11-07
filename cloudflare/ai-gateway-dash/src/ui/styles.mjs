@@ -55,7 +55,7 @@ a{color:inherit}
 .rail a svg{width:20px;height:20px;stroke:currentColor;fill:none;stroke-width:1.6}
 .rail a.on,.rail a:focus-visible{color:var(--ink);border-left-color:var(--sig)}
 .rail .sp{flex:1}
-main{padding:0 24px 28px;min-width:0}
+main{position:relative;padding:0 24px 28px;min-width:0}
 .top{display:flex;align-items:center;gap:16px;height:64px;border-bottom:1px solid var(--line);margin-bottom:20px}
 .top h1{font:600 18px/1 var(--f-ui);letter-spacing:.01em}
 .top h1 small{display:block;margin-top:5px}
@@ -133,7 +133,8 @@ td.n,th.n{text-align:right;font-family:var(--f-mono);font-size:12px}
 .att-view{display:inline-flex;align-items:center;justify-content:center;min-height:30px;padding:5px 10px;border:1px solid var(--line2);border-radius:var(--r);font:500 10px/1 var(--f-mono);color:var(--ink);text-decoration:none;background:var(--panel2)}
 .att-body{min-width:0}
 .changes-wrap{padding:0 0 6px}
-.diag{padding:0 14px 12px}
+.diag{padding:0 0 12px}
+.diag>section{padding:0 14px}
 .diag h4{font:600 12px/1 var(--f-ui);letter-spacing:.04em;text-transform:uppercase;color:var(--ink2);margin:14px 0 6px}
 :lang(zh-CN) .diag h4{text-transform:none}
 .diag-item{padding:12px 0;border-bottom:1px solid var(--line)}
@@ -149,7 +150,12 @@ td.n,th.n{text-align:right;font-family:var(--f-mono);font-size:12px}
 .footer{display:flex;flex-wrap:wrap;justify-content:space-between;gap:12px;padding:14px 24px;border-top:1px solid var(--line);color:var(--ink3);font:400 11px/1.4 var(--f-mono);margin-top:8px}
 .mobnav{display:none}
 .m-only{display:none!important}
-.toast{position:fixed;top:16px;right:16px;max-width:calc(100vw - 32px);padding:10px 14px;background:var(--panel);color:var(--bad);border:1px solid var(--bad);border-left-width:3px;display:none;z-index:10;font:500 11px/1.4 var(--f-mono)}
+/* Global notice: absolutely positioned at its static position, i.e. directly
+   below the header's rendered bottom edge, inside the content column. */
+.toast{position:absolute;right:24px;margin-top:-12px;max-width:min(420px,calc(100% - 48px));display:flex;align-items:flex-start;gap:10px;padding:4px 4px 4px 14px;background:var(--panel);color:var(--bad);border:1px solid var(--bad);border-left-width:3px;z-index:10;font:500 11px/1.4 var(--f-mono)}
+.toast[hidden]{display:none}
+.toast p{flex:1;min-width:0;padding:8px 0;overflow-wrap:anywhere}
+.toast-x{flex:none;color:var(--ink2);font-size:16px}
 .sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
 /* login */
 .login{display:grid;grid-template-columns:1.1fr 1fr;min-height:100vh}
@@ -205,6 +211,7 @@ td.n,th.n{text-align:right;font-family:var(--f-mono);font-size:12px}
   .top h1 .mark{display:grid;width:30px;height:30px;font-size:10px;margin:0}
   .top .grow,.top .hide-m{display:none}
   .seg button{padding:6px 8px}
+  .toast{left:14px;right:14px;max-width:none}
   .readouts{grid-template-columns:1fr 1fr}
   .ro{border-bottom:1px solid var(--line);padding:12px}
   .ro:nth-child(2n){border-right:0}

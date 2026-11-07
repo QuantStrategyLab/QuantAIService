@@ -1137,3 +1137,183 @@ test("login small text and brand mark meet AA contrast in both themes", async ()
     }
   }
 });
+
+// --- Global error toast (F1/F2) and minor consistency (F3) -----------------
+// Offline fake DOM only: no browser, network, session or production data.
+
+class FakeNode {
+  constructor(doc, tag, id) {
+    this.ownerDocument = doc; this.tagName = tag; this.id = id || "";
+    this.children = []; this.parentNode = null; this.hidden = false;
+    this._text = ""; this.attrs = {}; this.listeners = {}; this.className = ""; this.style = {};
+  }
+  get firstChild() { return this.children[0] || null; }
+  appendChild(child) { child.parentNode = this; this.children.push(child); return child; }
+  removeChild(child) { this.children.splice(this.children.indexOf(child), 1); child.parentNode = null; return child; }
+  get textContent() { return this._text + this.children.map((child) => child.textContent).join(""); }
+  set textContent(value) { this._text = String(value); this.children = []; }
+  setAttribute(key, value) { this.attrs[key] = String(value); }
+  getAttribute(key) { return Object.hasOwn(this.attrs, key) ? this.attrs[key] : null; }
+  removeAttribute(key) { delete this.attrs[key]; }
+  addEventListener(type, fn) { (this.listeners[type] ||= []).push(fn); }
+  dispatch(type, init = {}) {
+    const event = { type, target: this, defaultPrevented: false, preventDefault() { this.defaultPrevented = true; }, ...init };
+    for (let node = this; node; node = node.parentNode) for (const fn of node.listeners[type] || []) fn.call(node, event);
+    return event;
+  }
+  contains(node) { for (let cur = node; cur; cur = cur.parentNode) if (cur === this) return true; return false; }
+  focus() { this.ownerDocument.activeElement = this; }
+}
+
+function toastClient({ lang = "en", fetchImpl } = {}) {
+  const script = [...dashboardHTML().matchAll(/<script>([\s\S]*?)<\/script>/g)].at(-1)[1];
+  const source = script.slice(0, script.lastIndexOf('document.querySelectorAll(".js-lang")'));
+  const ids = {};
+  const document = {
+    activeElement: null,
+    documentElement: { lang, getAttribute: () => "light", setAttribute() {} },
+    getElementById: (id) => ids[id] || null,
+    createElement: (tag) => new FakeNode(document, tag),
+    createTextNode: (value) => ({ textContent: String(value) }),
+    querySelectorAll: () => [],
+  };
+  const make = (id, parent) => { const node = new FakeNode(document, "div", id); ids[id] = node; if (parent) parent.appendChild(node); return node; };
+  const body = make("body");
+  const title = make("main-title", body);
+  const toast = make("toast", body);
+  make("toast-text", toast);
+  make("toast-dismiss", toast);
+  const live = make("toast-live", body);
+  for (const id of ["v-p95", "f-p95", "v-req", "f-req", "v-err", "f-err"]) make(id, body);
+  document.activeElement = body;
+  const context = vm.createContext({
+    document, URL, Promise,
+    fetch: fetchImpl || (() => Promise.reject(new Error("offline fixture: unavailable"))),
+    localStorage: { getItem: () => null, setItem() {} },
+  });
+  vm.runInContext(source, context);
+  if (typeof context.initToast === "function") context.initToast();
+  return { client: context, document, ids, toast, live, title, body };
+}
+
+const TOAST_KEYS = ["health", "org", "quota", "changes", "eff", "shadow", "diagnoses"];
+function setFailures(client, failing) {
+  for (const key of TOAST_KEYS) client.state[key] = failing.includes(key) ? { status: "error", error: "offline fixture" } : { status: "ok", data: {} };
+}
+
+test("F1: global toast sits in the content column after the header, not over it", () => {
+  const page = dashboardHTML();
+  const header = page.indexOf("</header>");
+  const toastAt = page.indexOf('id="toast"');
+  assert.ok(page.indexOf("<main") < header && header < toastAt && toastAt < page.indexOf('id="signal"'),
+    "toast must follow the header controls inside main (DOM and tab order)");
+  assert.doesNotMatch(page, /\.toast\{position:fixed;top:16px;right:16px/);
+  assert.match(page, /<button[^>]*id="toast-dismiss"[^>]*data-i18n-aria="toast_dismiss"/);
+  assert.match(page, /id="toast-live" role="status" aria-live="polite"><\/div>/, "live region exists empty before any message");
+  assert.doesNotMatch(page, /role="alert"/);
+  assert.match(page, /id="main-title" tabindex="-1"/);
+});
+
+test("F2: toast and dismiss strings exist and are localized in both dictionaries", () => {
+  for (const key of ["toast_error", "toast_dismiss"]) {
+    assert.equal(typeof LOCALES.en[key], "string");
+    assert.equal(typeof LOCALES["zh-CN"][key], "string");
+    assert.ok(LOCALES.en[key].trim() && LOCALES["zh-CN"][key].trim(), key);
+    assert.notEqual(LOCALES["zh-CN"][key], LOCALES.en[key], key);
+  }
+});
+
+test("F1: error episodes show once, survive refreshes and respect dismissal", () => {
+  const { client } = toastClient();
+  const step = (prev, failed) => client.toastEpisode(prev, "cycle", failed);
+  // R20: no failures, no toast and no announcement.
+  let s = step(null, []);
+  assert.equal(s.visible, false); assert.equal(s.announce, false);
+  // R01/R09: one episode, announced once over repeated identical cycles.
+  s = step(null, ["health", "quota"]);
+  assert.equal(s.visible, true); assert.equal(s.announce, true);
+  for (let i = 0; i < 3; i++) { s = step(s, ["quota", "health"]); assert.equal(s.visible, true); assert.equal(s.announce, false); }
+  // R10: dismissed stays hidden across identical cycles.
+  s = client.toastEpisode(s, "dismiss");
+  assert.equal(s.visible, false);
+  for (let i = 0; i < 3; i++) { s = step(s, ["health", "quota"]); assert.equal(s.visible, false); assert.equal(s.announce, false); }
+  // R13: partial recovery never re-shows.
+  s = step(s, ["health"]);
+  assert.equal(s.visible, false); assert.equal(s.announce, false);
+  // R11: a newly failing source (not failing at dismissal) re-shows once.
+  s = step(s, ["health", "org"]);
+  assert.equal(s.visible, true); assert.equal(s.announce, true);
+  s = step(s, ["health", "org"]);
+  assert.equal(s.announce, false);
+  // R12: recovery removes silently; the next episode shows once.
+  s = client.toastEpisode(s, "dismiss");
+  s = step(s, []);
+  assert.equal(s.visible, false); assert.equal(s.announce, false);
+  s = step(s, ["health"]);
+  assert.equal(s.visible, true); assert.equal(s.announce, true);
+  // R21: a fresh page (no in-memory state) shows the toast again.
+  assert.equal(step(null, ["health"]).visible, true);
+  assert.doesNotMatch(dashboardHTML().split("var CLIENT")[0], /toast.*localStorage/);
+});
+
+test("F1/F2: toast renders from a key, re-localizes in place and dismisses accessibly", async () => {
+  const { client, document, ids, toast, live, title } = toastClient({ lang: "en" });
+  await client.loadAll();
+  assert.equal(toast.hidden, false);
+  assert.equal(ids["toast-text"].textContent, LOCALES.en.toast_error);
+  assert.equal(live.textContent, LOCALES.en.toast_error);
+  assert.equal(document.activeElement, ids.body, "showing the toast does not move focus");
+  // R16: same instance re-renders in zh-CN; one announcement at most.
+  client.lang = "zh-CN"; client.applyI18n();
+  assert.equal(ids["toast-text"].textContent, LOCALES["zh-CN"].toast_error);
+  assert.doesNotMatch(ids["toast-text"].textContent, /Some data/);
+  // R09: further refreshes with the same failures do not re-announce.
+  live.textContent = "";
+  await client.loadAll();
+  assert.equal(live.textContent, "");
+  assert.equal(toast.hidden, false);
+  // R07: Escape outside the toast does nothing.
+  ids.body.dispatch("keydown", { key: "Escape" });
+  assert.equal(toast.hidden, false);
+  // R06/R05: Escape inside dismisses and moves focus to the main heading.
+  ids["toast-dismiss"].focus();
+  ids["toast-dismiss"].dispatch("keydown", { key: "Escape" });
+  assert.equal(toast.hidden, true);
+  assert.equal(document.activeElement, title);
+  // R17: locale switch after dismissal does not bring it back.
+  client.lang = "en"; client.applyI18n();
+  assert.equal(toast.hidden, true);
+  await client.loadAll();
+  assert.equal(toast.hidden, true);
+});
+
+test("F1: dismiss button click hides the toast and keeps panel errors", async () => {
+  const { client, document, ids, toast } = toastClient({ lang: "zh-CN" });
+  await client.loadAll();
+  assert.equal(toast.hidden, false);
+  const before = TOAST_KEYS.map((key) => client.state[key].status);
+  document.activeElement = ids.body;
+  ids["toast-dismiss"].dispatch("click");
+  assert.equal(toast.hidden, true);
+  assert.equal(document.activeElement, ids.body, "pointer dismissal from outside leaves focus unchanged");
+  assert.deepEqual(TOAST_KEYS.map((key) => client.state[key].status), before);
+  setFailures(client, ["health"]);
+});
+
+test("F3c: HTTP P95 tile shows Unavailable together with the process-local caveat", () => {
+  for (const lang of ["en", "zh-CN"]) {
+    const { client, ids } = toastClient({ lang });
+    client.applyI18n();
+    setFailures(client, TOAST_KEYS);
+    client.renderReadouts();
+    assert.equal(ids["v-p95"].textContent, "—");
+    assert.match(ids["f-p95"].textContent, new RegExp(LOCALES[lang].unavailable));
+    assert.ok(ids["f-p95"].textContent.includes(LOCALES[lang].k_p95_f));
+  }
+});
+
+test("F3a/F3b: live tag is localized and diagnosis errors align with other panels", () => {
+  const page = dashboardHTML();
+  assert.match(page, /<h3 id="tail-h"[^]*?<span class="lbl" data-i18n="win_live">/);
+  assert.doesNotMatch(page, /\.diag\{padding:0 14px/);
+});
