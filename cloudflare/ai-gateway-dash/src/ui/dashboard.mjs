@@ -85,7 +85,42 @@ function fmtMoney(value,currency){var n=finiteNumber(value);if(n===null)return "
 function fmtTokens(value){var n=finiteNumber(value);if(n===null)return "—";if(n>=1000000)return (n/1000000).toFixed(1);if(n>=1000)return (n/1000).toFixed(1);return String(n);}
 function tokenUnit(value){var n=finiteNumber(value);if(n===null)return "";if(n>=1000000)return "M";if(n>=1000)return "k";return "";}
 function shortError(error){var message=error&&error.message?error.message:String(error||"");return message.split("\n").join(" ").slice(0,180);}
-function toast(message){var node=qs("toast");if(!node)return;node.textContent=message||"";node.style.display=message?"block":"none";}
+/* Global load-error notice. It stores episode state, never a rendered string,
+   so it re-renders in the current locale. Dismissal lives in memory only. */
+var toastModel=null;
+function failedKeys(){return Object.keys(state).filter(function(key){return state[key].status==="error";});}
+function toastEpisode(prev,event,failed){
+  var p=prev||{active:false,dismissed:false,seen:[]};
+  if(event==="dismiss")return {active:p.active,dismissed:p.active,seen:p.seen,visible:false,announce:false};
+  var keys=Array.isArray(failed)?failed.slice():[];
+  if(!keys.length)return {active:false,dismissed:false,seen:[],visible:false,announce:false};
+  if(!p.active)return {active:true,dismissed:false,seen:keys,visible:true,announce:true};
+  if(p.dismissed){
+    var gained=keys.some(function(key){return p.seen.indexOf(key)<0;});
+    if(gained)return {active:true,dismissed:false,seen:keys,visible:true,announce:true};
+    return {active:true,dismissed:true,seen:p.seen,visible:false,announce:false};
+  }
+  return {active:true,dismissed:false,seen:keys,visible:true,announce:false};
+}
+function renderToast(){
+  var node=qs("toast"),textNode=qs("toast-text");if(!node)return;
+  var visible=!!(toastModel&&toastModel.visible);
+  node.hidden=!visible;
+  if(textNode)textNode.textContent=visible?t.toast_error:"";
+}
+function announceToast(on){var live=qs("toast-live");if(live)live.textContent=on?t.toast_error:"";}
+function dismissToast(){
+  var node=qs("toast");if(!node||node.hidden)return;
+  var inside=node.contains(document.activeElement);
+  toastModel=toastEpisode(toastModel,"dismiss");
+  renderToast();announceToast(false);
+  if(inside){var heading=qs("main-title");if(heading)heading.focus();}
+}
+function initToast(){
+  var node=qs("toast"),button=qs("toast-dismiss");
+  if(button)button.addEventListener("click",dismissToast);
+  if(node)node.addEventListener("keydown",function(event){if(event.key==="Escape"){event.preventDefault();dismissToast();}});
+}
 
 function statusClass(status){if(status==="healthy")return "st-ok";if(status==="degraded")return "st-warn";if(status==="unhealthy")return "st-bad";return "st-unk";}
 function statusKey(status){if(status==="healthy")return "s_ok";if(status==="degraded")return "s_deg";if(status==="unhealthy")return "s_bad";return "s_unk";}
@@ -125,7 +160,7 @@ function renderReadouts(){
   }else{
     var note=state.health.status==="error"?t.unavailable:state.health.status==="loading"?t.loading:t.no_data;
     setReadout("req","—","",note,true);meter("m-req",0,false,true);
-    setReadout("p95","—","",t.k_p95_f,true);meter("m-p95",0,false,true);
+    setReadout("p95","—","",note+" · "+t.k_p95_f,true);meter("m-p95",0,false,true);
     setReadout("err","—","",note,true);meter("m-err",0,false,true);
   }
   var tokens=state.quota.status==="ok"?tokensFromQuota(state.quota.data):null;
@@ -501,9 +536,10 @@ function loadAll(){
     load("diagnoses",ROUTES.diagnoses)
   ];
   return Promise.all(jobs).then(function(){
-    var failed=false;
-    Object.keys(state).forEach(function(key){if(state[key].status==="error")failed=true;});
-    toast(failed?t.toast_error:"");
+    toastModel=toastEpisode(toastModel,"cycle",failedKeys());
+    renderToast();
+    if(toastModel.announce)announceToast(true);
+    else if(!toastModel.visible)announceToast(false);
   });
 }
 
@@ -530,6 +566,8 @@ function applyI18n(){
   document.querySelectorAll(".js-lang").forEach(function(button){button.textContent=lang==="zh-CN"?"EN":"中";button.setAttribute("aria-label",t.lang_label);});
   document.querySelectorAll(".js-theme").forEach(function(button){button.setAttribute("aria-label",t.theme_label);});
   document.title=t.d_title;
+  renderToast();
+  var live=qs("toast-live");if(live&&live.textContent&&toastModel&&toastModel.visible)announceToast(true);
   renderAll();
 }
 
@@ -549,6 +587,7 @@ function initWindows(){
 document.querySelectorAll(".js-lang").forEach(function(button){button.addEventListener("click",function(){lang=lang==="zh-CN"?"en":"zh-CN";try{localStorage.setItem("qg-lang",lang);}catch(error){}applyI18n();});});
 document.querySelectorAll(".js-theme").forEach(function(button){button.addEventListener("click",function(){theme=theme==="dark"?"light":"dark";try{localStorage.setItem("qg-theme",theme);}catch(error){}applyI18n();});});
 initWindows();
+initToast();
 applyI18n();
 loadUser();
 loadAll();
@@ -566,7 +605,6 @@ export function dashboardHTML() {
 <style>${CSS}</style>
 </head>
 <body data-view="dashboard">
-<div class="toast" id="toast" role="status" aria-live="polite"></div>
 <div class="app">
   <nav class="rail" aria-label="${text("d_title")}">
     <div class="mark" aria-hidden="true">QG</div>
@@ -579,7 +617,7 @@ export function dashboardHTML() {
   </nav>
   <main>
     <header class="top">
-      <h1><span class="mark m-only" aria-hidden="true">QG</span><span><span data-i18n="d_title">${text("d_title")}</span><small class="lbl" data-i18n="d_sub">${text("d_sub")}</small></span></h1>
+      <h1 id="main-title" tabindex="-1"><span class="mark m-only" aria-hidden="true">QG</span><span><span data-i18n="d_title">${text("d_title")}</span><small class="lbl" data-i18n="d_sub">${text("d_sub")}</small></span></h1>
       <span class="grow"></span>
       <span class="chip hide-m"><span class="lamp st-unk" aria-hidden="true"></span><span data-i18n="d_chip">${text("d_chip")}</span></span>
       <span class="chip hide-m" id="status-pill"><span class="lamp st-unk" id="pulse" aria-hidden="true"></span><span id="status-text" data-i18n="loading">${text("loading")}</span></span>
@@ -593,6 +631,8 @@ export function dashboardHTML() {
       <button class="iconbtn js-theme" type="button" data-i18n-aria="theme_label" aria-label="${text("theme_label")}">◐</button>
       <div class="user"><img id="avatar" alt=""><span id="username" aria-live="polite"></span><a href="/logout" data-i18n="acct_logout">${text("acct_logout")}</a></div>
     </header>
+    <div class="toast" id="toast" hidden><p id="toast-text"></p><button class="iconbtn toast-x" type="button" id="toast-dismiss" data-i18n-aria="toast_dismiss" aria-label="${text("toast_dismiss")}"><span aria-hidden="true">×</span></button></div>
+    <div class="sr-only" id="toast-live" role="status" aria-live="polite"></div>
 
     <section class="pn readouts" id="signal" aria-label="${text("win_live")}">
       <div class="ro"><span class="lbl" data-i18n="k_req">${text("k_req")}</span><div class="v" id="v-req">—</div><div class="meter" id="m-req" aria-hidden="true"></div><div class="foot" id="f-req"></div></div>
@@ -619,7 +659,7 @@ export function dashboardHTML() {
         <div class="table-wrap" id="health"></div>
       </section>
       <section class="pn" aria-labelledby="tail-h">
-        <div class="pn-h"><h3 id="tail-h" data-i18n="t_title">${text("t_title")}</h3><span class="lbl">live</span></div>
+        <div class="pn-h"><h3 id="tail-h" data-i18n="t_title">${text("t_title")}</h3><span class="lbl" data-i18n="win_live">${text("win_live")}</span></div>
         <div class="na"><div class="na-bar" aria-hidden="true"></div><div class="na-body"><div class="na-big" aria-hidden="true">—</div><b data-i18n="t_na_title">${text("t_na_title")}</b><p data-i18n="t_na_body">${text("t_na_body")}</p></div></div>
       </section>
     </div>
