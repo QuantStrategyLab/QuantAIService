@@ -232,19 +232,83 @@ export function buildDashboardApiUrl(rawOrigin, pathname, search = "") {
   return origin.toString();
 }
 
+function originReadHeaders(env) {
+  const headers = {
+    Accept: "application/json",
+    "User-Agent": "AiGatewayDashboard/1.0",
+  };
+  const token = String(env.DASHBOARD_API_TOKEN || "").trim();
+  if (token) headers.Authorization = "Bearer " + token;
+  return { headers, token };
+}
+
+function looksLikeJsonBody(body) {
+  const trimmed = String(body || "").trim();
+  return trimmed.startsWith("{") || trimmed.startsWith("[");
+}
+
+function proxyFailure(errorCode, error, { originStatus } = {}) {
+  const payload = { status: "error", error, error_code: errorCode };
+  if (Number.isFinite(originStatus)) payload.origin_status = originStatus;
+  return json(payload, 502);
+}
+
 async function proxyAPI(path, search, env) {
-  const token = (env.DASHBOARD_API_TOKEN || "").trim();
-  const url = buildDashboardApiUrl(env.AI_GATEWAY_ORIGIN_URL || "", path, search);
-  const resp = await fetch(url, {
-    headers: { Authorization: token ? "Bearer " + token : "", Accept: "application/json", "User-Agent": "AiGatewayDashboard/1.0" },
-  });
-  const body = await resp.text();
-  if (resp.status === 401 || resp.status === 403) {
-    return json(
-      { status: "error", error: "后端认证失败：请同步 Dashboard API Token 与服务端静态访问 token" },
-      502,
+  // Fail closed with stable machine codes so authenticated Network readback can
+  // distinguish misconfiguration, origin auth, and non-JSON upstream bodies
+  // without restoring retired V1 handlers or widening privileges.
+  let url;
+  try {
+    url = buildDashboardApiUrl(env.AI_GATEWAY_ORIGIN_URL || "", path, search);
+  } catch (error) {
+    const message = String(error && error.message || "proxy_misconfigured");
+    if (message.includes("not configured")) {
+      return proxyFailure("origin_not_configured", message);
+    }
+    if (message.includes("HTTPS")) {
+      return proxyFailure("origin_insecure", message);
+    }
+    if (message.includes("not allowed")) {
+      return proxyFailure("route_not_allowed", message);
+    }
+    return proxyFailure("proxy_misconfigured", message);
+  }
+
+  const { headers, token } = originReadHeaders(env);
+  if (!token) {
+    return proxyFailure(
+      "origin_token_missing",
+      "DASHBOARD_API_TOKEN not configured",
     );
   }
+
+  let resp;
+  try {
+    resp = await fetch(url, { headers });
+  } catch (_error) {
+    return proxyFailure("origin_unreachable", "origin fetch failed");
+  }
+
+  const body = await resp.text();
+  if (resp.status === 401 || resp.status === 403) {
+    return proxyFailure(
+      "origin_auth_failed",
+      "后端认证失败：请同步 Dashboard API Token 与服务端静态访问 token",
+      { originStatus: resp.status },
+    );
+  }
+  if (!String(body || "").trim()) {
+    return proxyFailure("origin_empty_body", "origin returned an empty body", {
+      originStatus: resp.status,
+    });
+  }
+  if (!looksLikeJsonBody(body)) {
+    return proxyFailure("origin_non_json", "origin returned a non-JSON body", {
+      originStatus: resp.status,
+    });
+  }
+  // Pass through JSON success (including valid empty payloads) and JSON error
+  // bodies unchanged so empty data stays distinguishable from transport failure.
   return new Response(body, {
     status: resp.status,
     headers: { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" },
@@ -266,32 +330,39 @@ function diagnosisUpstreamUrl(env, jobId = "") {
   return origin.toString();
 }
 
+function diagnosisFailure(code, originStatus) {
+  const error = new Error(code);
+  error.code = code;
+  if (Number.isFinite(originStatus)) error.origin_status = originStatus;
+  return error;
+}
+
 async function fetchDiagnosisUpstream(env, jobId = "") {
-  const token = String(env.DASHBOARD_API_TOKEN || "").trim();
+  const { headers, token } = originReadHeaders(env);
+  if (!token) throw diagnosisFailure("origin_token_missing");
   const response = await fetch(diagnosisUpstreamUrl(env, jobId), {
     method: "GET",
     redirect: "manual",
     signal: AbortSignal.timeout(5000),
-    headers: {
-      Authorization: token ? "Bearer " + token : "",
-      Accept: "application/json",
-      "User-Agent": "AiGatewayDashboard/1.0",
-    },
+    headers,
   });
-  if (response.status >= 300 && response.status < 400) throw new Error("upstream_redirect_rejected");
+  if (response.status === 401 || response.status === 403) {
+    throw diagnosisFailure("origin_auth_failed", response.status);
+  }
+  if (response.status >= 300 && response.status < 400) throw diagnosisFailure("upstream_redirect_rejected");
   const declaredLength = Number(response.headers.get("content-length") || 0);
-  if (declaredLength > DIAGNOSIS_MAX_RESPONSE_BYTES) throw new Error("upstream_response_too_large");
+  if (declaredLength > DIAGNOSIS_MAX_RESPONSE_BYTES) throw diagnosisFailure("upstream_response_too_large");
   const chunks = [];
   let size = 0;
   const reader = response.body?.getReader();
-  if (!reader) throw new Error("upstream_response_invalid");
+  if (!reader) throw diagnosisFailure("upstream_response_invalid");
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
     size += value.byteLength;
     if (size > DIAGNOSIS_MAX_RESPONSE_BYTES) {
       await reader.cancel();
-      throw new Error("upstream_response_too_large");
+      throw diagnosisFailure("upstream_response_too_large");
     }
     chunks.push(value);
   }
@@ -305,13 +376,34 @@ async function fetchDiagnosisUpstream(env, jobId = "") {
   try {
     payload = JSON.parse(new TextDecoder().decode(bytes));
   } catch (e) {
-    throw new Error("upstream_response_invalid");
+    throw diagnosisFailure("upstream_response_invalid");
   }
   if (response.status === 404) return { missing: true, payload: null };
   if (!response.ok || !payload || typeof payload !== "object" || Array.isArray(payload)) {
-    throw new Error("upstream_unavailable");
+    throw diagnosisFailure("upstream_unavailable", response.status);
   }
   return { missing: false, payload };
+}
+
+function diagnosisErrorResponse(error) {
+  const rawCode = String((error && (error.code || error.message)) || "diagnosis_unavailable");
+  const known = new Set([
+    "origin_token_missing",
+    "origin_auth_failed",
+    "origin_unavailable",
+    "upstream_redirect_rejected",
+    "upstream_response_too_large",
+    "upstream_response_invalid",
+    "upstream_unavailable",
+  ]);
+  const errorCode = known.has(rawCode) ? rawCode : "diagnosis_unavailable";
+  const payload = {
+    status: "error",
+    error: "诊断数据暂不可用",
+    error_code: errorCode === "origin_unavailable" ? "origin_not_configured" : errorCode,
+  };
+  if (Number.isFinite(error && error.origin_status)) payload.origin_status = error.origin_status;
+  return json(payload, 502);
 }
 
 function isOperationalDiagnosisRun(run, expectedId = "") {
@@ -493,7 +585,7 @@ export default {
         }
         return await diagnosisDetail(env, jobId);
       } catch (e) {
-        return json({ status: "error", error: "诊断数据暂不可用" }, 502);
+        return diagnosisErrorResponse(e);
       }
     }
 
@@ -507,7 +599,10 @@ export default {
       try {
         return await proxyAPI(apiPath, url.search, env);
       } catch (e) {
-        return json({ status: "error", error: e.message }, 502);
+        return proxyFailure(
+          "proxy_misconfigured",
+          String((e && e.message) || "proxy_misconfigured"),
+        );
       }
     }
 
