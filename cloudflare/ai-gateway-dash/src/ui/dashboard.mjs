@@ -102,17 +102,41 @@ function toastEpisode(prev,event,failed){
   }
   return {active:true,dismissed:false,seen:keys,visible:true,announce:false};
 }
+/* The dashboard's own session ended: the Worker answers 401 "unauthorized"
+   before proxying. Origin authentication failures arrive as 502
+   origin_auth_failed and stay on the generic notice. */
+var LOGIN_PATH="/login";
+var sessionEnded=false;
+function isOwnSessionExpired(response,data){return response.status===401&&!!data&&data.error==="unauthorized";}
+function toastMessage(){return toastModel&&toastModel.kind==="session"?t.toast_session:t.toast_error;}
 function renderToast(){
   var node=qs("toast"),textNode=qs("toast-text");if(!node)return;
   var visible=!!(toastModel&&toastModel.visible);
   node.hidden=!visible;
-  if(textNode)textNode.textContent=visible?t.toast_error:"";
+  if(!textNode)return;
+  textNode.textContent="";
+  if(!visible)return;
+  if(toastModel.kind==="session"){var link=el("a","",t.toast_session);link.href=LOGIN_PATH;link.style.textDecoration="underline";textNode.appendChild(link);}
+  else textNode.textContent=t.toast_error;
 }
-function announceToast(on){var live=qs("toast-live");if(live)live.textContent=on?t.toast_error:"";}
+function announceToast(on){var live=qs("toast-live");if(live)live.textContent=on?toastMessage():"";}
+function updateToast(){
+  var prev=toastModel;
+  var kind=sessionEnded?"session":"error";
+  toastModel=toastEpisode(prev,"cycle",sessionEnded?["session"]:failedKeys());
+  toastModel.kind=kind;
+  if(toastModel.visible&&prev&&prev.visible&&prev.kind!==kind)toastModel.announce=true;
+  renderToast();
+  if(toastModel.announce)announceToast(true);
+  else if(!toastModel.visible)announceToast(false);
+}
+function noteSessionEnded(){if(sessionEnded)return;sessionEnded=true;updateToast();}
 function dismissToast(){
   var node=qs("toast");if(!node||node.hidden)return;
   var inside=node.contains(document.activeElement);
+  var kind=toastModel&&toastModel.kind;
   toastModel=toastEpisode(toastModel,"dismiss");
+  toastModel.kind=kind;
   renderToast();announceToast(false);
   if(inside){var heading=qs("main-title");if(heading)heading.focus();}
 }
@@ -462,7 +486,7 @@ function diagnosisItems(container,items,emptyText){
       fetchJSON(ROUTES.diagnoses+"/"+encodeURIComponent(item.job_id)).then(function(detail){
         var diagnosis=detail&&detail.diagnosis?detail.diagnosis:{};
         output.textContent=String(diagnosis.output||diagnosis.message||t.diag_output_unavailable);
-      }).catch(function(){output.textContent=t.diag_output_unavailable;});
+      }).catch(function(error){output.textContent=t.diag_output_unavailable;if(error&&error.sessionExpired)noteSessionEnded();});
     });
     append(line,meta,button);
     append(box,line,output);
@@ -506,7 +530,9 @@ function fetchJSON(path){
       if(!response.ok||(data&&data.status==="error")){
         if(path===ROUTES.orgHealth&&response.status===503&&data&&data.status==="unavailable")return data;
         var detail=data&&data.error?": "+data.error:"";
-        throw new Error(path+": "+response.status+detail);
+        var failure=new Error(path+": "+response.status+detail);
+        if(isOwnSessionExpired(response,data))failure.sessionExpired=true;
+        throw failure;
       }
       if(!data)throw new Error(path+": invalid JSON");
       return data;
@@ -522,7 +548,7 @@ function load(key,path){
   return fetchJSON(path).then(function(data){
     state[key]={status:"ok",data:normalize(key,data)};
   }).catch(function(error){
-    state[key]={status:"error",error:shortError(error)};
+    state[key]={status:"error",error:shortError(error),sessionExpired:!!(error&&error.sessionExpired)};
   }).then(function(){renderAll();});
 }
 function loadAll(){
@@ -536,11 +562,70 @@ function loadAll(){
     load("diagnoses",ROUTES.diagnoses)
   ];
   return Promise.all(jobs).then(function(){
-    toastModel=toastEpisode(toastModel,"cycle",failedKeys());
-    renderToast();
-    if(toastModel.announce)announceToast(true);
-    else if(!toastModel.visible)announceToast(false);
+    // Concurrent 401s from one refresh collapse into a single notice.
+    sessionEnded=failedKeys().some(function(key){return state[key].sessionExpired;});
+    updateToast();
+    scheduleNav();
   });
+}
+
+/* Navigation highlight follows the panel actually in view. A hash navigation
+   (click, direct link, back/forward) pins its target while that panel is
+   visible, because browsers may restore a different scroll position; any user
+   scroll input releases the pin. Appearance stays the existing .on class on
+   both the rail and the narrow-screen nav. */
+var NAV_TARGETS=["signal","quota-panel","changes-panel","diagnoses-panel","account-panel"];
+var navPin="";
+function navId(hash){var id=String(hash||"").replace(/^#/,"");return NAV_TARGETS.indexOf(id)>=0?id:"";}
+function pickNav(rects,pin,viewport,atBottom){
+  var line=Math.min(96,viewport*0.25),passed=NAV_TARGETS[0],lastVisible=passed,containing="",entering="",i,id,rect;
+  for(i=0;i<NAV_TARGETS.length;i++){
+    id=NAV_TARGETS[i];rect=rects[id];if(!rect)continue;
+    if(rect.top<=line){passed=id;if(rect.bottom>line)containing=id;}
+    else if(!entering&&rect.top<viewport)entering=id;
+    if(rect.top<viewport)lastVisible=id;
+  }
+  var pinned=pin&&rects[pin];
+  if(pinned&&pinned.top<viewport&&pinned.bottom>0)return pin;
+  // Bottom panels cannot reach the top line once the page cannot scroll further.
+  if(atBottom)return lastVisible;
+  // Non-nav panels sit between targets: a target scrolled fully past the line
+  // yields to the next target already on screen.
+  return containing||entering||passed;
+}
+function setActiveNav(id){
+  document.querySelectorAll(".rail a[href^='#'],.mobnav a[href^='#']").forEach(function(link){
+    var on=link.getAttribute("href")==="#"+id;
+    link.classList.toggle("on",on);
+    if(on)link.setAttribute("aria-current","location");else link.removeAttribute("aria-current");
+  });
+}
+function syncNav(){
+  if(typeof window==="undefined")return;
+  var rects={};
+  NAV_TARGETS.forEach(function(id){var node=qs(id);if(node&&node.getBoundingClientRect){var box=node.getBoundingClientRect();rects[id]={top:box.top,bottom:box.bottom};}});
+  var doc=document.scrollingElement||document.documentElement;
+  var viewport=window.innerHeight||(doc&&doc.clientHeight)||0;
+  var scrolled=window.pageYOffset||0;
+  var atBottom=!!doc&&scrolled>0&&Math.ceil(scrolled+viewport)>=doc.scrollHeight-2;
+  setActiveNav(pickNav(rects,navPin,viewport,atBottom));
+}
+var navQueued=false;
+function scheduleNav(){
+  if(navQueued||typeof window==="undefined")return;
+  navQueued=true;
+  var run=function(){navQueued=false;syncNav();};
+  if(window.requestAnimationFrame)window.requestAnimationFrame(run);else setTimeout(run,16);
+}
+function releaseNavPin(){navPin="";scheduleNav();}
+function initNav(){
+  navPin=navId(location.hash);
+  window.addEventListener("scroll",scheduleNav,{passive:true});
+  window.addEventListener("resize",scheduleNav);
+  window.addEventListener("hashchange",function(){navPin=navId(location.hash);syncNav();scheduleNav();});
+  window.addEventListener("load",scheduleNav);
+  ["wheel","touchstart","mousedown","keydown"].forEach(function(type){window.addEventListener(type,releaseNavPin,{passive:true});});
+  syncNav();
 }
 
 function safeAvatarUrl(value){return safeHttpUrl(value);}
@@ -588,6 +673,7 @@ document.querySelectorAll(".js-lang").forEach(function(button){button.addEventLi
 document.querySelectorAll(".js-theme").forEach(function(button){button.addEventListener("click",function(){theme=theme==="dark"?"light":"dark";try{localStorage.setItem("qg-theme",theme);}catch(error){}applyI18n();});});
 initWindows();
 initToast();
+initNav();
 applyI18n();
 loadUser();
 loadAll();

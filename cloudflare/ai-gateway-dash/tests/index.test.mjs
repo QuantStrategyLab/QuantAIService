@@ -1559,3 +1559,230 @@ test("F3a/F3b: live tag is localized and diagnosis errors align with other panel
   assert.match(page, /<h3 id="tail-h"[^]*?<span class="lbl" data-i18n="win_live">/);
   assert.doesNotMatch(page, /\.diag\{padding:0 14px/);
 });
+
+// --- Navigation highlight and own-session expiry (t1505) --------------------
+// Offline fake DOM only: no browser, network, session or production data.
+
+function jsonResponse(status, body) {
+  const raw = body === undefined ? "" : JSON.stringify(body);
+  return { ok: status >= 200 && status < 300, status, text: () => Promise.resolve(raw) };
+}
+const SESSION_401 = () => Promise.resolve(jsonResponse(401, { status: "error", error: "unauthorized" }));
+
+test("401: own expired session shows one bilingual re-login notice with the login entry", async () => {
+  for (const lang of ["en", "zh-CN"]) {
+    let calls = 0;
+    const { client, ids, toast, live } = toastClient({ lang, fetchImpl: () => { calls += 1; return SESSION_401(); } });
+    client.applyI18n();
+    live.textContent = "";
+    await client.loadAll();
+    assert.ok(calls >= 7, "every panel read ran concurrently and returned 401");
+    assert.equal(toast.hidden, false);
+    const text = ids["toast-text"];
+    assert.equal(text.textContent, LOCALES[lang].toast_session);
+    assert.equal(text.children.length, 1, "concurrent 401s collapse into one notice");
+    const link = text.children[0];
+    assert.equal(link.tagName, "a");
+    assert.equal(link.href, "/login", "reuses the existing OAuth login entry");
+    assert.equal(live.textContent, LOCALES[lang].toast_session);
+    // A later refresh that still returns 401 does not announce again.
+    live.textContent = "";
+    await client.loadAll();
+    assert.equal(live.textContent, "");
+    assert.equal(text.children.length, 1);
+  }
+  assert.equal(LOCALES["zh-CN"].toast_session, "登录已失效，请重新登录");
+  assert.equal(LOCALES.en.toast_session, "Login expired, please log in again");
+});
+
+test("401: re-login notice re-localizes in place and dismisses like the existing toast", async () => {
+  const { client, ids, toast } = toastClient({ lang: "en", fetchImpl: SESSION_401 });
+  await client.loadAll();
+  client.lang = "zh-CN"; client.applyI18n();
+  assert.equal(ids["toast-text"].textContent, LOCALES["zh-CN"].toast_session);
+  ids["toast-dismiss"].dispatch("click");
+  assert.equal(toast.hidden, true);
+  await client.loadAll();
+  assert.equal(toast.hidden, true, "dismissed notice stays hidden while the session stays expired");
+});
+
+test("401: generic notice becomes a re-login notice and recovery clears it", async () => {
+  let mode = "network";
+  const fetchImpl = () => mode === "network" ? Promise.reject(new Error("offline fixture")) : mode === "401" ? SESSION_401() : Promise.resolve(jsonResponse(200, {}));
+  const { client, ids, toast, live } = toastClient({ lang: "en", fetchImpl });
+  await client.loadAll();
+  assert.equal(ids["toast-text"].textContent, LOCALES.en.toast_error);
+  mode = "401"; live.textContent = "";
+  await client.loadAll();
+  assert.equal(ids["toast-text"].textContent, LOCALES.en.toast_session);
+  assert.equal(live.textContent, LOCALES.en.toast_session, "switching to the re-login notice is announced once");
+  mode = "ok";
+  await client.loadAll();
+  assert.equal(toast.hidden, true);
+});
+
+test("401: ordinary failures and upstream authentication errors keep the generic notice", async () => {
+  const cases = [
+    () => Promise.reject(new Error("offline fixture")),
+    () => Promise.resolve(jsonResponse(502, { status: "error", error: "origin auth", error_code: "origin_auth_failed", origin_status: 401 })),
+    () => Promise.resolve(jsonResponse(502, { status: "error", error: "诊断数据暂不可用", error_code: "origin_auth_failed", origin_status: 403 })),
+    () => Promise.resolve(jsonResponse(401, { status: "error", error: "upstream_token_rejected" })),
+    () => Promise.resolve(jsonResponse(401)),
+    () => Promise.resolve(jsonResponse(403, { status: "error", error: "unauthorized" })),
+    () => Promise.resolve(jsonResponse(500, { status: "error", error: "unauthorized" })),
+  ];
+  for (const fetchImpl of cases) {
+    const { client, ids, toast } = toastClient({ lang: "en", fetchImpl });
+    await client.loadAll();
+    assert.equal(toast.hidden, false);
+    assert.equal(ids["toast-text"].textContent, LOCALES.en.toast_error);
+    assert.equal(ids["toast-text"].children.length, 0, "no login link for non-session failures");
+  }
+});
+
+test("401: the Worker's own session check is the only source of the re-login contract", async () => {
+  const env = {
+    DASHBOARD_SESSION_SECRET: "test-session-signing-value",
+    DASHBOARD_SESSION_KV: new FakeKV(),
+    DASHBOARD_API_TOKEN: "dashboard-api-token",
+    AI_GATEWAY_ORIGIN_URL: "https://gateway.example",
+  };
+  for (const path of ["/api/v1/ai/quota", "/api/v1/ai/changes?days=7", "/api/diagnoses"]) {
+    const response = await worker.fetch(new Request("https://dash.example" + path), env);
+    assert.equal(response.status, 401);
+    assert.equal((await response.json()).error, "unauthorized");
+  }
+});
+
+function navClient({ hash = "", viewport = 800, scrollHeight = 4000 } = {}) {
+  const harness = toastClient({ lang: "en" });
+  const { client, document } = harness;
+  const order = ["signal", "quota-panel", "changes-panel", "diagnoses-panel", "account-panel"];
+  const tops = { "signal": 84, "quota-panel": 400, "changes-panel": 1400, "diagnoses-panel": 2200, "account-panel": 3500 };
+  const panels = {};
+  for (const id of order) {
+    panels[id] = new FakeNode(document, "section", id);
+    panels[id].getBoundingClientRect = () => ({ top: tops[id] - win.scrollY, bottom: tops[id] + 300 - win.scrollY });
+  }
+  const makeLinks = (ids) => ids.map((id) => {
+    const link = new FakeNode(document, "a");
+    link.setAttribute("href", "#" + id);
+    link.className = id === "signal" ? "on" : "";
+    link.classList = {
+      toggle(name, on) { const set = new Set(link.className.split(" ").filter(Boolean)); if (on) set.add(name); else set.delete(name); link.className = [...set].join(" "); },
+    };
+    return link;
+  });
+  const rail = makeLinks(order);
+  const mob = makeLinks(order.slice(0, 4));
+  const listeners = {};
+  const win = {
+    scrollY: 0, pageYOffset: 0, innerHeight: viewport,
+    addEventListener(type, fn) { (listeners[type] ||= []).push(fn); },
+    requestAnimationFrame(fn) { fn(); return 1; },
+  };
+  const loc = { hash };
+  const baseGet = document.getElementById;
+  document.getElementById = (id) => panels[id] || baseGet(id);
+  document.querySelectorAll = (sel) => sel.includes(".rail") ? [...rail, ...mob] : [];
+  document.documentElement.scrollHeight = scrollHeight;
+  document.documentElement.clientHeight = viewport;
+  client.window = win; client.location = loc;
+  const scrollTo = (y, newHash) => {
+    win.scrollY = win.pageYOffset = Math.min(y, scrollHeight - viewport);
+    if (newHash !== undefined && newHash !== loc.hash) { loc.hash = newHash; for (const fn of listeners.hashchange || []) fn({}); }
+    for (const fn of listeners.scroll || []) fn({});
+  };
+  const input = (type = "wheel") => { for (const fn of listeners[type] || []) fn({}); };
+  const active = (links) => links.filter((link) => /\bon\b/.test(link.className)).map((link) => link.getAttribute("href"));
+  client.initNav();
+  return { client, rail, mob, scrollTo, active, listeners, tops, panels, input };
+}
+
+test("nav: active item follows the panel scrolled to, on desktop and mobile navs", () => {
+  const nav = navClient();
+  assert.deepEqual(nav.active(nav.rail), ["#signal"]);
+  for (const id of ["quota-panel", "changes-panel", "diagnoses-panel"]) {
+    nav.scrollTo(nav.tops[id], "#" + id);
+    assert.deepEqual(nav.active(nav.rail), ["#" + id], "rail highlights " + id);
+    assert.deepEqual(nav.active(nav.mob), ["#" + id], "390px nav highlights " + id);
+    assert.equal(nav.rail.find((link) => link.getAttribute("href") === "#" + id).getAttribute("aria-current"), "location");
+    assert.equal(nav.rail[0].getAttribute("aria-current"), null, "Signal is no longer current");
+  }
+  // Account sits at the bottom and cannot reach the top line: the hash decides.
+  nav.scrollTo(99999, "#account-panel");
+  assert.deepEqual(nav.active(nav.rail), ["#account-panel"]);
+  assert.deepEqual(nav.active(nav.mob), [], "mobile nav has no account item; nothing else stays lit");
+  // Plain scrolling without a hash change still follows the view.
+  nav.scrollTo(0);
+  assert.deepEqual(nav.active(nav.rail), ["#signal"]);
+  nav.scrollTo(1500);
+  assert.deepEqual(nav.active(nav.rail), ["#changes-panel"]);
+});
+
+test("nav: direct hash link and back/forward select the matching item", () => {
+  // Direct load: the browser has already scrolled to the hash target.
+  const nav = navClient({ hash: "#diagnoses-panel" });
+  nav.scrollTo(nav.tops["diagnoses-panel"]);
+  assert.deepEqual(nav.active(nav.rail), ["#diagnoses-panel"]);
+  // Back to #quota-panel, then forward again.
+  nav.scrollTo(nav.tops["quota-panel"], "#quota-panel");
+  assert.deepEqual(nav.active(nav.rail), ["#quota-panel"]);
+  nav.scrollTo(nav.tops["diagnoses-panel"], "#diagnoses-panel");
+  assert.deepEqual(nav.active(nav.mob), ["#diagnoses-panel"]);
+  // Back to the bare page.
+  nav.scrollTo(0, "");
+  assert.deepEqual(nav.active(nav.rail), ["#signal"]);
+});
+
+test("nav: initial render highlights from the current scroll position", () => {
+  const harnessHash = "#changes-panel";
+  const nav = navClient({ hash: harnessHash });
+  // initNav ran with scroll 0 (no hash-driven scroll yet): Signal is correct.
+  assert.deepEqual(nav.active(nav.rail), ["#signal"]);
+  assert.equal(nav.rail.filter((link) => /\bon\b/.test(link.className)).length, 1);
+});
+
+test("nav: markup keeps the existing appearance hooks", () => {
+  const page = dashboardHTML();
+  assert.match(page, /<nav class="rail"[^>]*>[^]*?<a class="on" href="#signal">/);
+  assert.match(page, /<nav class="mobnav"[^>]*>\s*<a class="on" href="#signal">/);
+  assert.match(page, /\.rail a\.on,\.rail a:focus-visible\{/);
+  assert.match(page, /\.mobnav a\.on,\.mobnav a:focus-visible\{/);
+});
+
+test("nav: back/forward with a browser-restored scroll keeps the hash target while it is visible", () => {
+  const nav = navClient();
+  // Chromium can restore y=0 for a same-document #quota-panel entry; the panel
+  // is still on screen, so the restored hash stays highlighted.
+  nav.scrollTo(0, "#quota-panel");
+  assert.deepEqual(nav.active(nav.rail), ["#quota-panel"]);
+  assert.deepEqual(nav.active(nav.mob), ["#quota-panel"]);
+  // Restored far away from the hash target: follow the actual view instead.
+  nav.scrollTo(2200, "#changes-panel");
+  assert.deepEqual(nav.active(nav.rail), ["#diagnoses-panel"], "restored past the target: the view decides");
+  nav.scrollTo(0);
+  assert.deepEqual(nav.active(nav.rail), ["#signal"], "pinned target off screen does not stay lit");
+});
+
+test("nav: user scroll input releases the hash pin and the view decides", () => {
+  const nav = navClient();
+  nav.scrollTo(0, "#quota-panel");
+  assert.deepEqual(nav.active(nav.rail), ["#quota-panel"]);
+  for (const type of ["wheel", "touchstart", "keydown", "mousedown"]) {
+    nav.scrollTo(0, "#quota-panel");
+    nav.scrollTo(nav.tops["quota-panel"]);
+    nav.input(type);
+    nav.scrollTo(0);
+    assert.deepEqual(nav.active(nav.rail), ["#signal"], type + " releases the pin");
+    nav.scrollTo(1, "");
+  }
+});
+
+test("nav: a target scrolled past yields to the next target on screen, not a stale one", () => {
+  const nav = navClient();
+  // quota-panel spans 400..700; changes-panel starts at 1400 with non-nav panels between.
+  nav.scrollTo(1100);
+  assert.deepEqual(nav.active(nav.rail), ["#changes-panel"], "changes is on screen, quota is not");
+  assert.deepEqual(nav.active(nav.mob), ["#changes-panel"]);
+});
