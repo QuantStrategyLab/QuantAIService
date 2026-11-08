@@ -114,10 +114,16 @@ function renderToast(){
   var visible=!!(toastModel&&toastModel.visible);
   node.hidden=!visible;
   if(!textNode)return;
-  textNode.textContent="";
-  if(!visible)return;
-  if(toastModel.kind==="session"){var link=el("a","",t.toast_session);link.href=LOGIN_PATH;link.style.textDecoration="underline";textNode.appendChild(link);}
-  else textNode.textContent=t.toast_error;
+  if(!visible){if(textNode.textContent)textNode.textContent="";return;}
+  if(toastModel.kind==="session"){
+    var link=textNode.firstChild;
+    if(!link||String(link.tagName).toUpperCase()!=="A"){
+      textNode.textContent="";
+      link=el("a","",t.toast_session);link.href=LOGIN_PATH;link.style.textDecoration="underline";textNode.appendChild(link);
+    } else if(link.textContent!==t.toast_session){
+      link.textContent=t.toast_session;
+    }
+  } else textNode.textContent=t.toast_error;
 }
 function announceToast(on){var live=qs("toast-live");if(live)live.textContent=on?toastMessage():"";}
 function updateToast(){
@@ -625,6 +631,11 @@ function initNav(){
   window.addEventListener("hashchange",function(){navPin=navId(location.hash);syncNav();scheduleNav();});
   window.addEventListener("load",scheduleNav);
   ["wheel","touchstart","mousedown","keydown"].forEach(function(type){window.addEventListener(type,releaseNavPin,{passive:true});});
+  // mousedown releases the pin before activation; re-pin explicitly so a click
+  // on the current fragment (no hashchange) still selects its target.
+  document.querySelectorAll(".rail a[href^='#'],.mobnav a[href^='#']").forEach(function(link){
+    link.addEventListener("click",function(){var target=navId(link.getAttribute("href"));if(target){navPin=target;syncNav();scheduleNav();}});
+  });
   syncNav();
 }
 

@@ -1786,3 +1786,33 @@ test("nav: a target scrolled past yields to the next target on screen, not a sta
   assert.deepEqual(nav.active(nav.rail), ["#changes-panel"], "changes is on screen, quota is not");
   assert.deepEqual(nav.active(nav.mob), ["#changes-panel"]);
 });
+
+test("nav: activating the current fragment re-pins its target", () => {
+  const nav = navClient();
+  // Bottom of the page: Diagnoses is visible but below the selection line, and
+  // Account is the last visible target, so only the pin can keep Diagnoses lit.
+  nav.tops["diagnoses-panel"] = 2950;
+  nav.tops["account-panel"] = 3200;
+  nav.scrollTo(99999, "#diagnoses-panel");
+  assert.deepEqual(nav.active(nav.rail), ["#diagnoses-panel"]);
+  nav.input("mousedown");
+  assert.deepEqual(nav.active(nav.rail), ["#account-panel"], "pointer press releases the pin");
+  nav.rail.find((link) => link.getAttribute("href") === "#diagnoses-panel").dispatch("click");
+  assert.deepEqual(nav.active(nav.rail), ["#diagnoses-panel"], "same-fragment activation pins the clicked target");
+  for (const fn of nav.listeners.scroll || []) fn({});
+  assert.deepEqual(nav.active(nav.rail), ["#diagnoses-panel"], "a later scroll event keeps the new pin");
+});
+
+test("401: refresh keeps the focused re-login link in place", async () => {
+  const { client, ids } = toastClient({ lang: "en", fetchImpl: SESSION_401 });
+  await client.loadAll();
+  const link = ids["toast-text"].children[0];
+  link.focus();
+  assert.equal(client.document.activeElement, link);
+  await client.loadAll();
+  assert.equal(ids["toast-text"].children[0], link, "the same anchor survives the refresh");
+  assert.equal(client.document.activeElement, link, "focus stays on the login action");
+  client.lang = "zh-CN"; client.applyI18n();
+  assert.equal(ids["toast-text"].children[0], link, "locale changes update the anchor in place");
+  assert.equal(link.textContent, LOCALES["zh-CN"].toast_session);
+});
