@@ -8,11 +8,12 @@ import textwrap
 import unittest
 
 WORKFLOW = Path(__file__).resolve().parents[1] / ".github/workflows/publish-ai-gateway-dash.yml"
-# Mainline squash of QAS #479 (accepted FE tip 74c00fb… has identical
-# cloudflare/ai-gateway-dash blobs). Publish admits only this default-branch SHA.
-PINNED_SOURCE_SHA = "efd32a48b0903fae49311cf2aeaedc4531a727b5"
+# Reviewed default-branch SHA: dashboard toast plus proxy origin-failure
+# handling. Publish admits only this SHA.
+PINNED_SOURCE_SHA = "f41a302791d24e228d67e4f77d1407bd3d850297"
 STALE_SOURCE_SHA = "7eb49dd9b237345511c74f5693b94539775f5976"
-PRE_SQUASH_FE_TIP = "74c00fbabcb22203144f09c39f0915b63b124314"
+# Synthetic 40-hex value. It is not a repository object.
+NON_PINNED_FIXTURE_SHA = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
 
 
 def step_script(name):
@@ -107,13 +108,13 @@ class GatewayPublishWorkflowTests(unittest.TestCase):
         self.assertEqual(pins, [PINNED_SOURCE_SHA])
         self.assertEqual(text.count(PINNED_SOURCE_SHA), 2)
         self.assertNotIn(STALE_SOURCE_SHA, text)
-        self.assertNotIn(PRE_SQUASH_FE_TIP, text)
+        self.assertNotIn(NON_PINNED_FIXTURE_SHA, text)
         self.assertIn('[[ "$SOURCE_SHA" == "$REVIEWED_SOURCE_SHA" ]]', text)
         self.assertIn("permissions:\n  contents: read\n", text)
         self.assertEqual(text.count("environment: production"), 1)
 
     def test_validate_rejects_stale_historical_source_against_current_pin(self):
-        for stale in (STALE_SOURCE_SHA, PRE_SQUASH_FE_TIP):
+        for stale in (STALE_SOURCE_SHA, NON_PINNED_FIXTURE_SHA):
             with self.subTest(stale=stale):
                 result = self.run_step(
                     "Validate request",
@@ -132,7 +133,7 @@ class GatewayPublishWorkflowTests(unittest.TestCase):
         )
 
     def test_publish_rejects_stale_source_even_with_credentials(self):
-        for stale in (STALE_SOURCE_SHA, PRE_SQUASH_FE_TIP):
+        for stale in (STALE_SOURCE_SHA, NON_PINNED_FIXTURE_SHA):
             with self.subTest(stale=stale):
                 result = self.run_step(
                     "Publish reviewed dashboard",
