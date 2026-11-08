@@ -8,6 +8,12 @@ import textwrap
 import unittest
 
 WORKFLOW = Path(__file__).resolve().parents[1] / ".github/workflows/publish-ai-gateway-dash.yml"
+# Reviewed default-branch SHA: dashboard toast plus proxy origin-failure
+# handling. Publish admits only this SHA.
+PINNED_SOURCE_SHA = "f41a302791d24e228d67e4f77d1407bd3d850297"
+STALE_SOURCE_SHA = "7eb49dd9b237345511c74f5693b94539775f5976"
+# Synthetic 40-hex value. It is not a repository object.
+NON_PINNED_FIXTURE_SHA = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
 
 
 def step_script(name):
@@ -93,6 +99,50 @@ class GatewayPublishWorkflowTests(unittest.TestCase):
         self.assertIn("    if: ${{ !inputs.dry_run }}", text)
         self.assertEqual(text.count("secrets.CLOUDFLARE_API_TOKEN"), 1)
         self.assertNotIn("continue-on-error", text)
+
+    def test_reviewed_source_pin_matches_fe_candidate_exactly(self):
+        text = WORKFLOW.read_text()
+        defaults = re.findall(r"(?m)^\s+default:\s+([0-9a-f]{40})\s*$", text)
+        pins = re.findall(r"(?m)^  REVIEWED_SOURCE_SHA:\s+([0-9a-f]{40})\s*$", text)
+        self.assertEqual(defaults, [PINNED_SOURCE_SHA])
+        self.assertEqual(pins, [PINNED_SOURCE_SHA])
+        self.assertEqual(text.count(PINNED_SOURCE_SHA), 2)
+        self.assertNotIn(STALE_SOURCE_SHA, text)
+        self.assertNotIn(NON_PINNED_FIXTURE_SHA, text)
+        self.assertIn('[[ "$SOURCE_SHA" == "$REVIEWED_SOURCE_SHA" ]]', text)
+        self.assertIn("permissions:\n  contents: read\n", text)
+        self.assertEqual(text.count("environment: production"), 1)
+
+    def test_validate_rejects_stale_historical_source_against_current_pin(self):
+        for stale in (STALE_SOURCE_SHA, NON_PINNED_FIXTURE_SHA):
+            with self.subTest(stale=stale):
+                result = self.run_step(
+                    "Validate request",
+                    SOURCE_SHA=stale,
+                    REVIEWED_SOURCE_SHA=PINNED_SOURCE_SHA,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(self.calls.exists())
+        self.assertEqual(
+            self.run_step(
+                "Validate request",
+                SOURCE_SHA=PINNED_SOURCE_SHA,
+                REVIEWED_SOURCE_SHA=PINNED_SOURCE_SHA,
+            ).returncode,
+            0,
+        )
+
+    def test_publish_rejects_stale_source_even_with_credentials(self):
+        for stale in (STALE_SOURCE_SHA, NON_PINNED_FIXTURE_SHA):
+            with self.subTest(stale=stale):
+                result = self.run_step(
+                    "Publish reviewed dashboard",
+                    SOURCE_SHA=stale,
+                    REVIEWED_SOURCE_SHA=PINNED_SOURCE_SHA,
+                    CHECKED_SHA=stale,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(self.calls.exists())
 
 
 if __name__ == "__main__":
