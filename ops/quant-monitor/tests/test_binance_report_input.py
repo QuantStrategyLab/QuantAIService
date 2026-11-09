@@ -85,6 +85,66 @@ def test_pagination_and_idempotency():
         prepare(pages, bodies, [conflicting])
 
 
+def test_verified_archive_generation_is_reused_after_legacy_provenance_upgrade():
+    item = {"name": "protected/profile/one.json", "generation": "1"}
+    pages = {None: ([item], None)}
+    body = json.dumps(report()).encode()
+    legacy = prepare(pages, {(item["name"], "1"): body})
+    reads = []
+
+    def read(name, generation):
+        reads.append((name, generation))
+        return body
+
+    def run(existing, updates):
+        return prepare_archive_records(
+            pages.__getitem__, read, prefix="protected/profile/", stream_id="synthetic",
+            account_scope_sha256="a" * 64, existing_records=existing,
+            archive_uri="gs://safe-bucket/protected/profile/", provenance_updates=updates,
+        )
+
+    upgraded = []
+    assert run(legacy, upgraded) == []
+    assert reads == [(item["name"], "1")]
+    assert len(upgraded) == 1
+    assert upgraded[0]["execution_result"] == legacy[0]["execution_result"]
+    assert run(upgraded, []) == []
+    assert reads == [(item["name"], "1")]
+
+
+@pytest.mark.parametrize("change", ["generation", "bucket", "local_record"])
+def test_verified_archive_rechecks_changed_sources_and_local_records(change):
+    name = "protected/profile/one.json"
+    item = {"name": name, "generation": "1"}
+    archive_uri = "gs://safe-bucket/protected/profile/"
+    reads = []
+    value = report()
+
+    def read(name, generation):
+        reads.append((name, generation))
+        return json.dumps(value).encode()
+
+    def run(existing):
+        return prepare_archive_records(
+            lambda token: ([item], None), read, prefix="protected/profile/", stream_id="synthetic",
+            account_scope_sha256="a" * 64, existing_records=existing, archive_uri=archive_uri,
+        )
+
+    records = run([])
+    if change == "generation":
+        item["generation"] = "2"
+        value["status"] = "error"
+    elif change == "bucket":
+        archive_uri = "gs://other-bucket/protected/profile/"
+        value["status"] = "error"
+    else:
+        records[0]["execution_result"]["status"] = "error"
+
+    with pytest.raises(BinanceLiveRunsError, match="existing_record_conflict"):
+        run(records)
+    assert reads == [(name, "1"), (name, item["generation"])]
+
+
 def test_pagination_failure_and_wrong_source_fail_closed():
     with pytest.raises(BinanceLiveRunsError, match="archive_pagination_invalid"):
         prepare({None: ([], "next"), "next": ([], "next")}, {})
@@ -181,6 +241,44 @@ def test_unrelated_profiles_and_paper_runs_do_not_block_bound_source():
     bodies = {(item['name'], item['generation']): json.dumps(value).encode()
               for item, value in zip(items, (good, other, paper))}
     assert len(prepare({None: (items, None)}, bodies)) == 1
+
+
+@pytest.mark.parametrize("failure", ["download", "malformed", "pagination"])
+def test_skip_cache_changes_only_after_complete_scan(failure):
+    items = [{"name": f"protected/profile/{i}.json", "generation": str(i)} for i in range(1, 3)]
+    cache = {"f" * 64: "8"}
+    reads = []
+    wrong_scope = report()
+    wrong_scope["external_cash_flow_interval"]["account_scope_sha256"] = "c" * 64
+
+    def read(name, generation):
+        reads.append((name, generation))
+        if generation == "2":
+            if failure == "download":
+                raise PermissionError("synthetic denial")
+            if failure == "malformed":
+                return b"{"
+        return json.dumps(wrong_scope).encode()
+
+    def scan(list_page):
+        return prepare_archive_records(
+            list_page, read, prefix="protected/profile/", stream_id="synthetic",
+            account_scope_sha256="a" * 64, existing_records=[], skip_cache=cache,
+        )
+
+    reason = {"download": "archive_read_failed", "malformed": "archive_report_invalid",
+              "pagination": "archive_pagination_invalid"}[failure]
+    with pytest.raises(BinanceLiveRunsError, match=reason):
+        scan(lambda _token: (items, "repeat" if failure == "pagination" else None))
+    assert cache == {"f" * 64: "8"}
+
+    reads.clear()
+    assert scan(lambda _token: ([items[0]], None)) == []
+    assert len(cache) == 1 and list(cache.values()) == ["1"]
+    assert scan(lambda _token: ([items[0]], None)) == []
+    assert reads == [(items[0]["name"], "1")]
+    assert scan(lambda _token: ([], None)) == []
+    assert cache == {}
 
 
 def test_equal_payload_different_source_metadata_preserves_existing():

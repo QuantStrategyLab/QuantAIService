@@ -181,6 +181,56 @@ class CloudJobTests(unittest.TestCase):
                 self.assertNotIn('MONITOR_INPUT_READER_CONFIG_JSON', os.environ)
         input_store.read.assert_not_called()
 
+    def test_normal_job_entry_selects_azure_and_uses_platform_execution_identity(self):
+        env = {
+            'MONITOR_MODE': 'run',
+            'MONITOR_INPUT_AZURE_URL': 'https://synthetic.blob.core.windows.net/input-state',
+            'MONITOR_CORE_AZURE_URL': 'https://synthetic.blob.core.windows.net/core-state',
+            'MONITOR_AZURE_BLOB_TOKEN': 'synthetic',
+            'CONTAINER_APP_JOB_EXECUTION_NAME': 'azure-execution',
+            'TELEGRAM_TOKEN': 'synthetic',
+            'GLOBAL_TELEGRAM_CHAT_ID': 'synthetic',
+        }
+        gcs = Mock()
+        google = {'google.cloud': types.SimpleNamespace(storage=types.SimpleNamespace(Client=gcs))}
+        with patch.dict(os.environ, env, clear=True), patch.dict(sys.modules, google), patch.object(
+                job, 'run_once', return_value={'status': 'evaluated', 'healthy': True,
+                                               'website_publication': 'accepted'}) as cycle, patch.object(
+                job, 'refresh_cycle_inputs') as refresh:
+            self.assertEqual(job.main(), 0)
+            core = cycle.call_args.args[0]
+            options = cycle.call_args.kwargs
+            self.assertEqual(core.url, env['MONITOR_CORE_AZURE_URL'])
+            self.assertEqual(options['execution_id'], 'azure-execution')
+            self.assertTrue(options['resume_committed'])
+            options['refresh'](Path(self.directory.name))
+            self.assertEqual(refresh.call_args.args[0].url, env['MONITOR_INPUT_AZURE_URL'])
+            self.assertEqual(refresh.call_args.kwargs['source_kind'], 'azure_job')
+            gcs.assert_not_called()
+
+    def test_azure_retry_reuses_the_atomic_completed_commit_without_side_effects(self):
+        evaluate = Mock(return_value={'healthy': True, 'snapshot_count': 3, 'data_status': 'partial'})
+        refresh = Mock()
+        publish = Mock()
+        website = Mock(return_value='accepted')
+        options = dict(mode='run', execution_id='same-azure-execution', refresh=refresh,
+                       publish=publish, website_publish=website, resume_committed=True)
+        initial = job.run_once(self.store, evaluate, **options)
+        generation = self.store.generation
+        resumed = job.run_once(self.store, evaluate, **options)
+        self.assertEqual(resumed, {**initial, 'resumed_committed': True})
+        self.assertEqual(self.store.generation, generation)
+        for callback in (evaluate, refresh, publish, website):
+            callback.assert_called_once()
+
+    def test_azure_retry_keeps_an_uncertain_cycle_blocked(self):
+        evaluate = Mock(side_effect=RuntimeError('synthetic uncertainty'))
+        opts = dict(mode='run', execution_id='azure-execution', resume_committed=True)
+        with self.assertRaisesRegex(RuntimeError, 'synthetic uncertainty'):
+            job.run_once(self.store, evaluate, **opts)
+        self.assertEqual(job.run_once(self.store, evaluate, **opts)['status'], 'blocked')
+        evaluate.assert_called_once()
+
     def test_preview_is_read_only_even_with_all_callbacks_present(self):
         refresh, publish, website_publish = Mock(), Mock(), Mock()
         before = self.store.raw

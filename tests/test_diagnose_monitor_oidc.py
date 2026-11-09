@@ -964,6 +964,40 @@ def test_configured_bucket_binds_state_and_boundary_probes(monkeypatch):
     client.bucket.assert_not_called()
 
 
+def test_azure_observation_keeps_the_independent_gcs_checkpoint(monkeypatch):
+    import monitor_azure_state
+    import monitor_diagnosis_state
+
+    url = "https://syntheticstorage.blob.core.windows.net/monitor-core"
+    env = {**cloud_environment(), "MONITOR_CORE_AZURE_URL": url,
+           "MONITOR_AZURE_BLOB_TOKEN": "synthetic-access-token"}
+    client, store = mock.Mock(), mock.Mock()
+    store.observation.side_effect = RuntimeError("synthetic stop before state mutations")
+    factory = mock.Mock(return_value=store)
+    azure = mock.Mock()
+    monkeypatch.setattr(monitor_diagnosis_state, "DiagnosisState", factory)
+    monkeypatch.setattr(monitor_azure_state, "AzureBlobState", azure)
+
+    with pytest.raises(RuntimeError, match="synthetic stop"):
+        caller.diagnose_cloud(env=env, client=client, verify_state_only=True)
+
+    azure.assert_called_once_with(url, "synthetic-access-token", state_name="diagnosis-observation.json")
+    bucket = caller.configured_bucket(env)
+    factory.assert_called_once_with(
+        client, checkpoint_uri=f"gs://{bucket}/{caller.CLOUD_LEDGER_PREFIX}/checkpoints.json",
+        observation_uri=f"gs://{bucket}/{caller.CLOUD_OBSERVATION}", observation_store=azure.return_value)
+    client.bucket.assert_not_called()
+
+
+def test_azure_observation_requires_its_token_without_gcs_fallback():
+    env = {**cloud_environment(),
+           "MONITOR_CORE_AZURE_URL": "https://syntheticstorage.blob.core.windows.net/monitor-core"}
+    client = mock.Mock()
+    with pytest.raises(caller.Rejected, match="^diagnosis_azure_observation_token_unavailable$"):
+        caller.diagnose_cloud(env=env, client=client, verify_state_only=True)
+    client.bucket.assert_not_called()
+
+
 def test_configured_bucket_is_not_retained_between_invocations():
     assert caller.configured_bucket({"QUANT_MONITOR_GCS_BUCKET": "synthetic-first-bucket"}) == "synthetic-first-bucket"
     assert caller.configured_bucket({"QUANT_MONITOR_GCS_BUCKET": "synthetic-next-bucket"}) == "synthetic-next-bucket"

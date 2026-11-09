@@ -14,12 +14,14 @@ import subprocess
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Callable
 
-from monitor_cloud_state import DATA, DATA_PROJECTS, MAX_EXPANDED, SCHEMA, StateUnavailable, allowed, pack, restore
+from monitor_cloud_state import DATA, DATA_PROJECTS, MAX_EXPANDED, MAX_FILES, SCHEMA, StateUnavailable, allowed, pack, restore
 
 
 def capture(monitor: Path, projects: dict[str, Path], *, source_revision: str, qpk_revision: str,
-            diagnosis_actions: Path | None = None):
+            diagnosis_actions: Path | None = None, include_member: Callable[[str], bool] | None = None,
+            manifest: dict | None = None):
     if set(projects) != DATA_PROJECTS:
         raise ValueError('monitor_project_bindings_required')
     data_roots = {name: monitor / 'data' / name for name in DATA}
@@ -57,21 +59,25 @@ def capture(monitor: Path, projects: dict[str, Path], *, source_revision: str, q
             files += 1
             if total > MAX_EXPANDED:
                 raise StateUnavailable('input_too_large')
+            if files >= MAX_FILES:
+                raise StateUnavailable('workspace_too_large')
             before = (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
             data = actual.read_bytes()
             after = actual.stat()
             if before != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns):
                 raise StateUnavailable('input_changed_during_capture')
             observed[actual] = before
-            target = destination / relative
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(data)
+            if include_member is None or include_member(relative):
+                target = destination / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(data)
 
         for path, relative in roots:
             if path.exists():
                 walk(path, relative, set())
-        manifest = {'schema_version': SCHEMA, 'source_revision': source_revision, 'qpk_revision': qpk_revision,
-                    'captured_at': datetime.now(timezone.utc).isoformat(), 'source_kind': 'self_hosted'}
+        if manifest is None:
+            manifest = {'schema_version': SCHEMA, 'source_revision': source_revision, 'qpk_revision': qpk_revision,
+                        'captured_at': datetime.now(timezone.utc).isoformat(), 'source_kind': 'self_hosted'}
         (destination / 'manifest.json').write_text(json.dumps(manifest))
         for path, before in observed.items():
             info = path.stat()

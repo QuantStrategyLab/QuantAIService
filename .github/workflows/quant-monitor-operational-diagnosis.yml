@@ -24,6 +24,7 @@ jobs:
     timeout-minutes: 15
     env:
       QUANT_MONITOR_GCS_BUCKET: ${{ secrets.QUANT_MONITOR_GCS_BUCKET }}
+      MONITOR_CORE_AZURE_URL: ${{ vars.QUANT_MONITOR_CORE_AZURE_URL }}
     permissions:
       contents: read
       id-token: write
@@ -57,6 +58,15 @@ jobs:
           workload_identity_provider: ${{ vars.QUANT_MONITOR_GCP_WIF_PROVIDER }}
           create_credentials_file: true
           export_environment_variables: true
+      - name: Authenticate the Azure observation reader
+        if: env.MONITOR_CORE_AZURE_URL != ''
+        uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6 # v2
+        with:
+          tenant-id: ${{ vars.QUANT_MONITOR_AZURE_TENANT_ID }}
+          client-id: ${{ vars.QUANT_MONITOR_AZURE_DIAGNOSIS_CLIENT_ID }}
+          allow-no-subscriptions: true
+        env:
+          AZURE_CORE_OUTPUT: none
       - name: Diagnose saved observation with native OIDC
         env:
           AI_SERVICE_DIAGNOSIS_READY: ${{ vars.AI_SERVICE_DIAGNOSIS_READY || 'false' }}
@@ -71,6 +81,10 @@ jobs:
           VERIFY_STATE_ONLY: ${{ github.event_name == 'workflow_dispatch' && inputs.verify_state_only }}
         run: |
           set -euo pipefail
+          if [[ -n "$MONITOR_CORE_AZURE_URL" ]]; then
+            MONITOR_AZURE_BLOB_TOKEN="$(az account get-access-token --resource https://storage.azure.com/ --query accessToken -o tsv)"
+            export MONITOR_AZURE_BLOB_TOKEN
+          fi
           args=()
           if [ "$VERIFY_STATE_ONLY" = true ]; then
             args+=(--verify-state-only)

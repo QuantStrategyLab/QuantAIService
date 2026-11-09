@@ -120,7 +120,7 @@ def observation_from_workspace(monitor: Path, *, now: datetime | None = None) ->
 class DiagnosisState:
     """Only the observation object and this consumer's independent JSON ledger."""
 
-    def __init__(self, client, *, checkpoint_uri: str, observation_uri: str):
+    def __init__(self, client, *, checkpoint_uri: str, observation_uri: str, observation_store=None):
         prefix, name = checkpoint_uri.rsplit('/', 1)
         if name != 'checkpoints.json':
             raise ValueError('diagnosis_checkpoint_uri_invalid')
@@ -128,7 +128,8 @@ class DiagnosisState:
         prefix, name = observation_uri.rsplit('/', 1)
         if name != 'diagnosis-observation.json':
             raise ValueError('diagnosis_observation_uri_invalid')
-        self.observations = CloudState(client, prefix, state_name=name)
+        self.observations = (CloudState(client, prefix, state_name=name)
+                             if observation_store is None else observation_store)
 
     def claim(self, execution_id: str):
         if not isinstance(execution_id, str) or not re.fullmatch(r'[A-Za-z0-9_./:-]{1,200}', execution_id):

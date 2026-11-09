@@ -17,7 +17,7 @@ from pathlib import Path
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 from urllib.parse import urlsplit
 
-from monitor_cloud_state import DATA_PROJECTS, StateUnavailable, pack, restore
+from monitor_cloud_state import DATA_PROJECTS, StateUnavailable, restore, validate_manifest
 
 
 _READER_REPOSITORIES = ('CnEquityStrategies', 'HkEquityStrategies', 'UsEquityStrategies',
@@ -112,22 +112,15 @@ def input_archive(root, *, refreshed=False, source_kind='github_actions'):
     from export_local_monitor_state import capture
 
     manifest = json.loads((root / 'manifest.json').read_text())
+    validate_manifest(manifest)
+    if refreshed:
+        if source_kind not in {'github_actions', 'cloud_run', 'azure_job'}:
+            raise ValueError('monitor_input_source_invalid')
+        manifest.update(captured_at=datetime.now(timezone.utc).isoformat(), source_kind=source_kind)
     raw, _ = capture(root / 'monitor', {p: root / 'projects' / p / 'data' for p in DATA_PROJECTS},
-                     source_revision=manifest['source_revision'], qpk_revision=manifest['qpk_revision'])
-    with tempfile.TemporaryDirectory(prefix='monitor-input-filter-') as directory:
-        target = Path(directory)
-        restore(raw, target)
-        for path in sorted(target.rglob('*'), reverse=True):
-            if path.is_file() and not input_member(path.relative_to(target).as_posix()):
-                path.unlink()
-            elif path.is_dir() and not any(path.iterdir()):
-                path.rmdir()
-        if refreshed:
-            if source_kind not in {'github_actions', 'cloud_run'}:
-                raise ValueError('monitor_input_source_invalid')
-            manifest.update(captured_at=datetime.now(timezone.utc).isoformat(), source_kind=source_kind)
-        (target / 'manifest.json').write_text(json.dumps(manifest))
-        return pack(target)
+                     source_revision=manifest['source_revision'], qpk_revision=manifest['qpk_revision'],
+                     include_member=input_member, manifest=manifest)
+    return raw
 
 
 def apply_inputs(root, raw, *, now=None):
@@ -160,11 +153,33 @@ def apply_inputs(root, raw, *, now=None):
         (root / 'manifest.json').write_text(json.dumps(current))
 
 
+def _read_archive_skips(path, binding, max_entries):
+    # Cache failures fall back to generation-checked reads.
+    byte_limit = 1024 * 1024
+    try:
+        with path.open('rb') as stream:
+            raw = stream.read(byte_limit + 1)
+        if len(raw) > byte_limit:
+            return None
+        cached = json.loads(raw)
+    except (OSError, ValueError, RecursionError):
+        return None
+    if not isinstance(cached, dict) or any(cached.get(key) != value for key, value in binding.items()):
+        return None
+    entries = cached.get('entries')
+    if not isinstance(entries, dict) or len(entries) > max_entries:
+        return None
+    if not all(re.fullmatch(r'[0-9a-f]{64}', key) and isinstance(generation, str)
+               and re.fullmatch(r'[0-9]{1,20}', generation) for key, generation in entries.items()):
+        return None
+    return entries
+
+
 def refresh_binance_report_archive(root, *, client, uri, stream_id, account_scope_sha256, write=True, inspect=None):
     """Read the bound archive into the claimed temporary local input store."""
-    from binance_report_input import prepare_archive_records, valid_stream_id
+    from binance_report_input import ARCHIVE_SKIP_CACHE_SCHEMA, MAX_ARCHIVE_SKIPS, prepare_archive_records, valid_stream_id
     from quant_platform_kit.strategy_lifecycle.performance_store import PerformanceStore
-    from sync_binance_live_runs import BinanceLiveRunsError, DOMAIN, STRATEGY_PROFILE
+    from sync_binance_live_runs import BinanceLiveRunsError, DOMAIN, STRATEGY_PROFILE, _write_json
 
     parsed = urlsplit(uri)
     if (parsed.scheme != 'gs' or not parsed.netloc or not parsed.path.strip('/')
@@ -201,16 +216,30 @@ def refresh_binance_report_archive(root, *, client, uri, stream_id, account_scop
             if_generation_match=int(generation), timeout=60, retry=None,
         )
 
-    additions = prepare_archive_records(list_page, read_object, prefix=prefix, stream_id=stream_id,
-                                       account_scope_sha256=account_scope_sha256, existing_records=existing)
+    provenance_updates = []
+    archive_uri = f'gs://{parsed.netloc}/{prefix}'
+    cache_path = root / 'monitor/data/lifecycle-artifacts/binance-archive-skips.json'
+    binding = {'schema_version': ARCHIVE_SKIP_CACHE_SCHEMA, 'archive_uri': archive_uri,
+               'stream_id': stream_id, 'account_scope_sha256': account_scope_sha256}
+    prior_skips = _read_archive_skips(cache_path, binding, MAX_ARCHIVE_SKIPS) if write else None
+    skip_cache = dict(prior_skips or {}) if write else None
+    additions = prepare_archive_records(
+        list_page, read_object, prefix=prefix, stream_id=stream_id,
+        account_scope_sha256=account_scope_sha256, existing_records=existing,
+        archive_uri=archive_uri if write else '',
+        provenance_updates=provenance_updates if write else None,
+        skip_cache=skip_cache,
+    )
     if inspect is not None:
         if write:
             raise ValueError('inspection_requires_read_only')
         inspect(additions)
     if write:
         store = PerformanceStore(local_root=local_root)
-        for record in additions:
+        for record in [*additions, *provenance_updates]:
             store.save_live_run_record(STRATEGY_PROFILE, DOMAIN, record, stream_id=stream_id)
+        if skip_cache != prior_skips and (skip_cache or cache_path.exists()):
+            _write_json(cache_path, {**binding, 'entries': skip_cache})
     return len(additions)
 
 
@@ -338,7 +367,7 @@ def run_adapter(store, *, verify_only=False, execution_id=None, source_kind='git
         return {'status': 'verified', 'writes': 0, 'audit_requests': 0}
     if execution_id is None:
         execution_id = os.environ['GITHUB_RUN_ID'] + ':' + os.environ['GITHUB_RUN_ATTEMPT']
-    if not execution_id or source_kind not in {'github_actions', 'cloud_run'}:
+    if not execution_id or source_kind not in {'github_actions', 'cloud_run', 'azure_job'}:
         raise ValueError('monitor_input_execution_identity_invalid')
     claim = store.claim({'schema_version': 'quant.monitor-input-claim.v1',
                          'execution_id': execution_id})
@@ -417,7 +446,7 @@ def _archive_return_segment(records):
 
 def main():
     from google.cloud import storage
-    from monitor_cloud_state import CloudState
+    from monitor_azure_state import open_monitor_state
 
     if os.environ.get('VERIFY_BINANCE_REPORT_ARCHIVE_ONLY') == 'true':
         from sync_binance_live_runs import BinanceLiveRunsError
@@ -441,7 +470,7 @@ def main():
             print(json.dumps({'status': 'unavailable', 'reason': 'archive_verification_failed'}))
             return 1
     try:
-        result = run_adapter(CloudState(storage.Client(), os.environ['MONITOR_INPUT_GCS_URI']),
+        result = run_adapter(open_monitor_state('MONITOR_INPUT_AZURE_URL', 'MONITOR_INPUT_GCS_URI'),
                              verify_only=os.environ.get('VERIFY_STATE_ONLY') == 'true')
         print(json.dumps(result))
         return 0

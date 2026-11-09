@@ -45,7 +45,9 @@ class InputBoundaryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as other:
             root, target = Path(directory), Path(other)
             fixture(root)
-            raw = inputs.input_archive(root)
+            with patch.object(state.tarfile, 'open', wraps=state.tarfile.open) as open_archive:
+                raw = inputs.input_archive(root)
+            self.assertEqual([call.kwargs['mode'] for call in open_archive.call_args_list], ['w:gz'])
             state.restore(raw, target)
             self.assertFalse((target / 'monitor/data/alert-state').exists())
             self.assertFalse((target / 'monitor/data/lifecycle-store/monitor').exists())
@@ -219,6 +221,63 @@ def test_archive_reader_paginates_reads_exact_generation_and_is_idempotent(tmp_p
     page3.next_page_token = None
     client.list_blobs.side_effect = [page3]
     assert inputs.refresh_binance_report_archive(tmp_path, **args) == 0
+    remote.download_as_bytes.assert_called_once_with(if_generation_match=19, timeout=60, retry=None)
+
+
+def test_archive_skips_survive_input_bundle_and_changed_generation_is_read(tmp_path):
+    from test_binance_report_input import report
+
+    root, restored = tmp_path / 'initial', tmp_path / 'restored'
+    root.mkdir()
+    restored.mkdir()
+    fixture(root)
+    blob = Mock()
+    blob.name, blob.generation = 'reports/one.json', 19
+    client = Mock()
+    client.list_blobs.side_effect = lambda *_args, **_kwargs: Mock(pages=iter([[blob]]), next_page_token=None)
+    download = client.bucket.return_value.blob.return_value.download_as_bytes
+    download.return_value = json.dumps(dict(report(), dry_run=True)).encode()
+    args = dict(client=client, uri='gs://safe-bucket/reports', stream_id='synthetic', account_scope_sha256='a' * 64)
+
+    assert inputs.refresh_binance_report_archive(root, **args) == 0
+    state.restore(inputs.input_archive(root), restored)
+    assert inputs.refresh_binance_report_archive(restored, **args) == 0
+    assert download.call_count == 1
+
+    blob.generation = 20
+    download.return_value = json.dumps(report()).encode()
+    assert inputs.refresh_binance_report_archive(restored, **args) == 1
+    assert download.call_count == 2
+    assert download.call_args.kwargs['if_generation_match'] == 20
+
+
+def test_archive_skips_are_not_reused_for_another_binding_or_readonly_inspection(tmp_path):
+    from test_binance_report_input import report
+
+    blob = Mock()
+    blob.name, blob.generation = 'reports/one.json', 19
+    client = Mock()
+    client.list_blobs.side_effect = lambda *_args, **_kwargs: Mock(pages=iter([[blob]]), next_page_token=None)
+    download = client.bucket.return_value.blob.return_value.download_as_bytes
+    download.return_value = json.dumps(dict(report(), dry_run=True)).encode()
+    args = dict(client=client, uri='gs://safe-bucket/reports', stream_id='synthetic', account_scope_sha256='a' * 64)
+    inputs.refresh_binance_report_archive(tmp_path, **args)
+    for field, changed in (('uri', 'gs://other-bucket/reports'),
+                           ('stream_id', 'another-stream'), ('account_scope_sha256', 'c' * 64)):
+        inputs.refresh_binance_report_archive(tmp_path, **(args | {field: changed}))
+        inputs.refresh_binance_report_archive(tmp_path, **args)
+    assert download.call_count == 7
+    inputs.refresh_binance_report_archive(tmp_path, write=False, **args)
+    assert download.call_count == 8
+    inputs.refresh_binance_report_archive(tmp_path, **args)
+    assert download.call_count == 8
+
+    cache_path = tmp_path / 'monitor/data/lifecycle-artifacts/binance-archive-skips.json'
+    cache_path.write_text('{')
+    inputs.refresh_binance_report_archive(tmp_path, **args)
+    assert download.call_count == 9
+    inputs.refresh_binance_report_archive(tmp_path, **args)
+    assert download.call_count == 9
 
 
 def test_archive_corrupt_existing_snapshot_never_becomes_empty(tmp_path):

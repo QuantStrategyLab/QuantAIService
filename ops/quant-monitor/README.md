@@ -264,6 +264,23 @@ intended hourly producer; stale or future windows make only the live profile's
 performance and drift unavailable. This freshness check does not replace the
 ten valid daily returns requirement.
 
+### Azure monitor state
+
+For an Azure deployment, set `MONITOR_INPUT_AZURE_URL` and
+`MONITOR_CORE_AZURE_URL` on the job to authenticated-only Blob containers.
+The job uses its managed identity for Blob access. The GitHub input workflow
+uses `QUANT_MONITOR_AZURE_TENANT_ID` and `QUANT_MONITOR_AZURE_INPUT_CLIENT_ID`
+for its OIDC identity. Grant it write access to the input container and read
+access to `strategy-findings.json` only when Issue delivery is enabled.
+
+The operational diagnosis workflow uses its own OIDC identity in
+`QUANT_MONITOR_AZURE_DIAGNOSIS_CLIENT_ID`. When
+`QUANT_MONITOR_CORE_AZURE_URL` is configured, grant this identity read access
+to `diagnosis-observation.json` only, and verify that listing, core archive
+reads and writes are denied. The diagnosis checkpoint ledger stays in GCS.
+With the Azure URL variables unset, both workflows use their existing GCS
+bindings. Change the bindings while the state writers are paused.
+
 ### GCS runtime digest input
 
 Disabled by default, and it does not change the 22:30 UTC briefing timer. When

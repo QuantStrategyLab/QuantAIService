@@ -42,6 +42,13 @@ def allowed(name: str) -> bool:
             or (len(parts) >= 4 and parts[0] == 'projects' and parts[1] in DATA_PROJECTS and parts[2] == 'data'))
 
 
+def validate_manifest(manifest) -> None:
+    if (not isinstance(manifest, dict) or manifest.get('schema_version') != SCHEMA
+            or not re.fullmatch(r'[0-9a-f]{40}', str(manifest.get('source_revision', '')))
+            or not re.fullmatch(r'[0-9a-f]{40}', str(manifest.get('qpk_revision', '')))):
+        raise StateUnavailable('workspace_manifest_invalid')
+
+
 def restore(raw: bytes, root: Path) -> dict:
     """Validate the entire archive before writing any member; never extract links."""
     if len(raw) > MAX_ARCHIVE or any(root.iterdir()):
@@ -64,10 +71,7 @@ def restore(raw: bytes, root: Path) -> dict:
                     raise StateUnavailable('workspace_invalid')
                 members[entry.name] = data
         manifest = json.loads(members['manifest.json'])
-        if (not isinstance(manifest, dict) or manifest.get('schema_version') != SCHEMA
-                or not re.fullmatch(r'[0-9a-f]{40}', str(manifest.get('source_revision', '')))
-                or not re.fullmatch(r'[0-9a-f]{40}', str(manifest.get('qpk_revision', '')))):
-            raise StateUnavailable('workspace_manifest_invalid')
+        validate_manifest(manifest)
     except (KeyError, OSError, ValueError, tarfile.TarError) as exc:
         raise StateUnavailable('workspace_invalid') from exc
     for name, data in members.items():

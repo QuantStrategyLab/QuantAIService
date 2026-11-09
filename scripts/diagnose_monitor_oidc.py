@@ -416,9 +416,20 @@ def diagnose_cloud(*, include_healthy=False, verify_state_only=False, env=None,
     if store is None:
         from monitor_diagnosis_state import DiagnosisState
 
+        observation_options = {}
+        if azure_url := env.get("MONITOR_CORE_AZURE_URL"):
+            from monitor_azure_state import AzureBlobState, CONTAINER
+
+            if not CONTAINER.fullmatch(azure_url):
+                raise Rejected("diagnosis_azure_observation_binding_invalid")
+            token = env.get("MONITOR_AZURE_BLOB_TOKEN", "")
+            if not token or any(char.isspace() for char in token):
+                raise Rejected("diagnosis_azure_observation_token_unavailable")
+            observation_options["observation_store"] = AzureBlobState(
+                azure_url, token, state_name="diagnosis-observation.json")
         store = DiagnosisState(
             client, checkpoint_uri=f"gs://{bucket}/{CLOUD_LEDGER_PREFIX}/checkpoints.json",
-            observation_uri=f"gs://{bucket}/{CLOUD_OBSERVATION}")
+            observation_uri=f"gs://{bucket}/{CLOUD_OBSERVATION}", **observation_options)
     now = now or datetime.now(timezone.utc)
     # Qualification still validates its source first. Normal execution restores
     # pending jobs first; polling one does not depend on a fresh observation.
