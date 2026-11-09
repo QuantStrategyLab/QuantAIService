@@ -145,6 +145,17 @@ td.n,th.n{text-align:right;font-family:var(--f-mono);font-size:12px}
 .diag-button{padding:6px 10px;border:1px solid var(--line2);border-radius:var(--r);background:var(--panel2);color:var(--ink);font:500 11px/1 var(--f-mono)}
 .diagnosis-output{margin-top:10px;padding:12px;background:var(--bg);border:1px solid var(--line);white-space:pre-wrap;overflow-wrap:anywhere;font:12px/1.6 var(--f-mono);color:var(--ink2)}
 .diagnosis-output[hidden]{display:none}
+.note{margin:0 14px 12px;color:var(--ink2);font:12px/1.6 var(--f-mono)}
+/* Probe table: fixed columns so the latency never falls off the panel, and a
+   readable (non-uppercase) sentence under each verdict. */
+#probe-table td{vertical-align:top}
+#probe-table th:nth-child(1),#probe-table td:nth-child(1){width:32%}
+#probe-table th:nth-child(2),#probe-table td:nth-child(2){width:16%}
+#probe-table th:nth-child(3),#probe-table td:nth-child(3){width:34%}
+#probe-table th:nth-child(4),#probe-table td:nth-child(4){width:9%}
+#probe-table th:nth-child(5),#probe-table td:nth-child(5){width:9%}
+.probe-note{display:block;margin-top:4px;color:var(--ink3);font:400 11px/1.45 var(--f-ui);letter-spacing:0;text-transform:none;white-space:normal}
+#probe-table td.mono{overflow-wrap:anywhere}
 .details{margin:0 14px 14px;border:1px solid var(--line)}
 .details>summary{cursor:pointer;padding:10px 12px;font:500 11px/1 var(--f-mono);color:var(--ink2);letter-spacing:.06em}
 .details .body{padding:0 12px 10px}
@@ -252,5 +263,15 @@ td.n,th.n{text-align:right;font-family:var(--f-mono);font-size:12px}
   .footer{padding:14px}
   .att-row{grid-template-columns:1fr auto}
   .att-detail{grid-column:1/-1}
+  /* The five probe columns must fit 768px without horizontal scrolling: let the
+     long paths wrap, keep the two numeric columns on one line. */
+  #probe-table th,#probe-table td{padding:9px 7px}
+  #probe-table td{white-space:normal}
+  #probe-table td:nth-child(4),#probe-table td:nth-child(5){white-space:nowrap}
+  #probe-table th:nth-child(1),#probe-table td:nth-child(1){width:29%}
+  #probe-table th:nth-child(2),#probe-table td:nth-child(2){width:14%}
+  #probe-table th:nth-child(3),#probe-table td:nth-child(3){width:35%}
+  #probe-table th:nth-child(4),#probe-table td:nth-child(4){width:11%}
+  #probe-table th:nth-child(5),#probe-table td:nth-child(5){width:11%}
 }
 `;

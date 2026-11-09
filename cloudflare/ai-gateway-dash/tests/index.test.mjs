@@ -68,6 +68,7 @@ import worker, {
   codexRemainingPercent,
   codexWindowDisplay,
   requiresHumanAudit,
+  resetUpstreamStatusCache,
 } from "../src/index.mjs";
 import { LOCALES } from "../src/ui/locales.mjs";
 import {
@@ -83,6 +84,7 @@ import {
 } from "../src/ui/login.mjs";
 import { LOGIN_LOCALES } from "../src/ui/login-locales.mjs";
 import { dashboardHTML } from "../src/ui/dashboard.mjs";
+import { classifyProbe, probeUrl, readModel, LEGACY_ENDPOINT_BASE } from "../src/upstream.mjs";
 import {
   classifyLoginError,
   escapeHtml,
@@ -615,9 +617,9 @@ test("authenticated dashboard html ships codex remaining quota display", async (
   );
   const html = await dashboard.text();
   assert.equal(dashboard.status, 200);
-  assert.match(html, /function codexRemainingPercent/);
-  assert.match(html, /Codex 账户/);
-  assert.match(html, /剩余/);
+  assert.match(html, /id="probe-table"/);
+  assert.match(html, /上游状态/);
+  assert.match(html, /id="read-model"/);
 
   const tampered = await worker.fetch(
     new Request("https://dash.example/api/user", { headers: { Cookie: "dash_session=" + session + "x" } }),
@@ -1151,12 +1153,10 @@ test("step copy renders placeholders as code elements, never as markup", () => {
 
 test("login redesign leaves the dashboard output untouched", () => {
   const page = dashboardHTML();
-  assert.match(page, /var ROUTES=\{/);
-  assert.match(page, /health:"\/v1\/ai\/health"/);
-  assert.match(page, /diagnoses:"\/diagnoses"/);
-  assert.match(page, /not_configured/);
-  assert.match(page, /进程内 · 5 分钟窗口/);
-  assert.match(page, /process-local · 5-min window/);
+  assert.match(page, /var ROUTES=\{status:"\/upstream-status"\}/);
+  // Retired routes may still be named in the "not shown" copy; the client must
+  // not fetch them.
+  assert.doesNotMatch(page.split("var ROUTES=")[1].split(";")[0], /v1\/ai/);
   assert.match(page, /qg-lang/);
   assert.match(page, /qg-theme/);
   assert.doesNotMatch(page, /innerHTML\s*=/);
@@ -1238,20 +1238,16 @@ test("dynamic values are escaped for HTML and script contexts", () => {
   assert.equal(safeHttpUrl("not a url"), "");
 });
 
-test("dashboard keeps honest unknown states and the read adapter", () => {
+test("dashboard keeps honest unknown states and one read adapter", () => {
   const page = dashboardHTML();
   assert.match(page, /var ROUTES=\{/);
-  assert.match(page, /health:"\/v1\/ai\/health"/);
-  assert.match(page, /diagnoses:"\/diagnoses"/);
+  assert.match(page, /status:"\/upstream-status"/);
   assert.doesNotMatch(page, /"\/v2\//);
   assert.doesNotMatch(page, /MOCK/);
-  assert.match(page, /not_configured/);
-  assert.match(page, /未配置/);
-  assert.match(page, /bar na/);
+  // Unknown is rendered as unknown, never as zero or a fabricated value.
+  assert.match(page, /t\.s_state_unknown/);
   assert.match(page, /panel-error/);
-  assert.match(page, /进程内 · 5 分钟窗口/);
-  assert.match(page, /process-local · 5-min window/);
-  assert.match(page, /t\.k_bal_f/);
+  assert.match(page, /t\.v_unknown_status/);
   assert.doesNotMatch(page, /innerHTML\s*=/);
   assert.match(page, /textContent/);
   assert.match(page, /qg-lang/);
@@ -1259,14 +1255,39 @@ test("dashboard keeps honest unknown states and the read adapter", () => {
   assert.match(page, /prefers-color-scheme/);
 });
 
-test("failed reads replace stale values with per-panel errors", () => {
-  const page = dashboardHTML();
-  for (const panel of ["health", "quota", "org", "autonomy-summary", "changes", "effectiveness", "diagnoses"]) {
-    assert.ok(page.includes('panelError("' + panel + '"'), panel);
-  }
-  assert.match(page, /att_human\+" · "\+t\.error_title/);
-  assert.match(page, /att_shadow\+" · "\+t\.error_title/);
-  assert.match(page, /state\.health\.status==="error"\?t\.unavailable/);
+test("a failed probe read replaces the table with the machine code", () => {
+  const { client } = toastClient({ lang: "en", extraIds: ["probe-table"] });
+  client.state.status = { status: "error", error: "status: 502", code: "origin_not_configured", httpStatus: 502, sessionExpired: false };
+  client.renderProbes();
+  const text = client.document.getElementById("probe-table").textContent;
+  assert.match(text, /Probe did not complete/);
+  assert.match(text, /origin_not_configured/);
+  assert.doesNotMatch(text, /ms/, "a failed probe shows no latency");
+});
+
+test("the probe table renders what the origin answered, and nothing else", () => {
+  const { client } = toastClient({ lang: "en", extraIds: ["probe-table", "read-model"] });
+  client.state.status = { status: "ok", data: structuredClone(STATUS_FIXTURE) };
+  client.renderProbes();
+  client.renderReadModel();
+  const table = client.document.getElementById("probe-table");
+  const rows = [];
+  (function walk(node) {
+    if (node.tagName === "tr") rows.push(node);
+    for (const child of node.children || []) walk(child);
+  })(table);
+  assert.equal(rows.length, 3, "one header row plus one row per probe");
+  const text = table.textContent;
+  assert.match(text, /\/v1\/tasks/);
+  assert.match(text, /401/);
+  assert.match(text, /404/);
+  // The read model is stated as an observed reason, not rendered as a count,
+  // and never infers which credential the service would have accepted.
+  const note = client.document.getElementById("read-model").textContent;
+  assert.match(note, /rejected/);
+  assert.match(note, /no task counts/);
+  assert.doesNotMatch(note, /OAuth/i);
+  assert.doesNotMatch(note, /task counts?\s*:\s*\d+/);
 });
 
 test("embedded client scripts parse without export leakage", () => {
@@ -1287,33 +1308,17 @@ test("dashboard proxy allowlist still rejects V2 and write routes", () => {
   assert.throws(() => buildDashboardApiUrl("https://origin.example", "/v1/ai/execute/jobs", ""), /not allowed/);
 });
 
-function endpointClient() {
-  const script = [...dashboardHTML().matchAll(/<script>([\s\S]*?)<\/script>/g)].at(-1)[1];
-  const source = script.slice(0, script.lastIndexOf('document.querySelectorAll(".js-lang")'));
-  const context = vm.createContext({
-    document: { documentElement: { lang: "en", getAttribute: () => "light" } },
-    URL,
-  });
-  vm.runInContext(source, context);
-  return context;
-}
-
 test("endpoint health never infers success from historical request metrics", () => {
-  const client = endpointClient();
-  for (const fields of [
-    {}, { errors: 0 }, { errors: null }, { errors: -1 },
-    { errors: "invalid" }, { errors: 9 }, { errors: 1 },
-    { status: "unavailable", errors: 0 }, { status: "stale", errors: 0 },
-    { status: "unknown", errors: 0 },
+  // The retired health read is gone with its panels. What replaced it is a
+  // probe, so the equivalent guarantee is that a verdict is derived from the
+  // status code alone.
+  for (const [status, verdict] of [
+    [200, "reachable"], [204, "reachable"], [401, "auth_required"], [403, "auth_required"],
+    [404, "not_found"], [429, "rate_limited"], [302, "redirect"], [500, "server_error"],
+    [503, "server_error"], [418, "unexpected_status"], [null, "unreachable"],
   ]) {
-    assert.equal(client.endpointStatus({ path: "/synthetic/tasks", total: 8, ...fields }, []), "unknown");
+    assert.equal(classifyProbe(status === null ? NaN : status), verdict, String(status));
   }
-  for (const status of ["healthy", "degraded", "unhealthy", "unknown"]) {
-    assert.equal(client.endpointStatus({ status }, []), status);
-  }
-  assert.equal(client.endpointStatus({ path: "/synthetic/tasks", total: 8 }, [
-    { path: "/synthetic/tasks", reason: "error_rate" },
-  ]), "degraded");
 });
 
 test("header drops the unobserved egress chip and keeps the health-driven status", () => {
@@ -1466,9 +1471,23 @@ function toastClient({ lang = "en", fetchImpl, extraIds = [] } = {}) {
   return { client: context, document, ids, toast, live, title, body };
 }
 
-const TOAST_KEYS = ["health", "org", "quota", "changes", "eff", "shadow", "diagnoses"];
+// One read source: the page has a single probe endpoint, so a failure episode
+// has exactly one key to track.
+const TOAST_KEYS = ["status"];
+const STATUS_FIXTURE = {
+  status: "ok",
+  checked_at: "2026-11-09T15:00:00.000Z",
+  overall: "online",
+  probes: [
+    { id: "tasks", path: "/v1/tasks", auth: "none", resource: "task_api", verdict: "auth_required", http_status: 401, latency_ms: 120 },
+    { id: "retired_health", path: "/v1/ai/health", auth: "dashboard", resource: "retired_v1_health", verdict: "not_found", http_status: 404, latency_ms: 90 },
+  ],
+  read_model: { task_counts: false, reason_code: "read_credentials_rejected" },
+};
 function setFailures(client, failing) {
-  for (const key of TOAST_KEYS) client.state[key] = failing.includes(key) ? { status: "error", error: "offline fixture" } : { status: "ok", data: {} };
+  client.state.status = failing.length
+    ? { status: "error", error: "offline fixture", code: "network", httpStatus: 0, sessionExpired: false }
+    : { status: "ok", data: structuredClone(STATUS_FIXTURE) };
 }
 
 test("F1: global toast sits in the content column after the header, not over it", () => {
@@ -1570,79 +1589,40 @@ test("F1: dismiss button click hides the toast and keeps panel errors", async ()
   setFailures(client, ["health"]);
 });
 
-test("F3c: HTTP P95 tile shows Unavailable together with the process-local caveat", () => {
-  for (const lang of ["en", "zh-CN"]) {
-    const { client, ids } = toastClient({ lang });
-    client.applyI18n();
-    setFailures(client, TOAST_KEYS);
-    client.renderReadouts();
-    assert.equal(ids["v-p95"].textContent, "—");
-    assert.match(ids["f-p95"].textContent, new RegExp(LOCALES[lang].unavailable));
-    assert.ok(ids["f-p95"].textContent.includes(LOCALES[lang].k_p95_f));
-  }
-});
-
-test("F3a/F3b: live tag is localized and diagnosis errors align with other panels", () => {
+test("F3a/F3b: the removed panels are named, with the retired route, in both languages", () => {
   const page = dashboardHTML();
-  assert.match(page, /<h3 id="tail-h"[^]*?<span class="lbl" data-i18n="win_live">/);
-  assert.doesNotMatch(page, /\.diag\{padding:0 14px/);
+  for (const key of ["o_traffic_body", "o_quota_body", "o_org_body", "o_changes_body", "o_shadow_body", "o_diag_body"]) {
+    assert.ok(LOCALES["zh-CN"][key] && LOCALES.en[key], key);
+  }
+  // Each omitted panel names the route that no longer exists.
+  for (const route of ["/v1/ai/health", "/v1/ai/quota", "/v1/ai/org-health", "/v1/ai/changes", "/v1/ai/feedback/shadow", "/v1/ai/automation/runs"]) {
+    assert.ok(page.includes(route), route);
+  }
+  assert.match(page, /611c129/);
 });
 
 // --- Navigation highlight and own-session expiry (t1505) --------------------
 // Offline fake DOM only: no browser, network, session or production data.
 
-test("failed panels name the Worker cause code in both languages", () => {
-  const expected = {
-    en: /no upstream origin configured/,
-    "zh-CN": /没有配置上游地址/,
-  };
+test("a failed probe names the Worker code in both languages, never a value", () => {
   for (const lang of ["en", "zh-CN"]) {
-    const { client } = toastClient({ lang, extraIds: ["health"] });
-    client.state.health = { status: "error", error: "health: 502", code: "origin_not_configured", httpStatus: 502 };
-    client.renderHealthTable();
-    const text = client.document.getElementById("health").textContent;
-    assert.match(text, expected[lang]);
+    const { client } = toastClient({ lang, extraIds: ["probe-table"] });
+    client.state.status = { status: "error", error: "status: 502", code: "origin_not_configured", httpStatus: 502, sessionExpired: false };
+    client.renderProbes();
+    const text = client.document.getElementById("probe-table").textContent;
+    assert.match(text, new RegExp(LOCALES[lang].s_failed.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
     assert.match(text, /origin_not_configured/);
+    assert.doesNotMatch(text, /—/, "no placeholder cell is rendered for a failed read");
   }
 });
 
-test("a pass-through upstream status renders as an HTTP cause, never as data", () => {
-  const { client } = toastClient({ lang: "en", extraIds: ["quota"] });
-  client.state.quota = { status: "error", error: "quota: 404", code: "http_404", httpStatus: 404 };
-  client.renderQuota();
-  const text = client.document.getElementById("quota").textContent;
-  assert.match(text, /HTTP 404/);
-  assert.match(text, /http_404/);
-});
-
-test("upstream authentication failures name the token mismatch, not the session", () => {
-  const { client } = toastClient({ lang: "en", extraIds: ["org"] });
-  client.state.org = { status: "error", error: "org: 502", code: "origin_auth_failed", httpStatus: 502 };
-  client.renderOrg();
-  const text = client.document.getElementById("org").textContent;
-  assert.match(text, /rejected this access token/);
-  assert.match(text, /origin_auth_failed/);
-});
-
 test("an expired session keeps the re-login notice and adds no cause line", () => {
-  const { client } = toastClient({ lang: "en", extraIds: ["quota"] });
-  client.state.quota = { status: "error", error: "quota: 401", code: "http_401", httpStatus: 401, sessionExpired: true };
-  client.renderQuota();
-  const text = client.document.getElementById("quota").textContent;
-  assert.match(text, /Could not load/);
+  const { client } = toastClient({ lang: "en", extraIds: ["probe-table"] });
+  client.state.status = { status: "error", error: "unauthorized", code: "", httpStatus: 401, sessionExpired: true };
+  client.renderProbes();
+  const text = client.document.getElementById("probe-table").textContent;
+  assert.match(text, /Probe did not complete/);
   assert.doesNotMatch(text, /http_401/);
-});
-
-test("an unknown code or a missing code falls back to the existing generic line", () => {
-  const { client } = toastClient({ lang: "en", extraIds: ["quota", "effectiveness"] });
-  client.state.quota = { status: "error", error: "x", code: "some_new_code", httpStatus: 502 };
-  client.renderQuota();
-  assert.doesNotMatch(client.document.getElementById("quota").textContent, /some_new_code/);
-  client.state.eff = { status: "error", error: "x" };
-  client.renderEffectiveness();
-  const text = client.document.getElementById("effectiveness").textContent;
-  assert.match(text, /Could not load/);
-  assert.doesNotMatch(text, /Cause/);
 });
 
 function jsonResponse(status, body) {
@@ -1658,7 +1638,7 @@ test("401: own expired session shows one bilingual re-login notice with the logi
     client.applyI18n();
     live.textContent = "";
     await client.loadAll();
-    assert.ok(calls >= 7, "every panel read ran concurrently and returned 401");
+    assert.ok(calls >= 1, "the status read ran and returned 401");
     assert.equal(toast.hidden, false);
     const text = ids["toast-text"];
     assert.equal(text.textContent, LOCALES[lang].toast_session);
@@ -1690,7 +1670,7 @@ test("401: re-login notice re-localizes in place and dismisses like the existing
 
 test("401: generic notice becomes a re-login notice and recovery clears it", async () => {
   let mode = "network";
-  const fetchImpl = () => mode === "network" ? Promise.reject(new Error("offline fixture")) : mode === "401" ? SESSION_401() : Promise.resolve(jsonResponse(200, {}));
+  const fetchImpl = () => mode === "network" ? Promise.reject(new Error("offline fixture")) : mode === "401" ? SESSION_401() : Promise.resolve(jsonResponse(200, STATUS_FIXTURE));
   const { client, ids, toast, live } = toastClient({ lang: "en", fetchImpl });
   await client.loadAll();
   assert.equal(ids["toast-text"].textContent, LOCALES.en.toast_error);
@@ -1739,8 +1719,9 @@ test("401: the Worker's own session check is the only source of the re-login con
 function navClient({ hash = "", viewport = 800, scrollHeight = 4000 } = {}) {
   const harness = toastClient({ lang: "en" });
   const { client, document } = harness;
-  const order = ["signal", "quota-panel", "changes-panel", "diagnoses-panel"];
-  const tops = { "signal": 84, "quota-panel": 400, "changes-panel": 1400, "diagnoses-panel": 2200 };
+  // Two panels: the probe panel and the "not shown" panel.
+  const order = ["signal", "omitted"];
+  const tops = { signal: 84, omitted: 400 };
   const panels = {};
   for (const id of order) {
     panels[id] = new FakeNode(document, "section", id);
@@ -1784,40 +1765,41 @@ function navClient({ hash = "", viewport = 800, scrollHeight = 4000 } = {}) {
 test("nav: active item follows the panel scrolled to, on desktop and mobile navs", () => {
   const nav = navClient();
   assert.deepEqual(nav.active(nav.rail), ["#signal"]);
-  for (const id of ["quota-panel", "changes-panel", "diagnoses-panel"]) {
+  for (const id of ["omitted"]) {
     nav.scrollTo(nav.tops[id], "#" + id);
     assert.deepEqual(nav.active(nav.rail), ["#" + id], "rail highlights " + id);
     assert.deepEqual(nav.active(nav.mob), ["#" + id], "390px nav highlights " + id);
     assert.equal(nav.rail.find((link) => link.getAttribute("href") === "#" + id).getAttribute("aria-current"), "location");
-    assert.equal(nav.rail[0].getAttribute("aria-current"), null, "Signal is no longer current");
+    assert.equal(nav.rail[0].getAttribute("aria-current"), null, "the upstream panel is no longer current");
   }
   // Plain scrolling after a user gesture releases the pin the loop left behind.
   nav.input("mousedown");
   nav.scrollTo(0);
   assert.deepEqual(nav.active(nav.rail), ["#signal"]);
-  nav.scrollTo(1500);
-  assert.deepEqual(nav.active(nav.rail), ["#changes-panel"]);
+  nav.scrollTo(500);
+  assert.deepEqual(nav.active(nav.rail), ["#omitted"]);
 });
 
 test("nav: direct hash link and back/forward select the matching item", () => {
   // Direct load: the browser has already scrolled to the hash target.
-  const nav = navClient({ hash: "#diagnoses-panel" });
-  nav.scrollTo(nav.tops["diagnoses-panel"]);
-  assert.deepEqual(nav.active(nav.rail), ["#diagnoses-panel"]);
-  // Back to #quota-panel, then forward again.
-  nav.scrollTo(nav.tops["quota-panel"], "#quota-panel");
-  assert.deepEqual(nav.active(nav.rail), ["#quota-panel"]);
-  nav.scrollTo(nav.tops["diagnoses-panel"], "#diagnoses-panel");
-  assert.deepEqual(nav.active(nav.mob), ["#diagnoses-panel"]);
+  const nav = navClient({ hash: "#omitted" });
+  nav.scrollTo(nav.tops.omitted);
+  assert.deepEqual(nav.active(nav.rail), ["#omitted"]);
+  // Back to the top, then forward again.
+  nav.scrollTo(0, "#signal");
+  assert.deepEqual(nav.active(nav.rail), ["#signal"]);
+  nav.scrollTo(nav.tops.omitted, "#omitted");
+  assert.deepEqual(nav.active(nav.mob), ["#omitted"]);
   // Back to the bare page.
   nav.scrollTo(0, "");
   assert.deepEqual(nav.active(nav.rail), ["#signal"]);
 });
 
 test("nav: initial render highlights from the current scroll position", () => {
-  const harnessHash = "#changes-panel";
-  const nav = navClient({ hash: harnessHash });
-  // initNav ran with scroll 0 (no hash-driven scroll yet): Signal is correct.
+  const harnessHash = "#omitted";
+  // Viewport short enough that the second panel is still below the fold.
+  const nav = navClient({ hash: harnessHash, viewport: 300 });
+  // initNav ran with scroll 0 (no hash-driven scroll yet): the top panel is correct.
   assert.deepEqual(nav.active(nav.rail), ["#signal"]);
   assert.equal(nav.rail.filter((link) => /\bon\b/.test(link.className)).length, 1);
 });
@@ -1832,25 +1814,25 @@ test("nav: markup keeps the existing appearance hooks", () => {
 
 test("nav: back/forward with a browser-restored scroll keeps the hash target while it is visible", () => {
   const nav = navClient();
-  // Chromium can restore y=0 for a same-document #quota-panel entry; the panel
-  // is still on screen, so the restored hash stays highlighted.
-  nav.scrollTo(0, "#quota-panel");
-  assert.deepEqual(nav.active(nav.rail), ["#quota-panel"]);
-  assert.deepEqual(nav.active(nav.mob), ["#quota-panel"]);
-  // Restored far away from the hash target: follow the actual view instead.
-  nav.scrollTo(2200, "#changes-panel");
-  assert.deepEqual(nav.active(nav.rail), ["#diagnoses-panel"], "restored past the target: the view decides");
+  // Chromium can restore y=0 for a same-document #omitted entry; the panel is
+  // still on screen, so the restored hash stays highlighted.
+  nav.scrollTo(0, "#omitted");
+  assert.deepEqual(nav.active(nav.rail), ["#omitted"]);
+  assert.deepEqual(nav.active(nav.mob), ["#omitted"]);
+  // Restored far past the hash target: follow the actual view instead.
+  nav.scrollTo(1000, "#signal");
+  assert.deepEqual(nav.active(nav.rail), ["#omitted"], "restored past the target: the view decides");
   nav.scrollTo(0);
   assert.deepEqual(nav.active(nav.rail), ["#signal"], "pinned target off screen does not stay lit");
 });
 
 test("nav: user scroll input releases the hash pin and the view decides", () => {
   const nav = navClient();
-  nav.scrollTo(0, "#quota-panel");
-  assert.deepEqual(nav.active(nav.rail), ["#quota-panel"]);
+  nav.scrollTo(0, "#omitted");
+  assert.deepEqual(nav.active(nav.rail), ["#omitted"]);
   for (const type of ["wheel", "touchstart", "keydown", "mousedown"]) {
-    nav.scrollTo(0, "#quota-panel");
-    nav.scrollTo(nav.tops["quota-panel"]);
+    nav.scrollTo(0, "#omitted");
+    nav.scrollTo(nav.tops.omitted);
     nav.input(type);
     nav.scrollTo(0);
     assert.deepEqual(nav.active(nav.rail), ["#signal"], type + " releases the pin");
@@ -1858,28 +1840,20 @@ test("nav: user scroll input releases the hash pin and the view decides", () => 
   }
 });
 
-test("nav: a target scrolled past yields to the next target on screen, not a stale one", () => {
-  const nav = navClient();
-  // quota-panel spans 400..700; changes-panel starts at 1400 with non-nav panels between.
-  nav.scrollTo(1100);
-  assert.deepEqual(nav.active(nav.rail), ["#changes-panel"], "changes is on screen, quota is not");
-  assert.deepEqual(nav.active(nav.mob), ["#changes-panel"]);
-});
-
 test("nav: activating the current fragment re-pins its target", () => {
   const nav = navClient();
   // The pin is the only thing keeping a target lit when it cannot reach the line.
-  nav.tops["diagnoses-panel"] = 2950;
-  nav.scrollTo(99999, "#diagnoses-panel");
-  assert.deepEqual(nav.active(nav.rail), ["#diagnoses-panel"]);
-  assert.equal(nav.client.navPin, "diagnoses-panel");
+  nav.tops.omitted = 2950;
+  nav.scrollTo(99999, "#omitted");
+  assert.deepEqual(nav.active(nav.rail), ["#omitted"]);
+  assert.equal(nav.client.navPin, "omitted");
   nav.input("mousedown");
   assert.equal(nav.client.navPin, "", "pointer press releases the pin");
-  nav.rail.find((link) => link.getAttribute("href") === "#diagnoses-panel").dispatch("click");
-  assert.equal(nav.client.navPin, "diagnoses-panel", "same-fragment activation pins the clicked target");
-  assert.deepEqual(nav.active(nav.rail), ["#diagnoses-panel"]);
+  nav.rail.find((link) => link.getAttribute("href") === "#omitted").dispatch("click");
+  assert.equal(nav.client.navPin, "omitted", "same-fragment activation pins the clicked target");
+  assert.deepEqual(nav.active(nav.rail), ["#omitted"]);
   for (const fn of nav.listeners.scroll || []) fn({});
-  assert.deepEqual(nav.active(nav.rail), ["#diagnoses-panel"], "a later scroll event keeps the new pin");
+  assert.deepEqual(nav.active(nav.rail), ["#omitted"], "a later scroll event keeps the new pin");
 });
 
 test("401: refresh keeps the focused re-login link in place", async () => {
@@ -1922,5 +1896,235 @@ test("layout: header controls never wrap their own label", async () => {
     const found = rule(selector);
     assert.ok(found, selector + " is styled");
     assert.match(found[1], /white-space:nowrap/, selector + " keeps its label on one line");
+  }
+});
+
+test("layout: the probe table has fixed columns and readable verdict notes", async () => {
+  const { CSS } = await import("../src/ui/styles.mjs");
+  for (const column of [1, 2, 3, 4, 5]) {
+    assert.match(CSS, new RegExp("#probe-table th:nth-child\\(" + column + "\\),#probe-table td:nth-child\\(" + column + "\\)\\{width:[0-9]+%\\}"), "column " + column);
+  }
+  assert.match(CSS, /\.probe-note\{[^}]*text-transform:none/);
+  assert.match(CSS, /\.probe-note\{[^}]*white-space:normal/);
+  assert.match(CSS, /\.table-wrap\{overflow:auto\}/);
+});
+
+test("layout: the probe table wraps instead of scrolling sideways at 768px", async () => {
+  const { CSS } = await import("../src/ui/styles.mjs");
+  const narrow = CSS.slice(CSS.indexOf("@media (max-width:1000px)"));
+  assert.ok(narrow, "the narrow block exists");
+  assert.match(narrow, /#probe-table th,#probe-table td\{padding:9px 7px\}/);
+  assert.match(narrow, /#probe-table td\{white-space:normal\}/);
+  assert.match(narrow, /#probe-table td:nth-child\(4\),#probe-table td:nth-child\(5\)\{white-space:nowrap\}/);
+});
+
+// --- Upstream status endpoint (GET /api/upstream-status) --------------------
+// The page's only read. These cases pin what the probe is allowed to claim.
+
+test("upstream status: requires the dashboard session and an explicit GET", async (t) => {
+  const anonymous = await worker.fetch(
+    new Request("https://dash.example/api/upstream-status"),
+    { AI_GATEWAY_ORIGIN_URL: "https://gateway.example", DASHBOARD_API_TOKEN: "dashboard-api-token" },
+  );
+  assert.equal(anonymous.status, 401);
+  assert.equal((await anonymous.json()).error, "unauthorized");
+
+  const { env, cookie, gatewayCalls } = await authenticatedDashboard(t, async () => new Response("", { status: 401 }));
+  resetUpstreamStatusCache();
+  const post = await worker.fetch(
+    new Request("https://dash.example/api/upstream-status", { method: "POST", headers: { Cookie: cookie } }),
+    env,
+  );
+  assert.equal(post.status, 405);
+  assert.equal(post.headers.get("allow"), "GET");
+  assert.equal(gatewayCalls.length, 0, "a non-GET never reaches the origin");
+});
+
+test("upstream status: reports each verdict and why task counts are absent", async (t) => {
+  const seen = [];
+  const { env, cookie } = await authenticatedDashboard(t, async (url, init = {}) => {
+    seen.push({ url, authorization: (init.headers || {}).Authorization });
+    const path = new URL(url).pathname;
+    if (path === "/v1/ai/health") return new Response("missing", { status: 404 });
+    if (path === "/.well-known/oauth-protected-resource") return Response.json({ resource: "synthetic" });
+    return new Response("", { status: 401 });
+  });
+  resetUpstreamStatusCache();
+  const response = await worker.fetch(
+    new Request("https://dash.example/api/upstream-status", { headers: { Cookie: cookie } }),
+    env,
+  );
+  const body = await response.json();
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("cache-control"), "no-store");
+  assert.equal(body.status, "ok");
+  assert.equal(body.overall, "online");
+  const byId = Object.fromEntries(body.probes.map((probe) => [probe.id, probe]));
+  assert.equal(byId.tasks.verdict, "auth_required");
+  assert.equal(byId.tasks.http_status, 401);
+  assert.equal(byId.oauth_metadata.verdict, "reachable");
+  assert.equal(byId.retired_health.verdict, "not_found");
+  assert.deepEqual(body.read_model, { task_counts: false, reason_code: "read_credentials_rejected" });
+  // Credentialed probes carry the token; anonymous ones never do.
+  assert.equal(seen.filter((call) => call.authorization === "Bearer dashboard-api-token").length, 2);
+  // The payload names paths and codes, never the token or the origin host.
+  const text = JSON.stringify(body);
+  assert.ok(!text.includes("dashboard-api-token"));
+  assert.ok(!text.includes("gateway.example"));
+});
+
+test("upstream status: a second read inside the cache window does not re-probe", async (t) => {
+  let calls = 0;
+  const { env, cookie } = await authenticatedDashboard(t, async () => {
+    calls += 1;
+    return new Response("", { status: 401 });
+  });
+  resetUpstreamStatusCache();
+  const read = async () => worker.fetch(
+    new Request("https://dash.example/api/upstream-status", { headers: { Cookie: cookie } }),
+    env,
+  ).then((response) => response.json());
+  const first = await read();
+  const afterFirst = calls;
+  const second = await read();
+  assert.equal(first.cached, false);
+  assert.equal(second.cached, true);
+  assert.equal(calls, afterFirst, "the cache window serves the second read");
+});
+
+test("upstream status: a missing origin is a machine code, not an empty table", async (t) => {
+  const { env, cookie } = await authenticatedDashboard(t, async () => {
+    throw new Error("the origin must not be contacted without a URL");
+  });
+  const withoutOrigin = { ...env, AI_GATEWAY_ORIGIN_URL: "" };
+  resetUpstreamStatusCache();
+  const response = await worker.fetch(
+    new Request("https://dash.example/api/upstream-status", { headers: { Cookie: cookie } }),
+    withoutOrigin,
+  );
+  assert.equal(response.status, 502);
+  const body = await response.json();
+  assert.equal(body.status, "error");
+  assert.equal(body.error_code, "origin_not_configured");
+  assert.deepEqual(body.probes, []);
+  assert.equal(body.read_model.reason_code, "origin_unavailable");
+});
+
+test("upstream status: without a dashboard token the credentialed probes are skipped", async (t) => {
+  const authorizations = [];
+  const { env, cookie } = await authenticatedDashboard(t, async (url, init = {}) => {
+    authorizations.push((init.headers || {}).Authorization);
+    return new Response("", { status: 401 });
+  });
+  const { DASHBOARD_API_TOKEN, ...withoutToken } = env;
+  resetUpstreamStatusCache();
+  const body = await worker.fetch(
+    new Request("https://dash.example/api/upstream-status", { headers: { Cookie: cookie } }),
+    withoutToken,
+  ).then((response) => response.json());
+  const byId = Object.fromEntries(body.probes.map((probe) => [probe.id, probe]));
+  assert.equal(byId.tasks_dashboard_stats.verdict, "skipped");
+  assert.equal(byId.retired_health.verdict, "skipped");
+  assert.equal(byId.tasks_anonymous_stats.verdict, "auth_required");
+  assert.equal(body.read_model.reason_code, "dashboard_token_missing");
+  assert.ok(authorizations.every((value) => value === undefined), "no probe is sent with an empty bearer");
+});
+
+test("upstream status: an unreachable origin degrades every probe and says so", async (t) => {
+  const { env, cookie } = await authenticatedDashboard(t, async () => {
+    throw new TypeError("synthetic network failure");
+  });
+  resetUpstreamStatusCache();
+  const body = await worker.fetch(
+    new Request("https://dash.example/api/upstream-status", { headers: { Cookie: cookie } }),
+    env,
+  ).then((response) => response.json());
+  assert.equal(body.overall, "unreachable");
+  assert.ok(body.probes.length > 0);
+  for (const probe of body.probes) {
+    assert.equal(probe.verdict, "unreachable");
+    assert.equal(probe.http_status, null, "no status is invented for a timeout");
+  }
+  assert.equal(body.read_model.reason_code, "origin_unreachable");
+});
+
+// --- Review findings on the upstream probe ---------------------------------
+
+test("probeUrl drops the legacy /v1/codex-audit endpoint base for every probe", () => {
+  assert.equal(LEGACY_ENDPOINT_BASE, "/v1/codex-audit");
+  const legacy = "https://gateway.example" + LEGACY_ENDPOINT_BASE + "/";
+  for (const path of ["/v1/tasks", "/v1/tasks/stats", "/mcp", "/.well-known/oauth-protected-resource", "/v1/ai/health"]) {
+    assert.equal(probeUrl(legacy, path), "https://gateway.example" + path, path);
+  }
+  // A real base path is still a prefix; only the legacy endpoint is dropped.
+  assert.equal(probeUrl("https://gateway.example/service/", "/v1/tasks"), "https://gateway.example/service/v1/tasks");
+  assert.throws(() => probeUrl("http://gateway.example", "/v1/tasks"), /origin_insecure/);
+});
+
+test("readModel never infers which credentials the service accepts", () => {
+  const probe = (id, verdict) => ({ id, verdict });
+  for (const status of [401, 403]) {
+    assert.equal(classifyProbe(status), "auth_required");
+    const model = readModel([
+      probe("tasks", "auth_required"),
+      probe("tasks_anonymous_stats", "auth_required"),
+      probe("tasks_dashboard_stats", "auth_required"),
+    ]);
+    assert.deepEqual(model, { task_counts: false, reason_code: "read_credentials_rejected" });
+  }
+  // A valid workload credential without tasks:list can produce exactly this
+  // pair of verdicts; the copy must not point the operator at OAuth.
+  for (const lang of ["en", "zh-CN"]) {
+    const copy = LOCALES[lang].rm_read_credentials_rejected;
+    assert.ok(copy, lang + " has an explanation");
+    assert.ok(!/oauth/i.test(copy), lang + " does not claim an OAuth-only service");
+  }
+  assert.equal(readModel([
+    probe("tasks_anonymous_stats", "reachable"),
+    probe("tasks_dashboard_stats", "auth_required"),
+  ]).reason_code, "dashboard_token_rejected");
+});
+
+test("upstream status: concurrent viewers share one in-flight probe batch", async (t) => {
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  let calls = 0;
+  const { env, cookie, gatewayCalls } = await authenticatedDashboard(t, async () => {
+    calls += 1;
+    await gate;
+    return new Response("", { status: 401 });
+  });
+  resetUpstreamStatusCache();
+  const reads = Array.from({ length: 10 }, () => worker.fetch(
+    new Request("https://dash.example/api/upstream-status", { headers: { Cookie: cookie } }),
+    env,
+  ).then((response) => response.json()));
+  // Let the first batch start before releasing it; every later read must join it.
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  release();
+  const bodies = await Promise.all(reads);
+  // With no in-flight sharing this is 60 calls: all ten requests see an empty
+  // cache while the first batch is blocked on the gate. The exact mix of
+  // in-flight joins and short-cache hits is scheduling-dependent, so only the
+  // upstream call count is asserted.
+  assert.equal(calls, 6, "one six-probe batch, not one per viewer");
+  assert.equal(gatewayCalls.length, 6);
+  for (const body of bodies) assert.equal(body.status, "ok");
+});
+
+test("a denied probe never tells the operator which credential the service accepts", () => {
+  for (const lang of ["en", "zh-CN"]) {
+    const { client } = toastClient({ lang, extraIds: ["probe-table"] });
+    client.state.status = { status: "ok", data: structuredClone(STATUS_FIXTURE) };
+    client.renderProbes();
+    const text = client.document.getElementById("probe-table").textContent;
+    assert.ok(!/oauth/i.test(text), lang + " verdict copy does not claim OAuth-only access");
+    assert.ok(text.length > 0, lang + " still explains the denied read");
+  }
+  for (const lang of ["en", "zh-CN"]) {
+    for (const key of ["v_auth_required", "m_auth_required"]) {
+      assert.ok(LOCALES[lang][key], lang + " " + key + " exists");
+      assert.ok(!/oauth/i.test(LOCALES[lang][key]), lang + " " + key);
+    }
   }
 });

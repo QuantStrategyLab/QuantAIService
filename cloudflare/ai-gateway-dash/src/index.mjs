@@ -9,6 +9,7 @@
 
 import { loginHTML } from "./ui/login.mjs";
 import { dashboardHTML } from "./ui/dashboard.mjs";
+import { probeUpstream, STATUS_CACHE_MS, LEGACY_ENDPOINT_BASE } from "./upstream.mjs";
 
 export {
   codexRemainingPercent,
@@ -216,7 +217,7 @@ function allowedDashboardApiPath(pathname) {
 }
 
 function shouldIgnoreLegacyEndpointBase(basePath, pathname) {
-  return basePath === "/v1/codex-audit" && pathname.startsWith("/v1/ai/");
+  return basePath === LEGACY_ENDPOINT_BASE && pathname.startsWith("/v1/ai/");
 }
 
 export function buildDashboardApiUrl(rawOrigin, pathname, search = "") {
@@ -502,6 +503,45 @@ async function diagnosisDetail(env, jobId) {
   return json({ status: "ok", diagnosis });
 }
 
+// ── Upstream status (session-gated, read-only) ─────────────────────────
+
+// One shared cache entry. The page polls every 30s and several members can open
+// it at once, so a short window keeps the probe rate bounded without turning a
+// manual refresh into a stale answer.
+let upstreamStatusCache = { at: 0, payload: null };
+let upstreamStatusInflight = null;
+
+export function resetUpstreamStatusCache() {
+  upstreamStatusCache = { at: 0, payload: null };
+  upstreamStatusInflight = null;
+}
+
+async function upstreamStatus(env) {
+  const at = Date.now();
+  if (upstreamStatusCache.payload && at - upstreamStatusCache.at < STATUS_CACHE_MS) {
+    return { ...upstreamStatusCache.payload, cached: true };
+  }
+  // Several viewers can poll while the first batch is still in flight. Join it
+  // instead of each issuing six probes against the shared origin.
+  if (upstreamStatusInflight) {
+    const payload = await upstreamStatusInflight;
+    return { ...payload, cached: false, shared: true };
+  }
+  const pending = probeUpstream({
+    origin: env.AI_GATEWAY_ORIGIN_URL,
+    token: env.DASHBOARD_API_TOKEN,
+  });
+  upstreamStatusInflight = pending;
+  try {
+    const payload = await pending;
+    // Only a completed check is cacheable; a failure must be retried next poll.
+    if (payload.status === "ok") upstreamStatusCache = { at: Date.now(), payload };
+    return { ...payload, cached: false, shared: false };
+  } finally {
+    if (upstreamStatusInflight === pending) upstreamStatusInflight = null;
+  }
+}
+
 // ── Main ───────────────────────────────────────────────────────────────
 
 export default {
@@ -614,6 +654,23 @@ export default {
         return await diagnosisDetail(env, jobId);
       } catch (e) {
         return diagnosisErrorResponse(e);
+      }
+    }
+
+    // ── Upstream status (requires session, read-only) ──────────────
+    if (path === "/api/upstream-status") {
+      const token = getCookie(request, COOKIE_NAME);
+      const session = await getSession(token, env);
+      if (!session) return json({ status: "error", error: "unauthorized" }, 401);
+      if (request.method !== "GET") {
+        return new Response(null, { status: 405, headers: { Allow: "GET" } });
+      }
+      try {
+        const payload = await upstreamStatus(env);
+        return json(payload, payload.status === "ok" ? 200 : 502);
+      } catch (_error) {
+        // Never echo exception text: synthetic host/token strings must not appear.
+        return json({ status: "error", error: "status_unavailable", error_code: "probe_failed" }, 502);
       }
     }
 
