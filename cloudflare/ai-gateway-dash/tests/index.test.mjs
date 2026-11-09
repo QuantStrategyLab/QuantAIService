@@ -1380,6 +1380,14 @@ test("login small text and brand mark meet AA contrast in both themes", async ()
   }
 });
 
+test("decorative login art never intercepts clicks and tools stay above it", async () => {
+  const { LOGIN_CSS } = await import("../src/ui/login-styles.mjs");
+  const art = LOGIN_CSS.match(/\.l-art svg\.routes\{([^}]+)\}/)[1];
+  assert.ok(art.includes("pointer-events:none"), "decorative routes svg must ignore pointer events");
+  const tools = LOGIN_CSS.match(/\.tools\{([^}]+)\}/)[1];
+  assert.ok(/z-index:\s*[1-9]/.test(tools), "theme/language tools must paint above the art");
+});
+
 // --- Global error toast (F1/F2) and minor consistency (F3) -----------------
 // Offline fake DOM only: no browser, network, session or production data.
 
