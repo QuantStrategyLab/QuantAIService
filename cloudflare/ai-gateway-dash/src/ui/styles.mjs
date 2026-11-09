@@ -110,6 +110,8 @@ td.n,th.n{text-align:right;font-family:var(--f-mono);font-size:12px}
 .q small{display:block;margin-top:6px;color:var(--ink3);font-size:11px}
 .panel-error{padding:16px 14px;border-left:3px solid var(--bad);color:var(--bad);font-size:13px}
 .panel-error b{display:block;margin-bottom:4px;color:var(--bad)}
+.panel-error .cause{display:block;margin-top:6px;color:var(--ink2);font-size:12px;line-height:1.5}
+.panel-error .cause code{margin-left:6px;padding:2px 4px;border:1px solid var(--line);background:var(--panel2);color:var(--ink3);font:400 11px/1 var(--f-mono);white-space:nowrap}
 .empty,.loading{padding:16px 14px;font-size:13px;color:var(--ink2)}
 .empty b,.loading b{display:block;margin-bottom:4px;color:var(--ink)}
 .loading{color:var(--ink3)}
