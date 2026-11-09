@@ -56,13 +56,13 @@ button{font:inherit;color:inherit;background:none;border:0;cursor:pointer}
 /* The approved mock uses an explicit break only for zh-CN; English wraps naturally. */
 :lang(en) .l-art h2 br{display:none}
 .l-art p{color:var(--ink2);max-width:440px;margin-top:18px;font-size:15px}
-.l-art svg.routes{position:absolute;right:24px;top:110px;width:520px;height:300px;opacity:.9}
+.l-art svg.routes{position:absolute;right:24px;top:110px;width:520px;height:300px;opacity:.9;pointer-events:none}
 .l-art>div{position:relative}
 .l-stat{display:flex;gap:28px;font:400 11px/1.6 var(--f-mono);color:var(--ink3)}
 .l-stat b{display:block;color:var(--ink);font-weight:500;font-size:13px}
 
 .l-form{display:flex;flex-direction:column;justify-content:center;padding:40px 72px;position:relative}
-.tools{position:absolute;top:24px;right:24px;display:flex;gap:8px}
+.tools{position:absolute;top:24px;right:24px;display:flex;gap:8px;z-index:1}
 .l-card{max-width:420px;width:100%}
 .l-card h1{font:600 28px/1.2 var(--f-ui);margin:10px 0 8px}
 .l-card .sub{color:var(--ink2);margin-bottom:24px;font-size:14.5px}
