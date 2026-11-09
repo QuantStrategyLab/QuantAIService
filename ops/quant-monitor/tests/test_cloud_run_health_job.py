@@ -196,7 +196,8 @@ class CloudJobTests(unittest.TestCase):
         with patch.dict(os.environ, env, clear=True), patch.dict(sys.modules, google), patch.object(
                 job, 'run_once', return_value={'status': 'evaluated', 'healthy': True,
                                                'website_publication': 'accepted'}) as cycle, patch.object(
-                job, 'refresh_cycle_inputs') as refresh:
+                job, 'refresh_cycle_inputs') as refresh, patch.object(
+                job, 'publish_projections') as publish:
             self.assertEqual(job.main(), 0)
             core = cycle.call_args.args[0]
             options = cycle.call_args.kwargs
@@ -206,7 +207,44 @@ class CloudJobTests(unittest.TestCase):
             options['refresh'](Path(self.directory.name))
             self.assertEqual(refresh.call_args.args[0].url, env['MONITOR_INPUT_AZURE_URL'])
             self.assertEqual(refresh.call_args.kwargs['source_kind'], 'azure_job')
+            options['publish'](Path(self.directory.name), claim_generation=5)
+            publish.assert_called_once_with(None, None, Path(self.directory.name),
+                                            azure_store=core, claim_generation=5)
             gcs.assert_not_called()
+
+    def test_invalid_azure_bindings_do_not_fall_back_to_gcs(self):
+        core = 'https://synthetic.blob.core.windows.net/core-state'
+        cases = [({'MONITOR_CORE_AZURE_URL': core}),
+                 ({'MONITOR_INPUT_AZURE_URL': core}),
+                 ({'MONITOR_CORE_AZURE_URL': core, 'MONITOR_INPUT_AZURE_URL': core}),
+                 ({'MONITOR_CORE_AZURE_URL': core, 'MONITOR_INPUT_AZURE_URL': 'invalid'})]
+        for env in cases:
+            with self.subTest(env=env), patch.dict(os.environ, env, clear=True):
+                storage = Mock()
+                with self.assertRaisesRegex(state.StateUnavailable, '^azure_state_binding_invalid$'):
+                    job.cloud_binding(storage, 'run')
+                storage.Client.assert_not_called()
+
+    def test_gcs_input_binding_is_lazy_and_projection_uses_gcs(self):
+        env = {'MONITOR_STATE_GCS_URI': 'gs://synthetic/core', 'CLOUD_RUN_EXECUTION': 'gcs-execution'}
+        storage = Mock()
+        with patch.dict(os.environ, env, clear=True), patch.object(job, 'CloudState') as cloud_state, \
+                patch.object(job, 'refresh_cycle_inputs') as refresh_inputs, \
+                patch.object(job, 'publish_projections') as publish_projections:
+            store, execution_id, refresh, publish, resume = job.cloud_binding(storage, 'run')
+            self.assertEqual(execution_id, 'gcs-execution')
+            self.assertFalse(resume)
+            cloud_state.assert_called_once_with(storage.Client.return_value, env['MONITOR_STATE_GCS_URI'])
+            os.environ['MONITOR_INPUT_GCS_URI'] = 'gs://synthetic/input'
+            root = Path(self.directory.name)
+            refresh(root)
+            cloud_state.assert_called_with(storage.Client.return_value, 'gs://synthetic/input')
+            refresh_inputs.assert_called_once_with(cloud_state.return_value, root, mode='run',
+                                                   execution_id='gcs-execution', source_kind='cloud_run')
+            publish(root, claim_generation=5)
+            publish_projections.assert_called_once_with(storage.Client.return_value, env['MONITOR_STATE_GCS_URI'],
+                                                        root, azure_store=None, claim_generation=5)
+            self.assertIs(store, cloud_state.return_value)
 
     def test_azure_retry_reuses_the_atomic_completed_commit_without_side_effects(self):
         evaluate = Mock(return_value={'healthy': True, 'snapshot_count': 3, 'data_status': 'partial'})
