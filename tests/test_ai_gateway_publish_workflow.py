@@ -8,9 +8,9 @@ import textwrap
 import unittest
 
 WORKFLOW = Path(__file__).resolve().parents[1] / ".github/workflows/publish-ai-gateway-dash.yml"
-# Reviewed default-branch SHA: dashboard toast plus proxy origin-failure
-# handling. Publish admits only this SHA.
-PINNED_SOURCE_SHA = "f41a302791d24e228d67e4f77d1407bd3d850297"
+# Reviewed default-branch SHA: dashboard nav pin and 401 re-login fixes.
+# Publish admits only this SHA.
+PINNED_SOURCE_SHA = "0b992e1203c67307b4edcddef8e7d93150bcb368"
 STALE_SOURCE_SHA = "7eb49dd9b237345511c74f5693b94539775f5976"
 # Synthetic 40-hex value. It is not a repository object.
 NON_PINNED_FIXTURE_SHA = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
