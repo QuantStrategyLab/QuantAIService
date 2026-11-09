@@ -9,6 +9,7 @@
 
 import { loginHTML } from "./ui/login.mjs";
 import { dashboardHTML } from "./ui/dashboard.mjs";
+import { probeUpstream, STATUS_CACHE_MS } from "./upstream.mjs";
 
 export {
   codexRemainingPercent,
@@ -502,6 +503,31 @@ async function diagnosisDetail(env, jobId) {
   return json({ status: "ok", diagnosis });
 }
 
+// ── Upstream status (session-gated, read-only) ─────────────────────────
+
+// One shared cache entry. The page polls every 30s and several members can open
+// it at once, so a short window keeps the probe rate bounded without turning a
+// manual refresh into a stale answer.
+let upstreamStatusCache = { at: 0, payload: null };
+
+export function resetUpstreamStatusCache() {
+  upstreamStatusCache = { at: 0, payload: null };
+}
+
+async function upstreamStatus(env) {
+  const at = Date.now();
+  if (upstreamStatusCache.payload && at - upstreamStatusCache.at < STATUS_CACHE_MS) {
+    return { ...upstreamStatusCache.payload, cached: true };
+  }
+  const payload = await probeUpstream({
+    origin: env.AI_GATEWAY_ORIGIN_URL,
+    token: env.DASHBOARD_API_TOKEN,
+  });
+  // Only a completed check is cacheable; a failure must be retried next poll.
+  if (payload.status === "ok") upstreamStatusCache = { at, payload };
+  return { ...payload, cached: false };
+}
+
 // ── Main ───────────────────────────────────────────────────────────────
 
 export default {
@@ -614,6 +640,23 @@ export default {
         return await diagnosisDetail(env, jobId);
       } catch (e) {
         return diagnosisErrorResponse(e);
+      }
+    }
+
+    // ── Upstream status (requires session, read-only) ──────────────
+    if (path === "/api/upstream-status") {
+      const token = getCookie(request, COOKIE_NAME);
+      const session = await getSession(token, env);
+      if (!session) return json({ status: "error", error: "unauthorized" }, 401);
+      if (request.method !== "GET") {
+        return new Response(null, { status: 405, headers: { Allow: "GET" } });
+      }
+      try {
+        const payload = await upstreamStatus(env);
+        return json(payload, payload.status === "ok" ? 200 : 502);
+      } catch (_error) {
+        // Never echo exception text: synthetic host/token strings must not appear.
+        return json({ status: "error", error: "status_unavailable", error_code: "probe_failed" }, 502);
       }
     }
 
