@@ -45,7 +45,7 @@ a{color:inherit}
 .st-ok{color:var(--ok)} .st-warn{color:var(--warn)} .st-bad{color:var(--bad)} .st-unk{color:var(--unk)}
 .tag{display:inline-block;font:500 10px/1 var(--f-mono);letter-spacing:.08em;text-transform:uppercase;padding:4px 6px;border:1px solid currentColor;border-radius:var(--r)}
 .seg{display:inline-flex;border:1px solid var(--line2);border-radius:var(--r)}
-.seg button{padding:6px 10px;font:500 11px/1 var(--f-mono);color:var(--ink2)}
+.seg button{padding:6px 10px;font:500 11px/1 var(--f-mono);color:var(--ink2);white-space:nowrap}
 .seg button+button{border-left:1px solid var(--line2)}
 .seg button[aria-pressed=true]{background:var(--ink);color:var(--panel)}
 .app{display:grid;grid-template-columns:76px 1fr;min-height:100vh}
@@ -60,11 +60,11 @@ main{position:relative;padding:0 24px 28px;min-width:0}
 .top h1{font:600 18px/1 var(--f-ui);letter-spacing:.01em}
 .top h1 small{display:block;margin-top:5px}
 .top .grow{flex:1}
-.chip{display:inline-flex;align-items:center;gap:8px;padding:6px 10px;border:1px solid var(--line2);font:500 11px/1 var(--f-mono);border-radius:var(--r);color:var(--ink2)}
+.chip{display:inline-flex;align-items:center;gap:8px;white-space:nowrap;padding:6px 10px;border:1px solid var(--line2);font:500 11px/1 var(--f-mono);border-radius:var(--r);color:var(--ink2)}
 .iconbtn{width:32px;height:32px;display:grid;place-items:center;border:1px solid var(--line2);border-radius:var(--r);font:600 11px/1 var(--f-mono)}
 .user{display:flex;align-items:center;gap:8px;font:500 11px/1 var(--f-mono);color:var(--ink2)}
 .user img{display:none;width:24px;height:24px;border-radius:50%;border:1px solid var(--line2)}
-.user a{text-decoration:none;border:1px solid var(--line2);padding:6px 8px;border-radius:var(--r)}
+.user a{text-decoration:none;border:1px solid var(--line2);padding:6px 8px;border-radius:var(--r);white-space:nowrap}
 .readouts{display:grid;grid-template-columns:repeat(5,1fr);gap:0;margin-bottom:16px}
 .ro{padding:14px 16px 12px;border-right:1px solid var(--line);min-width:0}
 .ro:last-child{border-right:0}
@@ -202,7 +202,14 @@ td.n,th.n{text-align:right;font-family:var(--f-mono);font-size:12px}
 .flow li p{grid-column:2;color:var(--ink2);font-size:12.5px;line-height:1.5}
 .legal{margin-top:22px;font-size:12px;color:var(--ink3);display:flex;gap:10px;align-items:flex-start}
 @media (max-width:1100px){.grid2{grid-template-columns:1fr}.readouts{grid-template-columns:repeat(3,1fr)}.ro:nth-child(3n){border-right:0}.ro{border-bottom:1px solid var(--line)}}
-@media (max-width:760px){
+/* Between the rail and the narrow layout the header content no longer fits on
+   one row. Give the title its own row instead of squeezing the subtitle and the
+   window buttons into two lines. */
+@media (max-width:1080px){.top{gap:12px;height:auto;min-height:64px;flex-wrap:wrap;padding:12px 0}.top h1{flex:1 1 100%}.top .grow{display:none}}
+/* The desktop rail removes 76px and the page adds 48px of padding, so the
+   single-row header only fits from 1000px up; below that the title block is
+   squeezed into the status chips. Drop the rail and wrap the header instead. */
+@media (max-width:1000px){
   body{font-size:13px}
   .app{grid-template-columns:1fr}
   .rail{display:none}
