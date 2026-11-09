@@ -9,7 +9,7 @@ on:
         description: Full reviewed dashboard source SHA (only the pinned release is accepted)
         type: string
         required: true
-        default: 0b992e1203c67307b4edcddef8e7d93150bcb368
+        default: 7dbe4d31debaad509c10b1e0b0bd9a96de55d596
       dry_run:
         description: Validate locally only; no Cloudflare credentials or publish
         type: boolean
@@ -24,7 +24,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  REVIEWED_SOURCE_SHA: 0b992e1203c67307b4edcddef8e7d93150bcb368
+  REVIEWED_SOURCE_SHA: 7dbe4d31debaad509c10b1e0b0bd9a96de55d596
   SOURCE_SHA: ${{ inputs.source_sha }}
   DEFAULT_REF: refs/heads/${{ github.event.repository.default_branch }}
   DRY_RUN: ${{ inputs.dry_run }}
