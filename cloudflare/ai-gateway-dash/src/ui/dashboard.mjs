@@ -163,7 +163,27 @@ function diagStatusText(status){var key="diag_status_"+String(status||"unknown")
 function meter(id,filled,hot,unknown){var node=qs(id);if(!node)return;clear(node);node.className="meter"+(unknown?" na":"");var n=finiteNumber(filled);var cells=n===null?0:Math.max(0,Math.min(12,Math.round(n)));for(var i=0;i<12;i++){var cell=document.createElement("i");if(i<cells)cell.className=hot?"h":"f";node.appendChild(cell);}}
 function setReadout(id,value,unit,foot,unknown){var node=qs("v-"+id);if(!node)return;clear(node);node.className="v"+(unknown?" unk":"");node.appendChild(document.createTextNode(value));if(unit)node.appendChild(el("small","",unit));var footNode=qs("f-"+id);if(footNode)footNode.textContent=foot||"";}
 function loadingPanel(id){var target=qs(id);if(!target)return;clear(target);target.appendChild(el("div","loading",t.loading));}
-function panelError(id,title){var target=qs(id);if(!target)return;clear(target);var box=el("div","panel-error");append(box,el("b","",title||t.error_title),el("span","",t.error_detail));target.appendChild(box);}
+/* A failed read keeps the Worker's stable error code. Rendering that code is
+   presentation only: it never turns a failure into data, and an expired session
+   keeps the existing re-login notice instead of a cause line. */
+function causeOf(key){
+  var slot=state[key]||{};
+  if(slot.sessionExpired)return null;
+  var code=String(slot.code||"");
+  if(!code)return null;
+  var template=code.indexOf("http_")===0?t.d_http:String(t["d_"+code]||"");
+  if(!template)return null;
+  var status=String(slot.httpStatus||code.replace("http_",""));
+  return {text:template.split("{status}").join(status),code:code};
+}
+function causeLine(key){
+  var cause=causeOf(key);
+  if(!cause)return null;
+  var line=el("span","cause");
+  append(line,document.createTextNode(t.cause_label+" · "+cause.text+" "),el("code","",cause.code));
+  return line;
+}
+function panelError(id,title,key){var target=qs(id);if(!target)return;clear(target);var box=el("div","panel-error");append(box,el("b","",title||t.error_title),el("span","",t.error_detail));append(box,key?causeLine(key):null);target.appendChild(box);}
 function emptyPanel(id,title,body){var target=qs(id);if(!target)return;clear(target);var box=el("div","empty");append(box,el("b","",title||t.unknown),el("span","",body||""));target.appendChild(box);}
 function stat(label,value){var box=el("div","stat");append(box,el("span","lbl",label),el("b","",value));return box;}
 function kvRow(label,value){var row=el("div","r");append(row,el("span","",label),el("span","",value));return row;}
@@ -219,7 +239,7 @@ function healthReasonText(reason){var pathName=String((reason&&reason.path)||"�
 function renderHealthTable(){
   var target=qs("health");if(!target)return;
   if(state.health.status==="loading"){loadingPanel("health");return;}
-  if(state.health.status==="error"){panelError("health",t.p_title+" · "+t.error_title);return;}
+  if(state.health.status==="error"){panelError("health",t.p_title+" · "+t.error_title,"health");return;}
   var health=state.health.data||{};
   var endpoints=Array.isArray(health.endpoints)?health.endpoints:[];
   var reasons=Array.isArray(health.degradation_reasons)?health.degradation_reasons:[];
@@ -286,7 +306,7 @@ function usageText(entry){
 function renderQuota(){
   var target=qs("quota");if(!target)return;
   if(state.quota.status==="loading"){loadingPanel("quota");return;}
-  if(state.quota.status==="error"){panelError("quota",t.q_title+" · "+t.error_title);return;}
+  if(state.quota.status==="error"){panelError("quota",t.q_title+" · "+t.error_title,"quota");return;}
   var quota=state.quota.data||{};var repos=quota.repos&&typeof quota.repos==="object"?quota.repos:{};
   clear(target);
   var list=el("div","quota");var names=Object.keys(repos);
@@ -338,7 +358,7 @@ function renderQuota(){
 function renderOrg(){
   var target=qs("org");if(!target)return;
   if(state.org.status==="loading"){loadingPanel("org");return;}
-  if(state.org.status==="error"){panelError("org",t.org_title+" · "+t.error_title);return;}
+  if(state.org.status==="error"){panelError("org",t.org_title+" · "+t.error_title,"org");return;}
   var health=state.org.data||{};var provider=health.provider||{};var summary=health.summary||{};
   var repos=Array.isArray(health.repositories)?health.repositories:[];
   clear(target);
@@ -375,7 +395,7 @@ function orgReason(reason){if(reason==="latest_run_in_progress")return t.or_in_p
 function renderChanges(){
   var target=qs("changes");var summary=qs("autonomy-summary");if(!target||!summary)return;
   if(state.changes.status==="loading"){loadingPanel("autonomy-summary");loadingPanel("changes");return;}
-  if(state.changes.status==="error"){panelError("autonomy-summary",t.aut_title+" · "+t.error_title);panelError("changes",t.chg_title+" · "+t.error_title);return;}
+  if(state.changes.status==="error"){panelError("autonomy-summary",t.aut_title+" · "+t.error_title,"changes");panelError("changes",t.chg_title+" · "+t.error_title,"changes");return;}
   var data=state.changes.data||{};var items=Array.isArray(data.changes)?data.changes:[];
   clear(summary);
   if(!items.length){summary.appendChild(el("div","empty",t.aut_none));}
@@ -415,7 +435,7 @@ function renderChanges(){
 function renderEffectiveness(){
   var target=qs("effectiveness");if(!target)return;
   if(state.eff.status==="loading"){loadingPanel("effectiveness");return;}
-  if(state.eff.status==="error"){panelError("effectiveness",t.eff_title+" · "+t.error_title);return;}
+  if(state.eff.status==="error"){panelError("effectiveness",t.eff_title+" · "+t.error_title,"eff");return;}
   var data=state.eff.data||{};
   var evaluated=finiteNumber(data.evaluated);var pending=finiteNumber(data.pending);
   clear(target);
@@ -467,8 +487,8 @@ function renderAttention(){
   var shadow=state.shadow.status==="ok"?((state.shadow.data&&state.shadow.data.disagreements)||[]):[];
   clear(target);
   var list=el("div","att-list");
-  if(state.changes.status==="error"){var humanError=el("div","panel-error");append(humanError,el("b","",t.att_human+" · "+t.error_title),el("span","",t.error_detail));list.appendChild(humanError);}
-  if(state.shadow.status==="error"){var shadowError=el("div","panel-error");append(shadowError,el("b","",t.att_shadow+" · "+t.error_title),el("span","",t.error_detail));list.appendChild(shadowError);}
+  if(state.changes.status==="error"){var humanError=el("div","panel-error");append(humanError,el("b","",t.att_human+" · "+t.error_title),el("span","",t.error_detail),causeLine("changes"));list.appendChild(humanError);}
+  if(state.shadow.status==="error"){var shadowError=el("div","panel-error");append(shadowError,el("b","",t.att_shadow+" · "+t.error_title),el("span","",t.error_detail),causeLine("shadow"));list.appendChild(shadowError);}
   human.forEach(function(item){list.appendChild(attentionRow("human",item));});
   shadow.forEach(function(item){list.appendChild(attentionRow("shadow",item));});
   if(state.changes.status==="ok"&&state.shadow.status==="ok"&&!human.length&&!shadow.length){target.appendChild(el("div","empty",t.att_none));return;}
@@ -502,7 +522,7 @@ function diagnosisItems(container,items,emptyText){
 function renderDiagnoses(){
   var target=qs("diagnoses");if(!target)return;
   if(state.diagnoses.status==="loading"){loadingPanel("diagnoses");return;}
-  if(state.diagnoses.status==="error"){panelError("diagnoses",t.diag_title+" · "+t.error_title);return;}
+  if(state.diagnoses.status==="error"){panelError("diagnoses",t.diag_title+" · "+t.error_title,"diagnoses");return;}
   var data=state.diagnoses.data||{};var items=Array.isArray(data.diagnoses)?data.diagnoses:[];
   var operational=items.filter(function(item){return item.kind==="operational";});
   var rehearsal=items.filter(function(item){return item.kind==="historical_rehearsal";});
@@ -537,6 +557,8 @@ function fetchJSON(path){
         if(path===ROUTES.orgHealth&&response.status===503&&data&&data.status==="unavailable")return data;
         var detail=data&&data.error?": "+data.error:"";
         var failure=new Error(path+": "+response.status+detail);
+        failure.code=data&&data.error_code?String(data.error_code):("http_"+response.status);
+        failure.httpStatus=response.status;
         if(isOwnSessionExpired(response,data))failure.sessionExpired=true;
         throw failure;
       }
@@ -554,7 +576,7 @@ function load(key,path){
   return fetchJSON(path).then(function(data){
     state[key]={status:"ok",data:normalize(key,data)};
   }).catch(function(error){
-    state[key]={status:"error",error:shortError(error),sessionExpired:!!(error&&error.sessionExpired)};
+    state[key]={status:"error",error:shortError(error),code:(error&&error.code)||"",httpStatus:(error&&error.httpStatus)||0,sessionExpired:!!(error&&error.sessionExpired)};
   }).then(function(){renderAll();});
 }
 function loadAll(){

@@ -26,6 +26,7 @@ survive Worker cold starts and edge isolate changes. When `DASHBOARD_SESSION_KV`
 ## Display semantics
 
 - `health` shows online service health, not monthly audit quality or strategy health.
+- A failed read shows the Worker's stable error code beside the sentence that explains it (`origin_unreachable`, `origin_auth_failed`, `http_404`, …), so a missing upstream route, a token mismatch and an unreachable origin stay distinguishable without Worker log access. An expired session keeps the existing re-login notice and shows no cause. An unknown code falls back to the generic line: the dashboard never invents a cause it did not receive.
 - `quota` shows remaining Codex window percentage when available; GPT/Claude rows come from Admin Usage/Cost APIs and may omit cost when the provider does not return it.
 - Dashboard visibility does not change approval boundaries: high-risk changes, policy changes, secrets, and live-trading decisions still require human review.
 

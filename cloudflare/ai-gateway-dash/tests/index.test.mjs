@@ -1434,7 +1434,7 @@ class FakeNode {
   focus() { this.ownerDocument.activeElement = this; }
 }
 
-function toastClient({ lang = "en", fetchImpl } = {}) {
+function toastClient({ lang = "en", fetchImpl, extraIds = [] } = {}) {
   const script = [...dashboardHTML().matchAll(/<script>([\s\S]*?)<\/script>/g)].at(-1)[1];
   const source = script.slice(0, script.lastIndexOf('document.querySelectorAll(".js-lang")'));
   const ids = {};
@@ -1454,6 +1454,7 @@ function toastClient({ lang = "en", fetchImpl } = {}) {
   make("toast-dismiss", toast);
   const live = make("toast-live", body);
   for (const id of ["v-p95", "f-p95", "v-req", "f-req", "v-err", "f-err"]) make(id, body);
+  for (const id of extraIds) make(id, body);
   document.activeElement = body;
   const context = vm.createContext({
     document, URL, Promise,
@@ -1589,6 +1590,60 @@ test("F3a/F3b: live tag is localized and diagnosis errors align with other panel
 
 // --- Navigation highlight and own-session expiry (t1505) --------------------
 // Offline fake DOM only: no browser, network, session or production data.
+
+test("failed panels name the Worker cause code in both languages", () => {
+  const expected = {
+    en: /no upstream origin configured/,
+    "zh-CN": /没有配置上游地址/,
+  };
+  for (const lang of ["en", "zh-CN"]) {
+    const { client } = toastClient({ lang, extraIds: ["health"] });
+    client.state.health = { status: "error", error: "health: 502", code: "origin_not_configured", httpStatus: 502 };
+    client.renderHealthTable();
+    const text = client.document.getElementById("health").textContent;
+    assert.match(text, expected[lang]);
+    assert.match(text, /origin_not_configured/);
+  }
+});
+
+test("a pass-through upstream status renders as an HTTP cause, never as data", () => {
+  const { client } = toastClient({ lang: "en", extraIds: ["quota"] });
+  client.state.quota = { status: "error", error: "quota: 404", code: "http_404", httpStatus: 404 };
+  client.renderQuota();
+  const text = client.document.getElementById("quota").textContent;
+  assert.match(text, /HTTP 404/);
+  assert.match(text, /http_404/);
+});
+
+test("upstream authentication failures name the token mismatch, not the session", () => {
+  const { client } = toastClient({ lang: "en", extraIds: ["org"] });
+  client.state.org = { status: "error", error: "org: 502", code: "origin_auth_failed", httpStatus: 502 };
+  client.renderOrg();
+  const text = client.document.getElementById("org").textContent;
+  assert.match(text, /rejected this access token/);
+  assert.match(text, /origin_auth_failed/);
+});
+
+test("an expired session keeps the re-login notice and adds no cause line", () => {
+  const { client } = toastClient({ lang: "en", extraIds: ["quota"] });
+  client.state.quota = { status: "error", error: "quota: 401", code: "http_401", httpStatus: 401, sessionExpired: true };
+  client.renderQuota();
+  const text = client.document.getElementById("quota").textContent;
+  assert.match(text, /Could not load/);
+  assert.doesNotMatch(text, /http_401/);
+});
+
+test("an unknown code or a missing code falls back to the existing generic line", () => {
+  const { client } = toastClient({ lang: "en", extraIds: ["quota", "effectiveness"] });
+  client.state.quota = { status: "error", error: "x", code: "some_new_code", httpStatus: 502 };
+  client.renderQuota();
+  assert.doesNotMatch(client.document.getElementById("quota").textContent, /some_new_code/);
+  client.state.eff = { status: "error", error: "x" };
+  client.renderEffectiveness();
+  const text = client.document.getElementById("effectiveness").textContent;
+  assert.match(text, /Could not load/);
+  assert.doesNotMatch(text, /Cause/);
+});
 
 function jsonResponse(status, body) {
   const raw = body === undefined ? "" : JSON.stringify(body);
