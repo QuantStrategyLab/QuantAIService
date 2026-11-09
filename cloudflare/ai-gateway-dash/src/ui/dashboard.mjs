@@ -580,7 +580,7 @@ function loadAll(){
    visible, because browsers may restore a different scroll position; any user
    scroll input releases the pin. Appearance stays the existing .on class on
    both the rail and the narrow-screen nav. */
-var NAV_TARGETS=["signal","quota-panel","changes-panel","diagnoses-panel","account-panel"];
+var NAV_TARGETS=["signal","quota-panel","changes-panel","diagnoses-panel"];
 var navPin="";
 function navId(hash){var id=String(hash||"").replace(/^#/,"");return NAV_TARGETS.indexOf(id)>=0?id:"";}
 function pickNav(rects,pin,viewport,atBottom){
@@ -710,13 +710,11 @@ export function dashboardHTML() {
     <a href="#changes-panel"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h10M4 18h6"/><circle cx="18" cy="16" r="3"/></svg><span data-i18n="nav_changes">${text("nav_changes")}</span></a>
     <a href="#diagnoses-panel"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4h14v16H5zM9 8h6M9 12h6M9 16h3"/></svg><span data-i18n="nav_diagnoses">${text("nav_diagnoses")}</span></a>
     <span class="sp"></span>
-    <a href="#account-panel"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M5 19l2-2M17 7l2-2"/></svg><span data-i18n="nav_account">${text("nav_account")}</span></a>
   </nav>
   <main>
     <header class="top">
       <h1 id="main-title" tabindex="-1"><span class="mark m-only" aria-hidden="true">QG</span><span><span data-i18n="d_title">${text("d_title")}</span><small class="lbl" data-i18n="d_sub">${text("d_sub")}</small></span></h1>
       <span class="grow"></span>
-      <span class="chip hide-m"><span class="lamp st-unk" aria-hidden="true"></span><span data-i18n="d_chip">${text("d_chip")}</span></span>
       <span class="chip hide-m" id="status-pill"><span class="lamp st-unk" id="pulse" aria-hidden="true"></span><span id="status-text" data-i18n="loading">${text("loading")}</span></span>
       <span class="chip hide-m"><span data-i18n="updated">${text("updated")}</span> <span id="last-refresh">—</span></span>
       <div class="seg" role="group" data-i18n-aria="win_label" aria-label="${text("win_label")}">
@@ -787,15 +785,7 @@ export function dashboardHTML() {
       <div class="diag" id="diagnoses"></div>
     </section>
 
-    <section class="pn panel-block" id="account-panel" aria-labelledby="account-h">
-      <div class="pn-h"><h3 id="account-h" data-i18n="acct_panel_title">${text("acct_panel_title")}</h3><span class="lbl">QuantStrategyLab</span></div>
-      <div class="stat-grid">
-        <div class="stat"><span class="lbl" data-i18n="acct_scope_title">${text("acct_scope_title")}</span><b data-i18n="acct_scope_body">${text("acct_scope_body")}</b></div>
-        <div class="stat"><span class="lbl" data-i18n="acct_signed_in">${text("acct_signed_in")}</span><b><a href="/logout" data-i18n="acct_logout">${text("acct_logout")}</a></b></div>
-      </div>
-    </section>
-
-    <footer class="footer"><span data-i18n="footer_refresh">${text("footer_refresh")}</span><span data-i18n="footer_readonly">${text("footer_readonly")}</span></footer>
+    <footer class="footer"><span data-i18n="footer_refresh">${text("footer_refresh")}</span></footer>
   </main>
 
   <nav class="mobnav" aria-label="${text("d_title")}">

@@ -1316,11 +1316,30 @@ test("endpoint health never infers success from historical request metrics", () 
   ]), "degraded");
 });
 
-test("egress requirement stays unverified in both languages without observations", () => {
+test("header drops the unobserved egress chip and keeps the health-driven status", () => {
   const page = dashboardHTML();
-  assert.equal(/<span class="lamp st-unk" aria-hidden="true"><\/span><span data-i18n="d_chip">/.test(page), true);
-  assert.equal(LOCALES.en.d_chip, "egress · SG · unverified");
-  assert.equal(LOCALES["zh-CN"].d_chip, "出口 · SG · 未验证");
+  // The static egress indicator carried no observation; it is not rendered and
+  // no replacement probe is added.
+  assert.equal(/d_chip|出口 · SG|egress · SG/.test(page), false);
+  for (const dict of [LOCALES.en, LOCALES["zh-CN"]]) assert.equal(dict.d_chip, undefined);
+  // The status lamp and timer that the health API drives stay in place.
+  assert.match(page, /<span class="lamp st-unk" id="pulse" aria-hidden="true"><\/span><span id="status-text"/);
+  assert.match(page, /<span id="last-refresh">/);
+  assert.match(page, /data-i18n="updated"/);
+});
+
+test("account block and read-only footer note are gone; sign-out stays in the header", () => {
+  const page = dashboardHTML();
+  assert.equal(/account-panel|account-h/.test(page), false, "no account panel or dead anchor");
+  assert.equal(/footer_readonly/.test(page), false, "footer carries the refresh note only");
+  for (const key of ["acct_panel_title", "acct_scope_title", "acct_scope_body", "acct_signed_in", "footer_readonly", "nav_account"]) {
+    assert.equal(LOCALES.en[key], undefined, key);
+    assert.equal(LOCALES["zh-CN"][key], undefined, key);
+  }
+  const header = page.slice(page.indexOf("<header"), page.indexOf("</header>"));
+  assert.equal((header.match(/href="\/logout"/g) || []).length, 1, "sign-out sits in the header account entry");
+  assert.match(header, /class="user"/);
+  assert.equal((page.match(/href="\/logout"/g) || []).length, 1, "sign-out exists once, in the header");
 });
 
 test("login never publishes invented diagnostic references", () => {
@@ -1665,8 +1684,8 @@ test("401: the Worker's own session check is the only source of the re-login con
 function navClient({ hash = "", viewport = 800, scrollHeight = 4000 } = {}) {
   const harness = toastClient({ lang: "en" });
   const { client, document } = harness;
-  const order = ["signal", "quota-panel", "changes-panel", "diagnoses-panel", "account-panel"];
-  const tops = { "signal": 84, "quota-panel": 400, "changes-panel": 1400, "diagnoses-panel": 2200, "account-panel": 3500 };
+  const order = ["signal", "quota-panel", "changes-panel", "diagnoses-panel"];
+  const tops = { "signal": 84, "quota-panel": 400, "changes-panel": 1400, "diagnoses-panel": 2200 };
   const panels = {};
   for (const id of order) {
     panels[id] = new FakeNode(document, "section", id);
@@ -1717,11 +1736,8 @@ test("nav: active item follows the panel scrolled to, on desktop and mobile navs
     assert.equal(nav.rail.find((link) => link.getAttribute("href") === "#" + id).getAttribute("aria-current"), "location");
     assert.equal(nav.rail[0].getAttribute("aria-current"), null, "Signal is no longer current");
   }
-  // Account sits at the bottom and cannot reach the top line: the hash decides.
-  nav.scrollTo(99999, "#account-panel");
-  assert.deepEqual(nav.active(nav.rail), ["#account-panel"]);
-  assert.deepEqual(nav.active(nav.mob), [], "mobile nav has no account item; nothing else stays lit");
-  // Plain scrolling without a hash change still follows the view.
+  // Plain scrolling after a user gesture releases the pin the loop left behind.
+  nav.input("mousedown");
   nav.scrollTo(0);
   assert.deepEqual(nav.active(nav.rail), ["#signal"]);
   nav.scrollTo(1500);
@@ -1797,16 +1813,16 @@ test("nav: a target scrolled past yields to the next target on screen, not a sta
 
 test("nav: activating the current fragment re-pins its target", () => {
   const nav = navClient();
-  // Bottom of the page: Diagnoses is visible but below the selection line, and
-  // Account is the last visible target, so only the pin can keep Diagnoses lit.
+  // The pin is the only thing keeping a target lit when it cannot reach the line.
   nav.tops["diagnoses-panel"] = 2950;
-  nav.tops["account-panel"] = 3200;
   nav.scrollTo(99999, "#diagnoses-panel");
   assert.deepEqual(nav.active(nav.rail), ["#diagnoses-panel"]);
+  assert.equal(nav.client.navPin, "diagnoses-panel");
   nav.input("mousedown");
-  assert.deepEqual(nav.active(nav.rail), ["#account-panel"], "pointer press releases the pin");
+  assert.equal(nav.client.navPin, "", "pointer press releases the pin");
   nav.rail.find((link) => link.getAttribute("href") === "#diagnoses-panel").dispatch("click");
-  assert.deepEqual(nav.active(nav.rail), ["#diagnoses-panel"], "same-fragment activation pins the clicked target");
+  assert.equal(nav.client.navPin, "diagnoses-panel", "same-fragment activation pins the clicked target");
+  assert.deepEqual(nav.active(nav.rail), ["#diagnoses-panel"]);
   for (const fn of nav.listeners.scroll || []) fn({});
   assert.deepEqual(nav.active(nav.rail), ["#diagnoses-panel"], "a later scroll event keeps the new pin");
 });
