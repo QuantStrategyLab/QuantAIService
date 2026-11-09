@@ -1895,3 +1895,32 @@ test("401: refresh keeps the focused re-login link in place", async () => {
   assert.equal(ids["toast-text"].children[0], link, "locale changes update the anchor in place");
   assert.equal(link.textContent, LOCALES["zh-CN"].toast_session);
 });
+
+// The rail costs 76px and the page adds 48px of padding, so the single-row
+// header cannot fit at 768px. These assertions keep the narrow layout and the
+// intermediate two-row header in place without a browser in CI.
+test("layout: the narrow breakpoint drops the rail and wraps the header", async () => {
+  const { CSS } = await import("../src/ui/styles.mjs");
+  const narrow = CSS.match(/@media \(max-width:1000px\)\{[\s\S]*?\.rail\{display:none\}[\s\S]*?\.top\{height:auto;padding:14px 0 12px;flex-wrap:wrap;gap:10px\}/);
+  assert.ok(narrow, "the narrow block hides the rail and lets the header wrap");
+  assert.ok(!/@media \(max-width:[0-9]+px\)\{[^}]*\.rail\{display:block/.test(CSS));
+});
+
+test("layout: the intermediate breakpoint gives the title its own row", async () => {
+  const { CSS } = await import("../src/ui/styles.mjs");
+  const mid = CSS.match(/@media \(max-width:1080px\)\{([\s\S]*?\.top \.grow\{display:none\})/);
+  assert.ok(mid, "an intermediate breakpoint exists");
+  assert.match(mid[1], /\.top\{[^}]*flex-wrap:wrap/);
+  assert.match(mid[1], /\.top h1\{flex:1 1 100%\}/);
+  assert.match(mid[1], /\.top \.grow\{display:none\}/);
+});
+
+test("layout: header controls never wrap their own label", async () => {
+  const { CSS } = await import("../src/ui/styles.mjs");
+  const rule = (selector) => CSS.match(new RegExp(selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\{([^}]*)\\}"));
+  for (const selector of [".chip", ".seg button", ".user a"]) {
+    const found = rule(selector);
+    assert.ok(found, selector + " is styled");
+    assert.match(found[1], /white-space:nowrap/, selector + " keeps its label on one line");
+  }
+});
