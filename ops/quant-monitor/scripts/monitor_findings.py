@@ -52,12 +52,11 @@ def dispatch_findings(raw, *, dry_run=True, now=None):
 
 def main():
     import os
-    from google.cloud import storage
-    from monitor_cloud_state import CloudState
+    from monitor_azure_state import open_monitor_state
 
     try:
-        raw, _ = CloudState(storage.Client(), os.environ['MONITOR_CORE_GCS_URI'],
-                            state_name='strategy-findings.json').read()
+        raw, _ = open_monitor_state('MONITOR_CORE_AZURE_URL', 'MONITOR_CORE_GCS_URI',
+                                    state_name='strategy-findings.json').read()
         print(json.dumps(dispatch_findings(raw, dry_run=os.environ.get('ISSUE_DELIVERY_ENABLED') != 'true')))
         return 0
     except Exception:

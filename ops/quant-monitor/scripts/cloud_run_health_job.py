@@ -16,6 +16,8 @@ from pathlib import Path
 
 from monitor_cloud_state import CloudState, PROJECTS, StateUnavailable, pack, restore
 
+COMPLETED_CYCLE = Path("monitor/data/health/azure-completed-cycle.json")
+
 
 def paper_watchdog_errors(*, client=None, now=None):
     """Read four exact heartbeat keys; never list or read financial objects."""
@@ -57,7 +59,7 @@ def paper_watchdog_errors(*, client=None, now=None):
 
 
 def run_once(store, evaluate, *, mode='preview', execution_id='', refresh=None, publish=None,
-             website_publish=None):
+             website_publish=None, resume_committed=False):
     if mode not in {'preview', 'run'}:
         raise ValueError('monitor_mode_invalid')
     if mode == 'run' and not execution_id:
@@ -77,6 +79,18 @@ def run_once(store, evaluate, *, mode='preview', execution_id='', refresh=None, 
         with tempfile.TemporaryDirectory(prefix='qsl-health-') as directory:
             root = Path(directory)
             manifest = restore(raw, root)
+            completed_path = root / COMPLETED_CYCLE
+            if mode == 'run' and resume_committed and completed_path.exists():
+                completed = json.loads(completed_path.read_text())
+                if not isinstance(completed, dict) or completed.get('schema_version') != 'quant.monitor-completed-cycle.v1':
+                    raise StateUnavailable('monitor_completed_cycle_invalid')
+                if completed.get('execution_id') == execution_id:
+                    result = completed.get('result')
+                    if not isinstance(result, dict) or result.get('status') != 'evaluated':
+                        raise StateUnavailable('monitor_completed_cycle_invalid')
+                    effects_started = True
+                    store.release(claim_generation=claim_generation)
+                    return {**result, 'resumed_committed': True}
             # Preview has no claim, refresh, publication, notification, Issue or AI call.
             if mode == 'run' and refresh is not None:
                 refresh(root)
@@ -98,7 +112,8 @@ def run_once(store, evaluate, *, mode='preview', execution_id='', refresh=None, 
                     publish(root, claim_generation=claim_generation)
                 if website_publish is not None:
                     website_status = website_publish(root, checkpoint=checkpoint)
-                store.commit(pack(root), state_generation=generation, claim_generation=claim_generation)
+                if not resume_committed:
+                    store.commit(pack(root), state_generation=generation, claim_generation=claim_generation)
             website_reason = 'not_requested'
             website_http_status = None
             website_evidence = {}
@@ -127,13 +142,22 @@ def run_once(store, evaluate, *, mode='preview', execution_id='', refresh=None, 
                         website_reason = 'unknown'
                 except (OSError, ValueError, AttributeError):
                     website_reason = 'unknown'
-            return {'status': 'evaluated', 'mode': mode, 'healthy': result['healthy'],
+            summary = {'status': 'evaluated', 'mode': mode, 'healthy': result['healthy'],
                     'snapshot_count': result['snapshot_count'], 'data_status': result['data_status'],
                     'website_publication': website_status, 'website_publication_reason': website_reason,
                     'website_publication_http_status': website_http_status,
                     'website_publication_response_evidence': website_evidence,
                     'source_matches_runtime': manifest['source_revision'] == os.environ.get('MONITOR_SOURCE_REVISION'),
                     'qpk_matches_runtime': manifest['qpk_revision'] == os.environ.get('MONITOR_QPK_REVISION')}
+            if mode == 'run' and resume_committed:
+                completed_path.parent.mkdir(parents=True, exist_ok=True)
+                completed_path.write_text(json.dumps({
+                    'schema_version': 'quant.monitor-completed-cycle.v1',
+                    'execution_id': execution_id,
+                    'result': summary,
+                }))
+                store.commit(pack(root), state_generation=generation, claim_generation=claim_generation)
+            return summary
     except Exception:
         # Input/read failures before evaluation have no external effect to
         # replay. Release the exact claim so the next fresh input can recover.
@@ -194,12 +218,16 @@ def evaluate_workspace(root: Path, *, effects_enabled: bool):
                     child.unlink()
 
 
-def publish_projections(client, uri, root, *, claim_generation):
+def publish_projections(client, uri, root, *, claim_generation, azure_store=None):
     from google.api_core.exceptions import NotFound
     from monitor_diagnosis_state import observation_from_workspace
 
     payloads = {'diagnosis-observation.json': observation_from_workspace(root / 'monitor'),
                 'strategy-findings.json': (root / 'monitor/data/strategy-reviews/cloud-findings.json').read_bytes()}
+    if azure_store is not None:
+        for name, raw in payloads.items():
+            azure_store.write_projection(name, raw, claim_generation=claim_generation)
+        return
     for name, raw in payloads.items():
         state = CloudState(client, uri, state_name=name)
         blob = state.bucket.blob(state.prefix + '/' + name)
@@ -219,7 +247,8 @@ def publish_projections(client, uri, root, *, claim_generation):
 FAILURE_CODES = frozenset({
     'monitor_notification_binding_missing', 'monitor_inputs_stale_or_invalid', 'monitor_inputs_scope_invalid',
     'monitor_input_reader_unavailable',
-    'state_read_failed', 'claim_outcome_unknown', 'checkpoint_outcome_unknown', 'release_outcome_unknown',
+    'state_read_failed', 'azure_state_binding_invalid', 'azure_identity_unavailable',
+    'monitor_completed_cycle_invalid', 'projection_write_failed', 'claim_outcome_unknown', 'checkpoint_outcome_unknown', 'release_outcome_unknown',
     'state_write_too_large', 'workspace_invalid', 'workspace_link_not_portable', 'workspace_manifest_invalid',
     'workspace_member_not_allowed', 'workspace_too_large',
 })
@@ -240,11 +269,11 @@ def safe_failure(exc):
     return {'failure_type': kind, 'failure_code': 'unknown'}
 
 
-def refresh_cycle_inputs(input_store, root, *, mode):
+def refresh_cycle_inputs(input_store, root, *, mode, execution_id=None, source_kind='cloud_run'):
     from monitor_inputs import apply_inputs, mint_reader_token, run_adapter
     if mode == 'run' and os.environ.get('MONITOR_INPUT_REFRESH_IN_CYCLE') == 'true':
         raw_config = os.environ.pop('MONITOR_INPUT_READER_CONFIG_JSON', '')
-        required = ('CLOUD_RUN_EXECUTION',)
+        execution_id = execution_id or os.environ.get('CLOUD_RUN_EXECUTION')
         try:
             config = json.loads(raw_config)
         except (TypeError, ValueError):
@@ -252,7 +281,7 @@ def refresh_cycle_inputs(input_store, root, *, mode):
         fields = {'private_key', 'archive_uri', 'stream_id', 'account_scope_sha256', 'app_id', 'installation_id'}
         if (not isinstance(config, dict) or set(config) != fields
                 or any(not isinstance(config[k], str) or not config[k] for k in fields)
-                or any(not os.environ.get(name) for name in required) or not shutil.which('gh')):
+                or not execution_id or not shutil.which('gh')):
             raise StateUnavailable('monitor_input_reader_unavailable')
         token = mint_reader_token(config['app_id'], config['installation_id'], config['private_key'])
         values = {'GH_TOKEN': token, 'NO_COLOR': '1',
@@ -262,7 +291,7 @@ def refresh_cycle_inputs(input_store, root, *, mode):
         previous = {name: os.environ.get(name) for name in values}
         os.environ.update(values)
         try:
-            summary = run_adapter(input_store, execution_id=os.environ['CLOUD_RUN_EXECUTION'], source_kind='cloud_run')
+            summary = run_adapter(input_store, execution_id=execution_id, source_kind=source_kind)
             if isinstance(summary, dict):
                 readiness = summary.get('source_readiness')
                 counts = summary.get('source_counts')
@@ -290,11 +319,30 @@ def main():
     from google.cloud import storage
 
     try:
-        client = storage.Client()
-        uri = os.environ['MONITOR_STATE_GCS_URI']
-        store = CloudState(client, uri)
+        core_url = os.environ.get('MONITOR_CORE_AZURE_URL')
+        input_url = os.environ.get('MONITOR_INPUT_AZURE_URL')
+        azure = bool(core_url or input_url)
+        if azure:
+            from monitor_azure_state import AzureBlobState, CONTAINER, storage_token
+            if not core_url or not input_url or core_url == input_url:
+                raise StateUnavailable('azure_state_binding_invalid')
+            if not CONTAINER.fullmatch(core_url) or not CONTAINER.fullmatch(input_url):
+                raise StateUnavailable('azure_state_binding_invalid')
+            token = storage_token()
+            store = AzureBlobState(core_url, token)
+            inputs = AzureBlobState(input_url, token)
+            execution_id = os.environ.get('CONTAINER_APP_JOB_EXECUTION_NAME', '')
+            source_kind = 'azure_job'
+            client, uri = None, None
+        else:
+            client = storage.Client()
+            uri = os.environ['MONITOR_STATE_GCS_URI']
+            store = CloudState(client, uri)
+            execution_id = os.environ.get('CLOUD_RUN_EXECUTION', '')
+            source_kind = 'cloud_run'
         def refresh(root):
-            refresh_cycle_inputs(CloudState(client, os.environ['MONITOR_INPUT_GCS_URI']), root, mode=mode)
+            input_store = inputs if azure else CloudState(client, os.environ['MONITOR_INPUT_GCS_URI'])
+            refresh_cycle_inputs(input_store, root, mode=mode, execution_id=execution_id, source_kind=source_kind)
         def evaluate(root, *, effects_enabled):
             if not effects_enabled:
                 refresh(root)
@@ -309,9 +357,10 @@ def main():
                                           url=os.environ.get('STRATEGY_HEALTH_SYNC_URL', ''),
                                           secret_version=os.environ.get('STRATEGY_HEALTH_SYNC_SECRET_VERSION', ''))
 
-        result = run_once(store, evaluate, mode=mode, execution_id=os.environ.get('CLOUD_RUN_EXECUTION', ''),
-                          refresh=refresh, publish=lambda root, **kwargs: publish_projections(client, uri, root, **kwargs),
-                          website_publish=publish_website)
+        result = run_once(store, evaluate, mode=mode, execution_id=execution_id, refresh=refresh,
+                          publish=lambda root, **kwargs: publish_projections(
+                              client, uri, root, azure_store=store if azure else None, **kwargs),
+                          website_publish=publish_website, resume_committed=azure)
         if result['status'] == 'blocked':
             print(json.dumps({'component': 'strategy_health', 'severity': 'ERROR', **result}))
             return 1
