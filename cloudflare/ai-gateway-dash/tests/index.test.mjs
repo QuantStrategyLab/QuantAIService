@@ -84,7 +84,7 @@ import {
 } from "../src/ui/login.mjs";
 import { LOGIN_LOCALES } from "../src/ui/login-locales.mjs";
 import { dashboardHTML } from "../src/ui/dashboard.mjs";
-import { classifyProbe } from "../src/upstream.mjs";
+import { classifyProbe, probeUrl, readModel, LEGACY_ENDPOINT_BASE } from "../src/upstream.mjs";
 import {
   classifyLoginError,
   escapeHtml,
@@ -1281,9 +1281,13 @@ test("the probe table renders what the origin answered, and nothing else", () =>
   assert.match(text, /\/v1\/tasks/);
   assert.match(text, /401/);
   assert.match(text, /404/);
-  // The read model is stated as a reason, not rendered as a count.
-  assert.match(client.document.getElementById("read-model").textContent, /OAuth bearer/);
-  assert.doesNotMatch(client.document.getElementById("read-model").textContent, /\d/);
+  // The read model is stated as an observed reason, not rendered as a count,
+  // and never infers which credential the service would have accepted.
+  const note = client.document.getElementById("read-model").textContent;
+  assert.match(note, /rejected/);
+  assert.match(note, /no task counts/);
+  assert.doesNotMatch(note, /OAuth/i);
+  assert.doesNotMatch(note, /task counts?\s*:\s*\d+/);
 });
 
 test("embedded client scripts parse without export leakage", () => {
@@ -1478,7 +1482,7 @@ const STATUS_FIXTURE = {
     { id: "tasks", path: "/v1/tasks", auth: "none", resource: "task_api", verdict: "auth_required", http_status: 401, latency_ms: 120 },
     { id: "retired_health", path: "/v1/ai/health", auth: "dashboard", resource: "retired_v1_health", verdict: "not_found", http_status: 404, latency_ms: 90 },
   ],
-  read_model: { task_counts: false, reason_code: "oauth_bearer_required" },
+  read_model: { task_counts: false, reason_code: "read_credentials_rejected" },
 };
 function setFailures(client, failing) {
   client.state.status = failing.length
@@ -1960,7 +1964,7 @@ test("upstream status: reports each verdict and why task counts are absent", asy
   assert.equal(byId.tasks.http_status, 401);
   assert.equal(byId.oauth_metadata.verdict, "reachable");
   assert.equal(byId.retired_health.verdict, "not_found");
-  assert.deepEqual(body.read_model, { task_counts: false, reason_code: "oauth_bearer_required" });
+  assert.deepEqual(body.read_model, { task_counts: false, reason_code: "read_credentials_rejected" });
   // Credentialed probes carry the token; anonymous ones never do.
   assert.equal(seen.filter((call) => call.authorization === "Bearer dashboard-api-token").length, 2);
   // The payload names paths and codes, never the token or the origin host.
@@ -2042,4 +2046,68 @@ test("upstream status: an unreachable origin degrades every probe and says so", 
     assert.equal(probe.http_status, null, "no status is invented for a timeout");
   }
   assert.equal(body.read_model.reason_code, "origin_unreachable");
+});
+
+// --- Review findings on the upstream probe ---------------------------------
+
+test("probeUrl drops the legacy /v1/codex-audit endpoint base for every probe", () => {
+  assert.equal(LEGACY_ENDPOINT_BASE, "/v1/codex-audit");
+  const legacy = "https://gateway.example" + LEGACY_ENDPOINT_BASE + "/";
+  for (const path of ["/v1/tasks", "/v1/tasks/stats", "/mcp", "/.well-known/oauth-protected-resource", "/v1/ai/health"]) {
+    assert.equal(probeUrl(legacy, path), "https://gateway.example" + path, path);
+  }
+  // A real base path is still a prefix; only the legacy endpoint is dropped.
+  assert.equal(probeUrl("https://gateway.example/service/", "/v1/tasks"), "https://gateway.example/service/v1/tasks");
+  assert.throws(() => probeUrl("http://gateway.example", "/v1/tasks"), /origin_insecure/);
+});
+
+test("readModel never infers which credentials the service accepts", () => {
+  const probe = (id, verdict) => ({ id, verdict });
+  for (const status of [401, 403]) {
+    assert.equal(classifyProbe(status), "auth_required");
+    const model = readModel([
+      probe("tasks", "auth_required"),
+      probe("tasks_anonymous_stats", "auth_required"),
+      probe("tasks_dashboard_stats", "auth_required"),
+    ]);
+    assert.deepEqual(model, { task_counts: false, reason_code: "read_credentials_rejected" });
+  }
+  // A valid workload credential without tasks:list can produce exactly this
+  // pair of verdicts; the copy must not point the operator at OAuth.
+  for (const lang of ["en", "zh-CN"]) {
+    const copy = LOCALES[lang].rm_read_credentials_rejected;
+    assert.ok(copy, lang + " has an explanation");
+    assert.ok(!/oauth/i.test(copy), lang + " does not claim an OAuth-only service");
+  }
+  assert.equal(readModel([
+    probe("tasks_anonymous_stats", "reachable"),
+    probe("tasks_dashboard_stats", "auth_required"),
+  ]).reason_code, "dashboard_token_rejected");
+});
+
+test("upstream status: concurrent viewers share one in-flight probe batch", async (t) => {
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  let calls = 0;
+  const { env, cookie, gatewayCalls } = await authenticatedDashboard(t, async () => {
+    calls += 1;
+    await gate;
+    return new Response("", { status: 401 });
+  });
+  resetUpstreamStatusCache();
+  const reads = Array.from({ length: 10 }, () => worker.fetch(
+    new Request("https://dash.example/api/upstream-status", { headers: { Cookie: cookie } }),
+    env,
+  ).then((response) => response.json()));
+  // Let the first batch start before releasing it; every later read must join it.
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  release();
+  const bodies = await Promise.all(reads);
+  // With no in-flight sharing this is 60 calls: all ten requests see an empty
+  // cache while the first batch is blocked on the gate. The exact mix of
+  // in-flight joins and short-cache hits is scheduling-dependent, so only the
+  // upstream call count is asserted.
+  assert.equal(calls, 6, "one six-probe batch, not one per viewer");
+  assert.equal(gatewayCalls.length, 6);
+  for (const body of bodies) assert.equal(body.status, "ok");
 });

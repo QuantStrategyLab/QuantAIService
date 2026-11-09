@@ -13,8 +13,8 @@
 
   Two probes hit `/v1/tasks/stats`: one anonymous, one with the dashboard's
   static token. The pair is the evidence for `read_model.reason_code` — it shows
-  that the route exists but only accepts an OAuth bearer, which is the real
-  reason task counts are not on the page.
+  which requests the service denies. It does not establish which credentials or
+  scopes the service accepts; a rejected read is reported as a rejected read.
  */
 
 export const PROBE_TIMEOUT_MS = 4000;
@@ -42,6 +42,10 @@ const VERDICTS = new Set([
   "skipped",
 ]);
 
+const LEGACY_ENDPOINT_BASE = "/v1/codex-audit";
+
+export { LEGACY_ENDPOINT_BASE };
+
 function withoutTrailingSlash(path) {
   return path.replace(/\/+$/, "");
 }
@@ -59,7 +63,11 @@ export function probeUrl(rawOrigin, path) {
   }
   if (origin.protocol !== "https:") throw new Error("origin_insecure");
   const base = withoutTrailingSlash(origin.pathname);
-  origin.pathname = !base || base === "/" ? path : base + path;
+  // The legacy /v1/codex-audit base is an endpoint, not a URL prefix: the old
+  // proxy dropped it for /v1/ai/* reads. V2 task, MCP and metadata routes are
+  // origin-relative too, so apply the same normalization to every probe rather
+  // than measuring nonexistent nested paths.
+  origin.pathname = !base || base === "/" || base === LEGACY_ENDPOINT_BASE ? path : base + path;
   origin.search = "";
   origin.hash = "";
   return origin.toString();
@@ -93,10 +101,13 @@ export function readModel(probes) {
     case "unreachable":
       return { task_counts: false, reason_code: "origin_unreachable" };
     case "auth_required":
+      // 401/403 proves only that these two requests were denied. The service may
+      // accept other credentials (OAuth bearer, workload JWT) and may still be
+      // denying a valid one for a missing scope; we cannot tell which from here.
       return {
         task_counts: false,
         reason_code: anonymousProbe && anonymousProbe.verdict === "auth_required"
-          ? "oauth_bearer_required"
+          ? "read_credentials_rejected"
           : "dashboard_token_rejected",
       };
     default:

@@ -190,7 +190,7 @@ function renderReadModel(){
   clear(target);
   if(state.status.status!=="ok")return;
   var model=(state.status.data&&state.status.data.read_model)||{};
-  var known=["oauth_bearer_required","dashboard_token_rejected","dashboard_token_missing","stats_route_absent","origin_unreachable","not_probed","unexpected_status","origin_unavailable"];
+  var known=["read_credentials_rejected","dashboard_token_rejected","dashboard_token_missing","stats_route_absent","origin_unreachable","not_probed","unexpected_status","origin_unavailable"];
   var key=model.task_counts?"rm_ok":(known.indexOf(String(model.reason_code))>=0?"rm_"+model.reason_code:"rm_unknown");
   target.appendChild(el("p","note",t[key]||t.rm_unknown));
 }
