@@ -191,10 +191,12 @@ class CloudJobTests(unittest.TestCase):
             'TELEGRAM_TOKEN': 'synthetic',
             'GLOBAL_TELEGRAM_CHAT_ID': 'synthetic',
         }
-        with patch.dict(os.environ, env, clear=True), patch.object(
+        gcs = Mock()
+        google = {'google.cloud': types.SimpleNamespace(storage=types.SimpleNamespace(Client=gcs))}
+        with patch.dict(os.environ, env, clear=True), patch.dict(sys.modules, google), patch.object(
                 job, 'run_once', return_value={'status': 'evaluated', 'healthy': True,
                                                'website_publication': 'accepted'}) as cycle, patch.object(
-                job, 'refresh_cycle_inputs') as refresh, patch('google.cloud.storage.Client') as gcs:
+                job, 'refresh_cycle_inputs') as refresh:
             self.assertEqual(job.main(), 0)
             core = cycle.call_args.args[0]
             options = cycle.call_args.kwargs
