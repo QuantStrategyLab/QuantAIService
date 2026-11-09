@@ -2111,3 +2111,20 @@ test("upstream status: concurrent viewers share one in-flight probe batch", asyn
   assert.equal(gatewayCalls.length, 6);
   for (const body of bodies) assert.equal(body.status, "ok");
 });
+
+test("a denied probe never tells the operator which credential the service accepts", () => {
+  for (const lang of ["en", "zh-CN"]) {
+    const { client } = toastClient({ lang, extraIds: ["probe-table"] });
+    client.state.status = { status: "ok", data: structuredClone(STATUS_FIXTURE) };
+    client.renderProbes();
+    const text = client.document.getElementById("probe-table").textContent;
+    assert.ok(!/oauth/i.test(text), lang + " verdict copy does not claim OAuth-only access");
+    assert.ok(text.length > 0, lang + " still explains the denied read");
+  }
+  for (const lang of ["en", "zh-CN"]) {
+    for (const key of ["v_auth_required", "m_auth_required"]) {
+      assert.ok(LOCALES[lang][key], lang + " " + key + " exists");
+      assert.ok(!/oauth/i.test(LOCALES[lang][key]), lang + " " + key);
+    }
+  }
+});
