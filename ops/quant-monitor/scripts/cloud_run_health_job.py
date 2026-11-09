@@ -314,35 +314,46 @@ def refresh_cycle_inputs(input_store, root, *, mode, execution_id=None, source_k
     apply_inputs(root, raw)
 
 
+def cloud_binding(storage, mode):
+    """Compose the state, input and projection bindings for one cloud job."""
+    core_url = os.environ.get('MONITOR_CORE_AZURE_URL')
+    input_url = os.environ.get('MONITOR_INPUT_AZURE_URL')
+    azure = bool(core_url or input_url)
+    if azure:
+        from monitor_azure_state import AzureBlobState, CONTAINER, storage_token
+        if not core_url or not input_url or core_url == input_url:
+            raise StateUnavailable('azure_state_binding_invalid')
+        if not CONTAINER.fullmatch(core_url) or not CONTAINER.fullmatch(input_url):
+            raise StateUnavailable('azure_state_binding_invalid')
+        token = storage_token()
+        store = AzureBlobState(core_url, token)
+        inputs = AzureBlobState(input_url, token)
+        execution_id = os.environ.get('CONTAINER_APP_JOB_EXECUTION_NAME', '')
+        source_kind = 'azure_job'
+        client, uri = None, None
+    else:
+        client = storage.Client()
+        uri = os.environ['MONITOR_STATE_GCS_URI']
+        store = CloudState(client, uri)
+        execution_id = os.environ.get('CLOUD_RUN_EXECUTION', '')
+        source_kind = 'cloud_run'
+
+    def refresh(root):
+        input_store = inputs if azure else CloudState(client, os.environ['MONITOR_INPUT_GCS_URI'])
+        refresh_cycle_inputs(input_store, root, mode=mode, execution_id=execution_id, source_kind=source_kind)
+
+    def publish(root, **kwargs):
+        return publish_projections(client, uri, root, azure_store=store if azure else None, **kwargs)
+
+    return store, execution_id, refresh, publish, azure
+
+
 def main():
     mode = os.environ.get('MONITOR_MODE', 'preview')
     from google.cloud import storage
 
     try:
-        core_url = os.environ.get('MONITOR_CORE_AZURE_URL')
-        input_url = os.environ.get('MONITOR_INPUT_AZURE_URL')
-        azure = bool(core_url or input_url)
-        if azure:
-            from monitor_azure_state import AzureBlobState, CONTAINER, storage_token
-            if not core_url or not input_url or core_url == input_url:
-                raise StateUnavailable('azure_state_binding_invalid')
-            if not CONTAINER.fullmatch(core_url) or not CONTAINER.fullmatch(input_url):
-                raise StateUnavailable('azure_state_binding_invalid')
-            token = storage_token()
-            store = AzureBlobState(core_url, token)
-            inputs = AzureBlobState(input_url, token)
-            execution_id = os.environ.get('CONTAINER_APP_JOB_EXECUTION_NAME', '')
-            source_kind = 'azure_job'
-            client, uri = None, None
-        else:
-            client = storage.Client()
-            uri = os.environ['MONITOR_STATE_GCS_URI']
-            store = CloudState(client, uri)
-            execution_id = os.environ.get('CLOUD_RUN_EXECUTION', '')
-            source_kind = 'cloud_run'
-        def refresh(root):
-            input_store = inputs if azure else CloudState(client, os.environ['MONITOR_INPUT_GCS_URI'])
-            refresh_cycle_inputs(input_store, root, mode=mode, execution_id=execution_id, source_kind=source_kind)
+        store, execution_id, refresh, publish, resume_committed = cloud_binding(storage, mode)
         def evaluate(root, *, effects_enabled):
             if not effects_enabled:
                 refresh(root)
@@ -358,9 +369,7 @@ def main():
                                           secret_version=os.environ.get('STRATEGY_HEALTH_SYNC_SECRET_VERSION', ''))
 
         result = run_once(store, evaluate, mode=mode, execution_id=execution_id, refresh=refresh,
-                          publish=lambda root, **kwargs: publish_projections(
-                              client, uri, root, azure_store=store if azure else None, **kwargs),
-                          website_publish=publish_website, resume_committed=azure)
+                          publish=publish, website_publish=publish_website, resume_committed=resume_committed)
         if result['status'] == 'blocked':
             print(json.dumps({'component': 'strategy_health', 'severity': 'ERROR', **result}))
             return 1
