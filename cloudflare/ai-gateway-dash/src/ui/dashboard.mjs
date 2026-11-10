@@ -149,6 +149,9 @@ function renderStatus(){
     textNode.textContent=t["s_state_"+overall]||t.s_state_unknown;
     return;
   }
+  // The dashboard's own expired session never reached the upstream: report the
+  // session, not a probe failure, so the two causes stay separate.
+  if(state.status.sessionExpired){pulse.className="lamp st-warn";textNode.textContent=t.s_state_session;return;}
   pulse.className="lamp "+(state.status.status==="error"?"st-bad":"st-unk");
   textNode.textContent=state.status.status==="error"?t.s_state_error:t.loading;
 }
@@ -169,6 +172,10 @@ function probeRow(probe){
 function renderProbes(){
   var target=qs("probe-table");if(!target)return;
   if(state.status.status==="loading"){clear(target);target.appendChild(el("div","loading",t.loading));return;}
+  if(state.status.status==="error"&&state.status.sessionExpired){
+    panelError("probe-table",t.s_session_title,t.s_session_hint,"");
+    return;
+  }
   if(state.status.status==="error"){
     panelError("probe-table",t.s_failed,t.s_failed_hint,state.status.code);
     return;

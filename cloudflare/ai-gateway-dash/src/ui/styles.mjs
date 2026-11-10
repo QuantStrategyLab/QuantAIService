@@ -274,4 +274,14 @@ td.n,th.n{text-align:right;font-family:var(--f-mono);font-size:12px}
   #probe-table th:nth-child(4),#probe-table td:nth-child(4){width:11%}
   #probe-table th:nth-child(5),#probe-table td:nth-child(5){width:11%}
 }
+/* Phone width: the verdict chip keeps its label on one line elsewhere, but in
+   the probe table that pushed the HTTP and latency columns out of view at
+   390px. Let the chip wrap here so all five columns stay on screen. */
+@media (max-width:560px){
+  #probe-table .chip{white-space:normal;align-items:flex-start;line-height:1.3;padding:5px 7px;gap:6px}
+  #probe-table .chip .lamp{flex:none;margin-top:3px}
+  #probe-table th,#probe-table td{padding:8px 5px}
+  #probe-table th{letter-spacing:.04em}
+  #probe-table td:nth-child(1){font-size:11.5px}
+}
 `;
