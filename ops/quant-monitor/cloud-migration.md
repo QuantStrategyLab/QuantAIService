@@ -185,3 +185,12 @@ execution service or its fixed IP.
 Google documentation: [scheduled Jobs](https://docs.cloud.google.com/run/docs/execute/jobs-on-schedule),
 [ephemeral container filesystem](https://docs.cloud.google.com/run/docs/container-contract#file_system),
 [conditional storage copy](https://docs.cloud.google.com/sdk/gcloud/reference/storage/cp).
+
+## Shared image release
+
+Run `Azure monitor release` manually from the default branch. Select the
+protected target and start with `verify`. It reads the expected fixed image
+through the target's short-lived release identity. Keep the runtime identity
+and schedule separate. Use an isolated target to exercise image updates.
+
+[Organization release workflow](https://github.com/QuantStrategyLab/.github/blob/main/docs/deployment-workflows.md)
