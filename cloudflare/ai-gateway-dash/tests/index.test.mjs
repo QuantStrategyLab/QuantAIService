@@ -1621,8 +1621,56 @@ test("an expired session keeps the re-login notice and adds no cause line", () =
   client.state.status = { status: "error", error: "unauthorized", code: "", httpStatus: 401, sessionExpired: true };
   client.renderProbes();
   const text = client.document.getElementById("probe-table").textContent;
-  assert.match(text, /Probe did not complete/);
+  assert.match(text, /No probe was sent/);
   assert.doesNotMatch(text, /http_401/);
+});
+
+// t1599: the dashboard's own expired session must not read as an upstream
+// failure. The panel and status pill name the session; upstream failures keep
+// the probe-failure copy and their machine code.
+test("t1599: own-session 401 panel and status never blame the upstream, in both languages", () => {
+  for (const lang of ["en", "zh-CN"]) {
+    const L = LOCALES[lang];
+    const { client } = toastClient({ lang, extraIds: ["probe-table", "pulse", "status-text"] });
+    client.state.status = { status: "error", error: "unauthorized", code: "", httpStatus: 401, sessionExpired: true };
+    client.renderProbes();
+    client.renderStatus();
+    const panel = client.document.getElementById("probe-table").textContent;
+    assert.ok(panel.includes(L.s_session_title), lang + ": session title shown");
+    assert.ok(panel.includes(L.s_session_hint), lang + ": session hint shown");
+    assert.ok(!panel.includes(L.s_failed), lang + ": no probe-failure title");
+    assert.ok(!panel.includes(L.s_failed_hint), lang + ": no upstream-failure hint");
+    assert.ok(!panel.includes(L.s_error_code), lang + ": no cause line");
+    assert.equal(client.document.getElementById("status-text").textContent, L.s_state_session);
+    assert.match(client.document.getElementById("pulse").className, /st-warn/);
+  }
+});
+
+test("t1599: an upstream failure keeps the probe-failure copy, not the session copy", () => {
+  for (const lang of ["en", "zh-CN"]) {
+    const L = LOCALES[lang];
+    const { client } = toastClient({ lang, extraIds: ["probe-table", "pulse", "status-text"] });
+    client.state.status = { status: "error", error: "status: 502", code: "origin_not_configured", httpStatus: 502, sessionExpired: false };
+    client.renderProbes();
+    client.renderStatus();
+    const panel = client.document.getElementById("probe-table").textContent;
+    assert.ok(panel.includes(L.s_failed));
+    assert.ok(panel.includes("origin_not_configured"));
+    assert.ok(!panel.includes(L.s_session_title));
+    assert.equal(client.document.getElementById("status-text").textContent, L.s_state_error);
+    assert.match(client.document.getElementById("pulse").className, /st-bad/);
+  }
+});
+
+test("t1599: a 401 read through loadAll renders the session panel, an origin 401 verdict does not", async () => {
+  const { client } = toastClient({ lang: "en", extraIds: ["probe-table", "pulse", "status-text"], fetchImpl: SESSION_401 });
+  await client.loadAll();
+  assert.match(client.document.getElementById("probe-table").textContent, /No probe was sent/);
+  const ok = toastClient({ lang: "en", extraIds: ["probe-table", "pulse", "status-text"], fetchImpl: () => Promise.resolve(jsonResponse(200, STATUS_FIXTURE)) });
+  await ok.client.loadAll();
+  const text = ok.client.document.getElementById("probe-table").textContent;
+  assert.match(text, /401/, "the origin's own 401 stays a probe row");
+  assert.doesNotMatch(text, /No probe was sent/);
 });
 
 function jsonResponse(status, body) {
@@ -1916,6 +1964,17 @@ test("layout: the probe table wraps instead of scrolling sideways at 768px", asy
   assert.match(narrow, /#probe-table th,#probe-table td\{padding:9px 7px\}/);
   assert.match(narrow, /#probe-table td\{white-space:normal\}/);
   assert.match(narrow, /#probe-table td:nth-child\(4\),#probe-table td:nth-child\(5\)\{white-space:nowrap\}/);
+});
+
+test("t1599: at phone width the probe chip wraps so HTTP and latency stay on screen", async () => {
+  const { CSS } = await import("../src/ui/styles.mjs");
+  const at = CSS.indexOf("@media (max-width:560px)");
+  assert.ok(at > CSS.indexOf("@media (max-width:1000px)"), "phone block follows the 1000px block");
+  const phone = CSS.slice(at);
+  assert.match(phone, /#probe-table \.chip\{[^}]*white-space:normal/);
+  assert.match(phone, /#probe-table \.chip \.lamp\{[^}]*flex:none/);
+  // The global chip rule elsewhere keeps its one-line label.
+  assert.match(CSS, /(^|\n)\.chip\{[^}]*white-space:nowrap/);
 });
 
 // --- Upstream status endpoint (GET /api/upstream-status) --------------------
