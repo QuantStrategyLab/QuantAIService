@@ -39,10 +39,10 @@ policy, `scenario` / `complexity` / `reasoning_effort` remain rejected.
 
 | Scenario | Category | Mode | Ordered providers | Matching hints (examples) |
 | --- | --- | --- | --- | --- |
-| `pr_code_review` | quant_review | agent | dot → muse → grokbot | pull-request, code-review, architecture-audit |
-| `strategy_research_summary` | quant_research | agent | dot → grokbot | research-summary, strategy-brief, portfolio-note |
-| `reconciliation_anomaly` | quant_ops | agent | dot → grokbot | recon-diff, ops-anomaly, ledger-mismatch |
-| `signal_context` | quant_signals | agent | dot | signal-context, feature-note |
+| `pr_code_review` | quant_review | agent | muse → grokbot → dot | pull-request, code-review, architecture-audit |
+| `strategy_research_summary` | quant_research | agent | muse → grokbot → dot | research-summary, strategy-brief, portfolio-note |
+| `reconciliation_anomaly` | quant_ops | agent | muse → grokbot → dot | recon-diff, ops-anomaly, ledger-mismatch |
+| `signal_context` | quant_signals | agent | muse → grokbot → dot | signal-context, feature-note |
 | `quick_notification` | quant_notify | api | gemini | short-alert, status-ping |
 
 The example explicitly sets `matching.default_complexity` to `complex` for
@@ -53,9 +53,11 @@ category chain; an explicit `null` is invalid. Image / size floors use
 `matching.min_with_image`, `matching.size_thresholds` and global `heuristics` with raise-only semantics from the shared contract.
 
 Agent and API modes stay separate in the example preferences: `quick_notification`
-stays gemini-only (API). `muse` appears only on the long code-review scenario
-between `dot` and `grokbot`; while the Muse scaffold remains unavailable it is
-always skipped at readiness.
+stays gemini-only (API). Agent scenarios prefer `muse → grokbot → dot` so Muse
+(free-quota durable path) leads once ready; paid Grokbot/Dot remain interim
+fallbacks and are skipped when unsubscribed. `claudeduet` is never listed. While
+the Muse scaffold remains unavailable it is always skipped at readiness — do not
+cancel both paid agents until Muse readiness is live.
 
 ## Complexity tier table
 

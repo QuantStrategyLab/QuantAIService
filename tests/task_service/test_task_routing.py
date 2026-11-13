@@ -60,7 +60,7 @@ class TaskRoutingDataTests(unittest.TestCase):
         review = effective_route(self.routing, 'pr_code_review')
         self.assertEqual(review['category'], 'quant_review')
         self.assertEqual(review['mode'], 'agent')
-        self.assertEqual(review['providers'], ['dot', 'muse', 'grokbot'])
+        self.assertEqual(review['providers'], ['muse', 'grokbot', 'dot'])
         self.assertEqual(review['tier'], 'complex')
         self.assertEqual(review['selections']['dot']['model'], 'configured-dot-strong')
         self.assertEqual(review['selections']['dot']['reasoning_effort'], 'high')

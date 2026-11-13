@@ -36,10 +36,10 @@ fail-closed provider 选择由 Cloudflare task-service Worker
 
 | 场景 | 类别 | Mode | 有序 providers | 匹配提示（示例） |
 | --- | --- | --- | --- | --- |
-| `pr_code_review` | quant_review | agent | dot → muse → grokbot | pull-request, code-review, architecture-audit |
-| `strategy_research_summary` | quant_research | agent | dot → grokbot | research-summary, strategy-brief, portfolio-note |
-| `reconciliation_anomaly` | quant_ops | agent | dot → grokbot | recon-diff, ops-anomaly, ledger-mismatch |
-| `signal_context` | quant_signals | agent | dot | signal-context, feature-note |
+| `pr_code_review` | quant_review | agent | muse → grokbot → dot | pull-request, code-review, architecture-audit |
+| `strategy_research_summary` | quant_research | agent | muse → grokbot → dot | research-summary, strategy-brief, portfolio-note |
+| `reconciliation_anomaly` | quant_ops | agent | muse → grokbot → dot | recon-diff, ops-anomaly, ledger-mismatch |
+| `signal_context` | quant_signals | agent | muse → grokbot → dot | signal-context, feature-note |
 | `quick_notification` | quant_notify | api | gemini | short-alert, status-ping |
 
 示例显式设置 `matching.default_complexity`：`pr_code_review` 和
@@ -50,8 +50,9 @@ fail-closed provider 选择由 Cloudflare task-service Worker
 共享契约中的只升不降。
 
 示例偏好保持 agent 与 api 分离：`quick_notification` 仍仅走 gemini（API）。
-`muse` 只出现在长代码审查场景，排在 `dot` 与 `grokbot` 之间；Muse 仍为占位时
-就绪检查一律跳过。
+Agent 场景统一 `muse → grokbot → dot`：Muse 接上后作为有持续免费额度的主路；
+付费 Grokbot / Dot 作过渡后备，退订即跳过。列表不放 `claudeduet`。Muse 占位未
+就绪时仍跳过——**两边付费 agent 都停之前必须先让 Muse 就绪**，否则场景提交闭包拒绝。
 
 ## 复杂度档位表
 

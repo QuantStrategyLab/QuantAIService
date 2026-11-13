@@ -121,7 +121,7 @@
           "pr_code_review": {
             "category": "quant_review",
             "mode": "agent",
-            "providers": ["dot", "muse", "grokbot"],
+            "providers": ["muse", "grokbot", "dot"],
             "matching": {
               "hints": ["pull-request", "code-review", "architecture-audit"],
               "default_complexity": "complex",
@@ -151,7 +151,7 @@
           "strategy_research_summary": {
             "category": "quant_research",
             "mode": "agent",
-            "providers": ["dot", "grokbot"],
+            "providers": ["muse", "grokbot", "dot"],
             "matching": {
               "hints": ["research-summary", "strategy-brief", "portfolio-note"],
               "default_complexity": "standard"
@@ -160,7 +160,7 @@
           "reconciliation_anomaly": {
             "category": "quant_ops",
             "mode": "agent",
-            "providers": ["dot", "grokbot"],
+            "providers": ["muse", "grokbot", "dot"],
             "matching": {
               "hints": ["recon-diff", "ops-anomaly", "ledger-mismatch"],
               "default_complexity": "complex",
@@ -170,7 +170,7 @@
           "signal_context": {
             "category": "quant_signals",
             "mode": "agent",
-            "providers": ["dot"],
+            "providers": ["muse", "grokbot", "dot"],
             "matching": {
               "hints": ["signal-context", "feature-note"],
               "default_complexity": "standard"
