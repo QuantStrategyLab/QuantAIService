@@ -126,7 +126,8 @@ export function resolveComplexity(request,scenarioId,routing={}){
   const matching=scenario.matching??{};
   const heuristics=routing.heuristics??{...DEFAULT_HEURISTICS};
   const materials=Array.isArray(request.materials)?request.materials:[];
-  const size=JSON.stringify({objective:request.objective??'',materials}).length;
+  // Size floors are UTF-8 bytes (same unit as the Python material_bytes helper).
+  const size=new TextEncoder().encode(JSON.stringify({objective:request.objective??'',materials})).length;
   const hasImage=materials.some(item=>object(item)&&(item.type==='image'||Array.isArray(item.images)||
     (typeof item.mime_type==='string'&&item.mime_type.startsWith('image/'))));
   const thresholds=matching.size_thresholds??{};

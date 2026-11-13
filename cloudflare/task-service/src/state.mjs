@@ -211,13 +211,23 @@ export class TaskStore extends DurableObject {
           project: owner,
           providerReady: (name) => this.#providerReady(name, owner, hasDotSubscription),
           entryReady: (name, entry) => {
-            if (request.mode !== 'api') return [true, 'ready'];
-            try {
-              apiConfiguration(this.env, name, {...request, model: entry.model});
-              return [true, 'ready'];
-            } catch {
-              return [false, 'api_model_mismatch'];
+            if (request.mode === 'api') {
+              try {
+                apiConfiguration(this.env, name, {...request, model: entry.model});
+                return [true, 'ready'];
+              } catch {
+                return [false, 'api_model_mismatch'];
+              }
             }
+            if (request.mode === 'agent' && name !== 'dot') {
+              try {
+                nativeConfiguration(this.env, name);
+                return [true, 'ready'];
+              } catch {
+                return [false, 'native_not_executable'];
+              }
+            }
+            return [true, 'ready'];
           },
         });
       } catch (e) {
