@@ -28,7 +28,7 @@ def environment():
             "CODEX_AUDIT_SERVICE_URL": "https://audit.invalid",
             "CODEX_AUDIT_SERVICE_AUDIENCE": "wrong-override-must-be-ignored",
             "CODEX_AUDIT_SERVICE_TOKEN": "synthetic-static-must-never-be-used",
-            # Legacy Codex CLI path is opt-in; production defaults to native agent/api.
+            # Emergency opt-in so legacy-path unit tests can still create new audit jobs.
             "AI_SERVICE_DIAGNOSIS_LEGACY_CODEX": "true"}
 
 

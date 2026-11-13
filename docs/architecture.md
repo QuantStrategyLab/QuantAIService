@@ -189,20 +189,23 @@ on port 8797 by default. It is deployed behind nginx on a VPS with:
 
 ## Native operational diagnosis
 
-The Actions diagnostic caller uses the shared AI Service contract only:
-`mode=agent` (Dot / Grokbot / Muse) or `mode=api` (chatgpt-plan / gemini).
-Set `AI_SERVICE_DIAGNOSIS_READY=true` (or provide `AI_SERVICE_URL` plus
-`AI_SERVICE_DIAGNOSIS_MODEL`) with the admitted origin, `/mcp` audience, and
-model/profile through repository variables. It submits only the existing
-bounded incident classification and consumes advisory JSON; it cannot run the
-monitor, repair, publish or place orders. The result records
+The Actions diagnostic caller submits through the shared AI Service `/v1/tasks`
+contract as `mode=agent` with an admitted Dot model from
+`AI_SERVICE_DIAGNOSIS_MODEL` (and optional `AI_SERVICE_DIAGNOSIS_PROFILE`).
+Set `AI_SERVICE_DIAGNOSIS_READY=true`, or provide `AI_SERVICE_URL` plus that
+model, together with the exact `/mcp` audience. The shared service may admit
+other agent or API providers for other callers; this diagnostic caller does not
+reconfigure mode or provider itself. It submits only the existing bounded
+incident classification and consumes advisory JSON; it cannot run the monitor,
+repair, publish or place orders. The result records
 `model_verification=unavailable` for Dot.
 
-Codex CLI / Cursor CLI audit-bridge jobs are not the default path. Without a
-native configuration the caller returns `skipped` / `cli_diagnosis_retired`.
-Set `AI_SERVICE_DIAGNOSIS_LEGACY_CODEX=true` only to drain already-accepted
-legacy jobs on their original route; keep that read endpoint until the ledger
-is empty.
+Codex CLI audit-bridge jobs are not the default path. Without a native
+configuration the caller returns `skipped` / `cli_diagnosis_retired`.
+Already-accepted legacy jobs are always recovered on their original route;
+keep that read endpoint until the ledger is empty.
+`AI_SERVICE_DIAGNOSIS_LEGACY_CODEX=true` is an emergency opt-in that also
+allows *new* legacy audit-bridge submissions—not a drain-only switch.
 
 Each intent is checkpointed before its single POST. Accepted tasks retain their
 ID, service digest, original request digest and polling deadline. An expired

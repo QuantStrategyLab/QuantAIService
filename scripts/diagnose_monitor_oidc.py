@@ -3,11 +3,16 @@
 
 Consumes saved observations, never runs the monitor, publishes, or repairs.
 
-Current execution model is the shared AI Service contract only:
-``mode=agent`` (Dot / Grokbot / …) or ``mode=api`` (chatgpt-plan / gemini).
-Codex CLI / Cursor CLI audit-bridge jobs are not the default path; they remain
-only behind ``AI_SERVICE_DIAGNOSIS_LEGACY_CODEX=true`` so accepted legacy jobs
-can drain. Prefer ``AI_SERVICE_DIAGNOSIS_READY=true`` with ``AI_SERVICE_URL``.
+Default path: native ``/v1/tasks`` with ``mode=agent`` and an admitted Dot
+model from ``AI_SERVICE_DIAGNOSIS_MODEL`` (see ``native_diagnosis``). The shared
+service also admits other agent/API providers for other callers; this diagnostic
+caller does not switch modes or providers itself.
+
+Codex CLI audit-bridge jobs are retired as the default. Already-accepted legacy
+jobs are always recovered on their original route. Set
+``AI_SERVICE_DIAGNOSIS_LEGACY_CODEX=true`` only as an emergency opt-in that also
+allows *new* legacy submissions. Prefer ``AI_SERVICE_DIAGNOSIS_READY=true`` with
+``AI_SERVICE_URL``.
 
 See ../AGENTS.md for operating and authorization boundaries.
 """
@@ -61,7 +66,11 @@ def native_diagnosis_ready(env) -> bool:
 
 
 def legacy_codex_diagnosis_allowed(env) -> bool:
-    """Opt-in only: Codex CLI audit-bridge path is retired as the default."""
+    """Emergency opt-in for *new* Codex audit-bridge submissions.
+
+    Pending legacy jobs drain without this flag. Without the flag and without a
+    pending legacy job, diagnose() returns ``cli_diagnosis_retired``.
+    """
     return env.get("AI_SERVICE_DIAGNOSIS_LEGACY_CODEX") == "true"
 
 
