@@ -8,12 +8,12 @@ each project policy:
 
 `projects[<id>].routing` / Worker `PROJECT_POLICIES[project].routing`
 
-Python in this repository only validates the document and inherits category
-defaults. It does not hard-code business scenario ids or perform live
-fail-closed provider selection; that remains in the private routing service.
-Routing only takes effect after the QAS runtime supports the routing contract.
-The currently bundled QAS runtime ignores policy routing data and rejects
-`scenario` task fields; validating this registry does not enable routing.
+Python in this repository validates the document and inherits category
+defaults. It does not hard-code business scenario ids. Live fail-closed
+provider selection runs in the Cloudflare task-service Worker
+(`cloudflare/task-service/src/routing.mjs`) when a project policy includes
+`routing` and the submit body carries `scenario`. Without `routing` on the
+policy, `scenario` / `complexity` / `reasoning_effort` remain rejected.
 
 ## Files
 
@@ -22,6 +22,7 @@ The currently bundled QAS runtime ignores policy routing data and rejects
 | [`config/quant.example.json`](../config/quant.example.json) | Example project policy with `routing` |
 | [`src/quant_ai_service/task_routing.v1.schema.json`](../src/quant_ai_service/task_routing.v1.schema.json) | Compatible `task.routing.v1` schema with stricter QAS checks |
 | [`src/quant_ai_service/task_routing.py`](../src/quant_ai_service/task_routing.py) | Offline load / referential checks / complexity helper |
+| [`cloudflare/task-service/src/routing.mjs`](../cloudflare/task-service/src/routing.mjs) | Worker runtime: validate registry, resolve complexity, decide provider |
 
 ## Category tree
 
@@ -93,8 +94,8 @@ No Python scenario table update is required.
 
 ## Readiness and operations
 
-After the QAS runtime supports the routing contract, unready providers are
-skipped; if none remain, submit is denied. This runtime sync is a separate change. In the
-example, `gemini` stays `enabled: false` /
-`api_usage_authorized: false` until separately authorized. This change does not
-deploy services, rotate secrets or enable providers.
+Unready providers are skipped at submit; if none remain, submit is denied.
+Dot readiness still requires a live event subscription. In the example,
+`gemini` stays `enabled: false` / `api_usage_authorized: false` until
+separately authorized. Shipping this runtime does not deploy services, rotate
+secrets or enable providers.

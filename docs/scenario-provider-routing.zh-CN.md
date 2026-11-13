@@ -6,11 +6,11 @@ QuantAIService 使用与私有路由服务共享的 `task.routing.v1` 注册契�
 
 `projects[<id>].routing` / Worker `PROJECT_POLICIES[project].routing`
 
-本仓库 Python 只做文档校验与类别默认值继承，不硬编码业务场景 id，也不做线上
-fail-closed provider 选择；后者由私有路由服务负责。
-只有 QAS 运行时支持路由契约后，路由配置才会生效。目前随 QAS 提供的运行时
-忽略策略中的 routing 数据，并拒绝任务中的 `scenario` 字段；配置校验通过不表示
-路由已启用。
+本仓库 Python 做文档校验与类别默认值继承，不硬编码业务场景 id。线上
+fail-closed provider 选择由 Cloudflare task-service Worker
+（`cloudflare/task-service/src/routing.mjs`）在项目策略含 `routing` 且提交体
+带 `scenario` 时执行。策略无 `routing` 时仍拒绝 `scenario` /
+`complexity` / `reasoning_effort`。
 
 ## 文件
 
@@ -19,6 +19,7 @@ fail-closed provider 选择；后者由私有路由服务负责。
 | [`config/quant.example.json`](../config/quant.example.json) | 含 `routing` 的示例项目策略 |
 | [`src/quant_ai_service/task_routing.v1.schema.json`](../src/quant_ai_service/task_routing.v1.schema.json) | 兼容路由契约并保留 QAS 检查的 `task.routing.v1` schema |
 | [`src/quant_ai_service/task_routing.py`](../src/quant_ai_service/task_routing.py) | 离线加载 / 引用检查 / 复杂度辅助 |
+| [`cloudflare/task-service/src/routing.mjs`](../cloudflare/task-service/src/routing.mjs) | Worker 运行时：校验注册表、解析复杂度、选定 provider |
 
 ## 类别树
 
@@ -86,7 +87,7 @@ provider 在各档位的完整配置以及项目 provider/model 白名单。兼�
 
 ## 就绪与运维
 
-QAS 运行时支持路由契约后，会跳过未就绪 provider；若列表耗尽则拒绝提交。
-运行时同步属于独立变更。示例中
-`gemini` 保持 `enabled: false` / `api_usage_authorized: false`，直至另行授权。
-本变更不部署服务、不轮换密钥、不启用 provider。
+提交时跳过未就绪 provider；若列表耗尽则拒绝提交。Dot 就绪仍要求有效的
+事件订阅。示例中 `gemini` 保持 `enabled: false` /
+`api_usage_authorized: false`，直至另行授权。合入本运行时不等于部署服务、
+轮换密钥或启用 provider。
