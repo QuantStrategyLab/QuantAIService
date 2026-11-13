@@ -133,7 +133,7 @@ export class TaskStore extends DurableObject {
   #policy(owner) {
     const policy = Object.hasOwn(this.policies, owner) ? this.policies[owner] : null;
     if (!policy) denied("project is not admitted");
-    if (policy.routing) validateRoutingConfig(policy.routing, policy.models);
+    if (policy.routing) validateRoutingConfig(policy.routing, policy.models, policy.providers);
     return policy;
   }
 

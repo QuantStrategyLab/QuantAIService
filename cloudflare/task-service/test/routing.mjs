@@ -104,6 +104,19 @@ test('validateRoutingConfig rejects inverted effective size thresholds',()=>{
   assert.throws(()=>validateRoutingConfig(bad),/effective size_thresholds must keep standard < complex/);
 });
 
+test('validateRoutingConfig requires complete tier coverage and project provider admission',()=>{
+  const incomplete=structuredClone(ROUTING);
+  delete incomplete.complexity_tiers.complex.dot;
+  assert.throws(()=>validateRoutingConfig(incomplete),/scenario tier mapping is incomplete/);
+  const models=Object.fromEntries(Object.keys(TIERS.simple).map(provider=>
+    [provider,[...new Set(Object.values(TIERS).map(tier=>tier[provider].model))]]));
+  assert.throws(
+    ()=>validateRoutingConfig(ROUTING,models,{agent:'dot'}),
+    /scenario provider is not admitted/,
+  );
+  validateRoutingConfig(ROUTING,models,{agent:'dot','agent:support':'grokbot',api:'gemini-text'});
+});
+
 test('decideRoute checks entryReady before rejecting a requested model',()=>{
   assert.throws(()=>decideRoute(ROUTING,{
     mode:'api',scenario:'example_short_api',objective:'ping',materials:[],output_schema:{},

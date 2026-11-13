@@ -66,7 +66,7 @@ function validateHeuristics(heuristics){
   return merged;
 }
 
-export function validateRoutingConfig(routing,models){
+export function validateRoutingConfig(routing,models,providers){
   if(routing==null)return {};
   if(!object(routing))fail('routing must be an object');
   if(Object.keys(routing).some(k=>!['schema_version','categories','scenarios','complexity_tiers','heuristics'].includes(k)))fail('unknown routing fields');
@@ -103,13 +103,21 @@ export function validateRoutingConfig(routing,models){
     for(const [tierName,mapping] of Object.entries(overrides))validateTier(tierName,mapping);
   }
   for(const [tierName,mapping] of Object.entries(tiers))validateTier(tierName,mapping);
-  if(models!==undefined){
+  for(const scenario of Object.values(scenarios)){
+    for(const [tier,mapping] of Object.entries(tiers)){
+      for(const provider of scenario.providers){
+        const entry=scenario.tier_overrides?.[tier]?.[provider]??mapping[provider];
+        if(!entry)fail('scenario tier mapping is incomplete');
+        if(models!==undefined&&!models[provider]?.includes(entry.model))fail('scenario tier model is not admitted');
+      }
+    }
+  }
+  if(providers!==undefined){
+    if(!object(providers))fail('project providers must be an object');
+    const admitted=new Set(Object.values(providers));
     for(const scenario of Object.values(scenarios)){
-      for(const [tier,mapping] of Object.entries(tiers)){
-        for(const provider of scenario.providers){
-          const entry=scenario.tier_overrides?.[tier]?.[provider]??mapping[provider];
-          if(entry&&!models[provider]?.includes(entry.model))fail('scenario tier model is not admitted');
-        }
+      for(const provider of scenario.providers){
+        if(!admitted.has(provider))fail('scenario provider is not admitted');
       }
     }
   }
