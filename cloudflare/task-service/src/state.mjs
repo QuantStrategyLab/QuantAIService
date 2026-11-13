@@ -6,7 +6,8 @@ import {callbackHost,classifyDelivery,emitEventLog,shortSubscriptionId} from './
 import {apiConfiguration,executeAPI} from './api.mjs';
 import {nativeConfiguration,triggerNative} from './native.mjs';
 import {outputValid} from './validation.mjs';
-import {serialize,valueOf,objectNode,nodeFrom} from './canonical.mjs';
+import {serialize,valueOf,objectNode,nodeFrom,parseJson,replaceFields} from './canonical.mjs';
+import {admittedProviders,decideRoute,providerReadiness,validateRoutingConfig} from './routing.mjs';
 import { DurableObject } from "cloudflare:workers";
 
 // M1 is a storage capability, not an HTTP API or an authentication layer.
@@ -132,7 +133,20 @@ export class TaskStore extends DurableObject {
   #policy(owner) {
     const policy = Object.hasOwn(this.policies, owner) ? this.policies[owner] : null;
     if (!policy) denied("project is not admitted");
+    if (policy.routing) validateRoutingConfig(policy.routing, policy.models);
     return policy;
+  }
+
+  #providerReady(name, owner, hasDotSubscription) {
+    const configured = {...(this.env.AGENT_PROVIDERS ?? {}), ...(this.env.API_PROVIDERS ?? {})};
+    if (this.env.DOT_PROVIDER_NAME || Object.values(this.#policy(owner).providers).includes('dot')) {
+      configured.dot = configured.dot ?? {type: 'dot_events'};
+    }
+    return providerReadiness(name, {
+      env: this.env,
+      configuredProviders: configured,
+      hasDotSubscription: name === 'dot' ? hasDotSubscription : false,
+    });
   }
 
   #row(owner, taskId) {
@@ -161,7 +175,7 @@ export class TaskStore extends DurableObject {
 
   #agentRow(owner, taskId, providerName) {
     const row = this.#row(owner, taskId);
-    if (JSON.parse(row.request).mode !== "agent" || row.provider !== providerName || !Object.values(this.#policy(owner).providers).includes(providerName)) {
+    if (JSON.parse(row.request).mode !== "agent" || row.provider !== providerName || !admittedProviders(this.#policy(owner)).has(providerName)) {
       denied("worker is not assigned to this task");
     }
     return row;
@@ -170,20 +184,55 @@ export class TaskStore extends DurableObject {
   async submit(owner, idempotencyKey, canonicalRequest) {
     const policy = this.#policy(owner);
     key(idempotencyKey);
-    const request = parseBody(canonicalRequest);
-    const allowed = new Set(["mode", "profile", "objective", "model", "materials", "output_schema", "timeout_seconds", "issue"]);
+    let request = parseBody(canonicalRequest);
+    const allowed = new Set(["mode", "profile", "objective", "model", "materials", "output_schema", "timeout_seconds", "issue", "scenario", "complexity", "reasoning_effort"]);
     if (!object(request) || Object.keys(request).some((name) => !allowed.has(name))) invalid("unknown task fields");
-    if (!["mode", "objective", "model", "output_schema"].every((name) => Object.hasOwn(request, name))) {
-      invalid("mode, objective, model and output_schema are required");
+    const usesRouting = Boolean(policy.routing) && typeof request.scenario === "string";
+    const required = usesRouting ? ["mode", "objective", "output_schema"] : ["mode", "objective", "model", "output_schema"];
+    if (!required.every((name) => Object.hasOwn(request, name))) {
+      invalid(usesRouting ? "mode, objective and output_schema are required" : "mode, objective, model and output_schema are required");
     }
     if (typeof request.objective !== "string" || !request.objective.trim()) invalid("objective is required");
-    if (typeof request.mode !== "string" || typeof request.model !== "string") invalid("mode and model must be strings");
-    const profile = Object.hasOwn(request, "profile") ? request.profile : "default";
-    if (typeof profile !== "string" || !profile || Array.from(profile).length > 100 || profile.includes(":")) {
-      invalid("profile must be a nonempty configured profile name");
+    if (typeof request.mode !== "string") invalid("mode and model must be strings");
+    if (bytes(canonicalRequest).length > policy.max_request_bytes) invalid("request too large");
+    const requestDigest = await digest(canonicalRequest);
+    const existing = this.sql.exec("SELECT * FROM tasks WHERE owner=? AND idem=?", owner, idempotencyKey).toArray()[0];
+    if (existing) {
+      if (existing.digest !== requestDigest) conflict("idempotency key already binds a different request");
+      return this.#record(existing);
     }
-    const route = profile === "default" ? request.mode : `${request.mode}:${profile}`;
-    const provider = policy.providers[route];
+    let provider;
+    let body = canonicalRequest;
+    if (usesRouting) {
+      const hasDotSubscription = await this.#liveSubscription(owner);
+      let decision;
+      try {
+        decision = decideRoute(policy.routing, request, {
+          project: owner,
+          providerReady: (name) => this.#providerReady(name, owner, hasDotSubscription),
+        });
+      } catch (e) {
+        if (e.name === "RoutingError" && e.message === "no ready provider for scenario") denied(e.message);
+        denied("execution mode is unavailable");
+      }
+      request = {...request, model: decision.model, complexity: decision.tier, reasoning_effort: decision.reasoning_effort};
+      provider = decision.provider;
+      body = serialize(replaceFields(parseJson(canonicalRequest), {
+        model: nodeFrom(decision.model), complexity: nodeFrom(decision.tier),
+        reasoning_effort: nodeFrom(decision.reasoning_effort),
+      }));
+    } else {
+      if (["scenario", "complexity", "reasoning_effort"].some((name) => Object.hasOwn(request, name))) {
+        invalid("scenario routing fields require project routing configuration");
+      }
+      if (typeof request.model !== "string") invalid("mode and model must be strings");
+      const profile = Object.hasOwn(request, "profile") ? request.profile : "default";
+      if (typeof profile !== "string" || !profile || Array.from(profile).length > 100 || profile.includes(":")) {
+        invalid("profile must be a nonempty configured profile name");
+      }
+      const route = profile === "default" ? request.mode : `${request.mode}:${profile}`;
+      provider = policy.providers[route];
+    }
     if (!["agent","api"].includes(request.mode) || !provider) denied("execution mode is unavailable");
     if (request.mode === "api") {
       try { apiConfiguration(this.env,provider,request); } catch { denied("execution mode is unavailable"); }
@@ -198,9 +247,8 @@ export class TaskStore extends DurableObject {
     if (Object.hasOwn(request, "issue")) denied("App comments are not configured");
     if (!object(request.output_schema)) invalid("output_schema must be an object");
     noExternalReferences(request.output_schema);
-    if (bytes(canonicalRequest).length > policy.max_request_bytes) invalid("request too large");
+    if (bytes(body).length > policy.max_request_bytes) invalid("request too large");
     if(provider==='dot')imageMaterials(request.materials??[]);
-    const requestDigest = await digest(canonicalRequest);
     const record = this.ctx.storage.transactionSync(() => {
       const old = this.sql.exec("SELECT * FROM tasks WHERE owner=? AND idem=?", owner, idempotencyKey).toArray()[0];
       if (old) {
@@ -212,7 +260,7 @@ export class TaskStore extends DurableObject {
       const timestamp = now();
       const taskId = crypto.randomUUID();
       this.sql.exec("INSERT INTO tasks(id,owner,idem,digest,provider,request,status,created,updated,deadline) VALUES(?,?,?,?,?,?,?,?,?,?)",
-        taskId, owner, idempotencyKey, requestDigest, provider, canonicalRequest, "queued", timestamp, timestamp, timestamp + timeout);
+        taskId, owner, idempotencyKey, requestDigest, provider, body, "queued", timestamp, timestamp, timestamp + timeout);
       this.sql.exec("INSERT INTO events(task_id,status,created) VALUES(?,?,?)", taskId, "queued", timestamp);
       return this.#record(this.#row(owner, taskId));
     });
@@ -226,10 +274,10 @@ export class TaskStore extends DurableObject {
     if (/[\r\n]/.test(idempotencyKey)) invalid("a frozen Idempotency-Key is required (1..200 characters)");
     if (typeof requestSHA256 !== "string" || !/^[0-9a-f]{64}$/.test(requestSHA256)) invalid("a full lowercase request SHA256 is required");
     const rows = this.sql.exec("SELECT * FROM tasks WHERE owner=? AND idem=?", owner, idempotencyKey).toArray();
+    // Digest is the frozen client request identity. Scenario routing may store
+    // filled model/complexity/effort fields that differ from that preimage.
     if (rows.length !== 1 || rows[0].digest !== requestSHA256) missing();
-    const row = rows[0];
-    if (await digest(row.request) !== requestSHA256) missing();
-    return this.#record(row);
+    return this.#record(rows[0]);
   }
 
   projectForTask(projects,taskId) {
