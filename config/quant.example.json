@@ -48,6 +48,11 @@
       "model": "configured-api",
       "key_env": "AI_SERVICE_GEMINI_API_KEY",
       "api_usage_authorized": false
+    },
+    "chatgpt-plan": {
+      "type": "chatgpt_plan_oauth",
+      "plan_usage_authorized": false,
+      "token_env": "AI_SERVICE_CHATGPT_PLAN_TOKEN"
     }
   },
   "projects": {
@@ -58,7 +63,8 @@
         "agent:grokbot": "grokbot",
         "agent:claudeduet": "claudeduet",
         "agent:muse": "muse",
-        "api": "gemini"
+        "api": "chatgpt-plan",
+        "api:gemini": "gemini"
       },
       "models": {
         "dot": [
@@ -81,6 +87,11 @@
           "configured-muse",
           "configured-muse-fast",
           "configured-muse-strong"
+        ],
+        "chatgpt-plan": [
+          "configured-chatgpt-plan",
+          "configured-chatgpt-plan-fast",
+          "configured-chatgpt-plan-strong"
         ],
         "gemini": [
           "configured-api",
@@ -179,7 +190,7 @@
           "quick_notification": {
             "category": "quant_notify",
             "mode": "api",
-            "providers": ["gemini"],
+            "providers": ["chatgpt-plan", "gemini"],
             "matching": {
               "hints": ["short-alert", "status-ping"],
               "default_complexity": "simple"
@@ -200,6 +211,10 @@
               "model": "configured-muse-fast",
               "reasoning_effort": "low"
             },
+            "chatgpt-plan": {
+              "model": "configured-chatgpt-plan-fast",
+              "reasoning_effort": "low"
+            },
             "gemini": {
               "model": "configured-api-fast",
               "reasoning_effort": "low"
@@ -218,6 +233,10 @@
               "model": "configured-muse",
               "reasoning_effort": "medium"
             },
+            "chatgpt-plan": {
+              "model": "configured-chatgpt-plan",
+              "reasoning_effort": "medium"
+            },
             "gemini": {
               "model": "configured-api",
               "reasoning_effort": "medium"
@@ -234,6 +253,10 @@
             },
             "muse": {
               "model": "configured-muse-strong",
+              "reasoning_effort": "high"
+            },
+            "chatgpt-plan": {
+              "model": "configured-chatgpt-plan-strong",
               "reasoning_effort": "high"
             },
             "gemini": {

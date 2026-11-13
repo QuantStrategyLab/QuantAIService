@@ -40,7 +40,7 @@ fail-closed provider 选择由 Cloudflare task-service Worker
 | `strategy_research_summary` | quant_research | agent | muse → grokbot → dot | research-summary, strategy-brief, portfolio-note |
 | `reconciliation_anomaly` | quant_ops | agent | muse → grokbot → dot | recon-diff, ops-anomaly, ledger-mismatch |
 | `signal_context` | quant_signals | agent | muse → grokbot → dot | signal-context, feature-note |
-| `quick_notification` | quant_notify | api | gemini | short-alert, status-ping |
+| `quick_notification` | quant_notify | api | chatgpt-plan → gemini | short-alert, status-ping |
 
 示例显式设置 `matching.default_complexity`：`pr_code_review` 和
 `reconciliation_anomaly` 为 `complex`，`strategy_research_summary` 和
@@ -49,18 +49,19 @@ fail-closed provider 选择由 Cloudflare task-service Worker
 `matching.min_with_image`、`matching.size_thresholds` 与全局 `heuristics`，语义为
 共享契约中的只升不降。
 
-示例偏好保持 agent 与 api 分离：`quick_notification` 仍仅走 gemini（API）。
-Agent 场景统一 `muse → grokbot → dot`：Muse 接上后作为有持续免费额度的主路；
-付费 Grokbot / Dot 作过渡后备，退订即跳过。列表不放 `claudeduet`。Muse 占位未
-就绪时仍跳过——**两边付费 agent 都停之前必须先让 Muse 就绪**，否则场景提交闭包拒绝。
+示例偏好保持 agent 与 api 分离，并把两套池子贯通（`providers`、`models`、场景列表、`complexity_tiers`）。
+Agent 场景统一 `muse → grokbot → dot`。API 的 `quick_notification` 为
+`chatgpt-plan → gemini`（ChatGPT plan OAuth 优先，Gemini API key 后备）；遗留
+profile 暴露 `api` → `chatgpt-plan`、`api:gemini` → `gemini`。列表不放
+`claudeduet`。Muse 占位未就绪时仍跳过——**两边付费 agent 都停之前必须先让 Muse 就绪**。
 
 ## 复杂度档位表
 
 | 档位 | Provider | 模型（示例别名） | Reasoning effort |
 | --- | --- | --- | --- |
-| simple | dot / muse / grokbot / gemini | `*-fast` / `configured-api-fast` | low |
-| standard | dot / muse / grokbot / gemini | `configured-dot` / `configured-muse` / `configured-grokbot` / `configured-api` | medium |
-| complex | dot / muse / grokbot / gemini | `*-strong` / `configured-api` | high |
+| simple | dot / muse / grokbot / chatgpt-plan / gemini | `*-fast` / `configured-chatgpt-plan-fast` / `configured-api-fast` | low |
+| standard | dot / muse / grokbot / chatgpt-plan / gemini | `configured-*` / `configured-chatgpt-plan` / `configured-api` | medium |
+| complex | dot / muse / grokbot / chatgpt-plan / gemini | `*-strong` / `configured-chatgpt-plan-strong` / `configured-api` | high |
 
 `pr_code_review` 在 `tier_overrides.complex` 中显式指定强模型（含 `muse`）。
 别名为合成占位；生产模型名保留在私有 `models` 白名单。注册表不得出现真实账户

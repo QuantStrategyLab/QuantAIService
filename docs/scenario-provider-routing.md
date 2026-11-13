@@ -43,7 +43,7 @@ policy, `scenario` / `complexity` / `reasoning_effort` remain rejected.
 | `strategy_research_summary` | quant_research | agent | muse → grokbot → dot | research-summary, strategy-brief, portfolio-note |
 | `reconciliation_anomaly` | quant_ops | agent | muse → grokbot → dot | recon-diff, ops-anomaly, ledger-mismatch |
 | `signal_context` | quant_signals | agent | muse → grokbot → dot | signal-context, feature-note |
-| `quick_notification` | quant_notify | api | gemini | short-alert, status-ping |
+| `quick_notification` | quant_notify | api | chatgpt-plan → gemini | short-alert, status-ping |
 
 The example explicitly sets `matching.default_complexity` to `complex` for
 `pr_code_review` and `reconciliation_anomaly`, `standard` for
@@ -52,20 +52,21 @@ The example explicitly sets `matching.default_complexity` to `complex` for
 category chain; an explicit `null` is invalid. Image / size floors use
 `matching.min_with_image`, `matching.size_thresholds` and global `heuristics` with raise-only semantics from the shared contract.
 
-Agent and API modes stay separate in the example preferences: `quick_notification`
-stays gemini-only (API). Agent scenarios prefer `muse → grokbot → dot` so Muse
-(free-quota durable path) leads once ready; paid Grokbot/Dot remain interim
-fallbacks and are skipped when unsubscribed. `claudeduet` is never listed. While
-the Muse scaffold remains unavailable it is always skipped at readiness — do not
-cancel both paid agents until Muse readiness is live.
+Agent and API modes stay separate, and both pools are wired end-to-end
+(`providers`, `models`, scenario lists, `complexity_tiers`). Agent scenarios
+prefer `muse → grokbot → dot`. API `quick_notification` prefers
+`chatgpt-plan → gemini` (ChatGPT plan OAuth first, Gemini API key backup);
+legacy profiles expose `api` → `chatgpt-plan` and `api:gemini` → `gemini`.
+`claudeduet` is never listed. While Muse remains unavailable it is skipped —
+do not cancel both paid agents until Muse readiness is live.
 
 ## Complexity tier table
 
 | Tier | Provider | Model (example alias) | Reasoning effort |
 | --- | --- | --- | --- |
-| simple | dot / muse / grokbot / gemini | `*-fast` / `configured-api-fast` | low |
-| standard | dot / muse / grokbot / gemini | `configured-dot` / `configured-muse` / `configured-grokbot` / `configured-api` | medium |
-| complex | dot / muse / grokbot / gemini | `*-strong` / `configured-api` | high |
+| simple | dot / muse / grokbot / chatgpt-plan / gemini | `*-fast` / `configured-chatgpt-plan-fast` / `configured-api-fast` | low |
+| standard | dot / muse / grokbot / chatgpt-plan / gemini | `configured-*` / `configured-chatgpt-plan` / `configured-api` | medium |
+| complex | dot / muse / grokbot / chatgpt-plan / gemini | `*-strong` / `configured-chatgpt-plan-strong` / `configured-api` | high |
 
 `pr_code_review` sets `tier_overrides.complex` to the strong models explicitly
 (including `muse`). Aliases are synthetic; production names stay in private

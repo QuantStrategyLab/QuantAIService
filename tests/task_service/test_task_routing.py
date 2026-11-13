@@ -69,7 +69,7 @@ class TaskRoutingDataTests(unittest.TestCase):
 
         note = effective_route(self.routing, 'quick_notification')
         self.assertEqual(note['mode'], 'api')
-        self.assertEqual(note['providers'], ['gemini'])
+        self.assertEqual(note['providers'], ['chatgpt-plan', 'gemini'])
         self.assertEqual(note['tier'], 'simple')
         self.assertEqual(note['selections']['gemini']['reasoning_effort'], 'low')
 

@@ -67,7 +67,8 @@ class ConfigurationCheckTests(unittest.TestCase):
                    lambda c: c['providers'].update(second={'type': 'dot_events'}),
                    lambda c: c['providers']['dot'].update(type='private-unsupported-provider'),
                    lambda c: c['providers']['gemini'].update(api_usage_authorized=False),
-                   lambda c: c['providers']['plan'].update(plan_usage_authorized=False),
+                   # Authorized plan without token_env is invalid; unauthorized plan is allowed.
+                   lambda c: c['providers']['plan'].pop('token_env'),
                    lambda c: c['projects']['owner/project'].pop('models'),
                    lambda c: c.update(mcp_log_level='private-invalid-level'),
                    lambda c: c.update(issuers={'https://private.example': {'require_scope': False}})]
