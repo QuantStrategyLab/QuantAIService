@@ -116,5 +116,13 @@ No Python scenario table update is required.
 Unready providers are skipped at submit; if none remain, submit is denied.
 Dot readiness still requires a live event subscription. In the example,
 `gemini` stays `enabled: false` / `api_usage_authorized: false` until
-separately authorized. Shipping this runtime does not deploy services, rotate
-secrets or enable providers.
+separately authorized. `chatgpt-plan` is ready in routing when
+`plan_usage_authorized` and its token env are set; **Python** executes
+Responses, while the task-service Worker still only runs `gemini_api`
+(`cloudflare/task-service/README.zh-CN.md`). Do not rewrite Quant API scenarios
+onto Gemini to paper over that adapter gap. Shipping this runtime does not
+deploy services, rotate secrets or enable providers.
+
+Worker routing unit tests under `cloudflare/task-service/test/routing.mjs` use
+Quant scenario ids (`quick_notification`, `pr_code_review`, …), not Personal’s
+`example_*` / `gemini-text` catalog.
