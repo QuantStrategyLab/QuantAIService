@@ -1,4 +1,13 @@
-"""Authenticated v2 task API and MCP worker endpoint; bind behind an HTTPS proxy."""
+"""HTTP/MCP transport for the authenticated v2 task API.
+
+Bind behind an HTTPS proxy. This module owns sockets, request framing, status
+codes and auth header extraction. Application operations live in
+``ai_service.application``; composition lives in ``ai_service.wiring``.
+
+``Application``, ``build_application`` and ``validate_configuration`` remain
+re-exported here for compatibility with existing tests and callers. Prefer
+importing ``Application`` from ``ai_service.application`` in new code.
+"""
 from __future__ import annotations
 
 import argparse
@@ -23,15 +32,20 @@ from . import wiring
 
 
 def validate_configuration(config):
+    """Compatibility wrapper; implementation is ``wiring.validate_configuration``."""
     return wiring.validate_configuration(config)
 
 
 def check_worker_tools(config, identity, expected_projects):
+    """Compatibility wrapper; implementation is ``wiring.check_worker_tools``."""
     return wiring.check_worker_tools(config, identity, expected_projects)
 
 
 def build_application(config, *, github_key_loader=None, github_transport=None):
-    return wiring.build_application(config, github_key_loader=github_key_loader, github_transport=github_transport)
+    """Compatibility wrapper; implementation is ``wiring.build_application``."""
+    return wiring.build_application(
+        config, github_key_loader=github_key_loader, github_transport=github_transport
+    )
 
 __all__ = [
     'Application',

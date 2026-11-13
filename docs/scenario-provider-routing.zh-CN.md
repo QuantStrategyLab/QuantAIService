@@ -34,13 +34,13 @@ fail-closed provider 选择由 Cloudflare task-service Worker
 
 ## 场景表
 
-| 场景 | 类别 | Mode | 有序 providers | 匹配提示（示例） |
+| 场景 | 类别 | Mode | providers | 匹配提示（示例） |
 | --- | --- | --- | --- | --- |
-| `pr_code_review` | quant_review | agent | dot → muse → grokbot | pull-request, code-review, architecture-audit |
-| `strategy_research_summary` | quant_research | agent | dot → grokbot | research-summary, strategy-brief, portfolio-note |
-| `reconciliation_anomaly` | quant_ops | agent | dot → grokbot | recon-diff, ops-anomaly, ledger-mismatch |
-| `signal_context` | quant_signals | agent | dot | signal-context, feature-note |
-| `quick_notification` | quant_notify | api | gemini | short-alert, status-ping |
+| `pr_code_review` | quant_review | agent | muse → grokbot → dot | pull-request, code-review, architecture-audit |
+| `strategy_research_summary` | quant_research | agent | muse → grokbot → dot | research-summary, strategy-brief, portfolio-note |
+| `reconciliation_anomaly` | quant_ops | agent | muse → grokbot → dot | recon-diff, ops-anomaly, ledger-mismatch |
+| `signal_context` | quant_signals | agent | muse → grokbot → dot | signal-context, feature-note |
+| `quick_notification` | quant_notify | api | chatgpt-plan | short-alert, status-ping |
 
 示例显式设置 `matching.default_complexity`：`pr_code_review` 和
 `reconciliation_anomaly` 为 `complex`，`strategy_research_summary` 和
@@ -49,17 +49,20 @@ fail-closed provider 选择由 Cloudflare task-service Worker
 `matching.min_with_image`、`matching.size_thresholds` 与全局 `heuristics`，语义为
 共享契约中的只升不降。
 
-示例偏好保持 agent 与 api 分离：`quick_notification` 仍仅走 gemini（API）。
-`muse` 只出现在长代码审查场景，排在 `dot` 与 `grokbot` 之间；Muse 仍为占位时
-就绪检查一律跳过。
+Quant 场景与 PersonalAIService **不是同一套目录**，只共用 `task.routing.v1` 合同。Personal 短 API 示例是 Gemini；Quant 短 API 示例是 `chatgpt-plan`，并且 Quant 还有 OpenAI / Claude API 与双 AI 审计走本注册表之外的路径。
+
+Agent 与 API 模式分离：
+
+- **Agent** 场景用有序偏好（`muse → grokbot → dot`），未就绪则跳过；Muse 接上后打头。列表不放 `claudeduet`。**两边付费 agent 都停之前必须先让 Muse 就绪**。
+- **API** 场景只绑定**一个** provider。`quick_notification` 对应 `chatgpt-plan`（OpenAI plan OAuth / Responses）；模型与推理档位由复杂度分层智能填充。API **没有**后备链——Gemini 走遗留 `api:gemini`（或另开场景），不挂第二偏好。Quant 另外还有 **OpenAI API**、**Anthropic Claude API** 以及 **双 AI 审计**（Codex 主审 + 独立 GPT/Claude 复审）走 AiGateway / 审计路径；那不是 PersonalAIService 的场景目录，也不写成这里的 API 有序列表。
 
 ## 复杂度档位表
 
 | 档位 | Provider | 模型（示例别名） | Reasoning effort |
 | --- | --- | --- | --- |
-| simple | dot / muse / grokbot / gemini | `*-fast` / `configured-api-fast` | low |
-| standard | dot / muse / grokbot / gemini | `configured-dot` / `configured-muse` / `configured-grokbot` / `configured-api` | medium |
-| complex | dot / muse / grokbot / gemini | `*-strong` / `configured-api` | high |
+| simple | dot / muse / grokbot / chatgpt-plan / gemini | `*-fast` / `configured-chatgpt-plan-fast` / `configured-api-fast` | low |
+| standard | dot / muse / grokbot / chatgpt-plan / gemini | `configured-*` / `configured-chatgpt-plan` / `configured-api` | medium |
+| complex | dot / muse / grokbot / chatgpt-plan / gemini | `*-strong` / `configured-chatgpt-plan-strong` / `configured-api` | high |
 
 `pr_code_review` 在 `tier_overrides.complex` 中显式指定强模型（含 `muse`）。
 别名为合成占位；生产模型名保留在私有 `models` 白名单。注册表不得出现真实账户
@@ -93,5 +96,13 @@ provider 在各档位的完整配置以及项目 provider/model 白名单。兼�
 
 提交时跳过未就绪 provider；若列表耗尽则拒绝提交。Dot 就绪仍要求有效的
 事件订阅。示例中 `gemini` 保持 `enabled: false` /
-`api_usage_authorized: false`，直至另行授权。合入本运行时不等于部署服务、
-轮换密钥或启用 provider。
+`api_usage_authorized: false`，直至另行授权。`chatgpt-plan` 在
+`plan_usage_authorized` 且 token 环境已绑定时对路由就绪；**Python** 执行
+Responses，而 task-service Worker 目前仍只跑 `gemini_api`
+（见 `cloudflare/task-service/README.zh-CN.md`）。不要为迁就该适配器缺口，
+把 Quant API 场景改写成 Gemini。合入本运行时不等于部署服务、轮换密钥或启用
+provider。
+
+Worker 路由单测 `cloudflare/task-service/test/routing.mjs` 使用 Quant 场景 id
+（`quick_notification`、`pr_code_review` 等），不用 Personal 的 `example_*` /
+`gemini-text` 目录。

@@ -1,4 +1,8 @@
-"""HTTP task API: lookup, submit, read, messages, cancel."""
+"""Task API operations (lookup, submit, read, messages, cancel).
+
+Called from the HTTP transport in ``ai_service.server``; this module does not
+own sockets or status-line framing.
+"""
 from __future__ import annotations
 
 from urllib.parse import parse_qs, urlsplit

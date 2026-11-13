@@ -11,3 +11,11 @@ Configure the service `owner` explicitly and apply the version-specific [worker 
 The baseline describes wheel installation, dependency checks, service/Quant admission tests and safe logging. Logs exclude tokens, task material, raw exceptions and private identifiers. It does not copy Personal deployment configuration. A rollback restores matching code and configuration without rewriting the state database.
 
 Local checks, CI and historical migration records cannot establish current deployment, login, subscription or business readiness. This summary preserves the complete baseline and both repository [MIT licenses](../LICENSE).
+
+## Package boundary
+
+See [system design — package boundary](system-design.md). In short:
+`ai_service.server` is HTTP/MCP transport; `ai_service.application` holds task and
+MCP operations; `ai_service.wiring` assembles the runtime; `quant_ai_service` is
+the published CLI/compatibility entry. Prefer focused `ai_service` imports for
+new in-repo code.

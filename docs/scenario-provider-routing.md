@@ -37,13 +37,13 @@ policy, `scenario` / `complexity` / `reasoning_effort` remain rejected.
 
 ## Scenario table
 
-| Scenario | Category | Mode | Ordered providers | Matching hints (examples) |
+| Scenario | Category | Mode | Providers | Matching hints (examples) |
 | --- | --- | --- | --- | --- |
-| `pr_code_review` | quant_review | agent | dot → muse → grokbot | pull-request, code-review, architecture-audit |
-| `strategy_research_summary` | quant_research | agent | dot → grokbot | research-summary, strategy-brief, portfolio-note |
-| `reconciliation_anomaly` | quant_ops | agent | dot → grokbot | recon-diff, ops-anomaly, ledger-mismatch |
-| `signal_context` | quant_signals | agent | dot | signal-context, feature-note |
-| `quick_notification` | quant_notify | api | gemini | short-alert, status-ping |
+| `pr_code_review` | quant_review | agent | muse → grokbot → dot | pull-request, code-review, architecture-audit |
+| `strategy_research_summary` | quant_research | agent | muse → grokbot → dot | research-summary, strategy-brief, portfolio-note |
+| `reconciliation_anomaly` | quant_ops | agent | muse → grokbot → dot | recon-diff, ops-anomaly, ledger-mismatch |
+| `signal_context` | quant_signals | agent | muse → grokbot → dot | signal-context, feature-note |
+| `quick_notification` | quant_notify | api | chatgpt-plan | short-alert, status-ping |
 
 The example explicitly sets `matching.default_complexity` to `complex` for
 `pr_code_review` and `reconciliation_anomaly`, `standard` for
@@ -52,18 +52,32 @@ The example explicitly sets `matching.default_complexity` to `complex` for
 category chain; an explicit `null` is invalid. Image / size floors use
 `matching.min_with_image`, `matching.size_thresholds` and global `heuristics` with raise-only semantics from the shared contract.
 
-Agent and API modes stay separate in the example preferences: `quick_notification`
-stays gemini-only (API). `muse` appears only on the long code-review scenario
-between `dot` and `grokbot`; while the Muse scaffold remains unavailable it is
-always skipped at readiness.
+Quant scenarios are **not** PersonalAIService scenarios; only the
+`task.routing.v1` contract is shared. Personal’s short API example is Gemini;
+Quant’s short API example is `chatgpt-plan`, and Quant also operates OpenAI /
+Claude API plus dual-AI audit outside this registry.
+
+Agent and API modes stay separate:
+
+- **Agent** scenarios use an ordered preference (`muse → grokbot → dot`). Unready
+  entries are skipped; Muse leads once ready. `claudeduet` is never listed. Do
+  not cancel both paid agents until Muse readiness is live.
+- **API** scenarios bind **one** provider. `quick_notification` maps to
+  `chatgpt-plan` (OpenAI plan OAuth / Responses); complexity tiers choose
+  model and reasoning effort. There is no API fallback chain — Gemini stays
+  on legacy `api:gemini` (or another scenario), not a second preference.
+  Quant’s broader surface also keeps **OpenAI API**, **Anthropic Claude API**,
+  and **dual-AI audit** (Codex primary + independent GPT/Claude secondary) on
+  the AiGateway / audit path; those are not PersonalAIService scenarios and
+  are not expressed as ordered API providers here.
 
 ## Complexity tier table
 
 | Tier | Provider | Model (example alias) | Reasoning effort |
 | --- | --- | --- | --- |
-| simple | dot / muse / grokbot / gemini | `*-fast` / `configured-api-fast` | low |
-| standard | dot / muse / grokbot / gemini | `configured-dot` / `configured-muse` / `configured-grokbot` / `configured-api` | medium |
-| complex | dot / muse / grokbot / gemini | `*-strong` / `configured-api` | high |
+| simple | dot / muse / grokbot / chatgpt-plan / gemini | `*-fast` / `configured-chatgpt-plan-fast` / `configured-api-fast` | low |
+| standard | dot / muse / grokbot / chatgpt-plan / gemini | `configured-*` / `configured-chatgpt-plan` / `configured-api` | medium |
+| complex | dot / muse / grokbot / chatgpt-plan / gemini | `*-strong` / `configured-chatgpt-plan-strong` / `configured-api` | high |
 
 `pr_code_review` sets `tier_overrides.complex` to the strong models explicitly
 (including `muse`). Aliases are synthetic; production names stay in private
@@ -102,5 +116,13 @@ No Python scenario table update is required.
 Unready providers are skipped at submit; if none remain, submit is denied.
 Dot readiness still requires a live event subscription. In the example,
 `gemini` stays `enabled: false` / `api_usage_authorized: false` until
-separately authorized. Shipping this runtime does not deploy services, rotate
-secrets or enable providers.
+separately authorized. `chatgpt-plan` is ready in routing when
+`plan_usage_authorized` and its token env are set; **Python** executes
+Responses, while the task-service Worker still only runs `gemini_api`
+(`cloudflare/task-service/README.zh-CN.md`). Do not rewrite Quant API scenarios
+onto Gemini to paper over that adapter gap. Shipping this runtime does not
+deploy services, rotate secrets or enable providers.
+
+Worker routing unit tests under `cloudflare/task-service/test/routing.mjs` use
+Quant scenario ids (`quick_notification`, `pr_code_review`, …), not Personal’s
+`example_*` / `gemini-text` catalog.

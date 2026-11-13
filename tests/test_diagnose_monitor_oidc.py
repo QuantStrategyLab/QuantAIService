@@ -27,7 +27,9 @@ def environment():
             "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "synthetic-request-bearer",
             "CODEX_AUDIT_SERVICE_URL": "https://audit.invalid",
             "CODEX_AUDIT_SERVICE_AUDIENCE": "wrong-override-must-be-ignored",
-            "CODEX_AUDIT_SERVICE_TOKEN": "synthetic-static-must-never-be-used"}
+            "CODEX_AUDIT_SERVICE_TOKEN": "synthetic-static-must-never-be-used",
+            # Emergency opt-in so legacy-path unit tests can still create new audit jobs.
+            "AI_SERVICE_DIAGNOSIS_LEGACY_CODEX": "true"}
 
 
 def job(status="queued", **changes):
@@ -782,6 +784,22 @@ def test_workflow_surfaces_skipped_diagnosis_distinct_from_success():
     assert "Native diagnosis completed via provider=" in text
     assert "Cloud state verification completed" in text
     assert 'status == "verified"' in text
+    assert "AI_SERVICE_DIAGNOSIS_LEGACY_CODEX" in text
+
+
+def test_cli_diagnosis_retired_without_native_or_legacy_opt_in(tmp_path):
+    snapshot(tmp_path)
+    env = environment()
+    env.pop("AI_SERVICE_DIAGNOSIS_LEGACY_CODEX", None)
+    env.pop("AI_SERVICE_DIAGNOSIS_READY", None)
+    env.pop("AI_SERVICE_URL", None)
+    env.pop("AI_SERVICE_DIAGNOSIS_MODEL", None)
+    opener = Opener([])
+    assert caller.diagnose(tmp_path, tmp_path / "actions-state", env=env, opener=opener,
+                           now=NOW, sleep=lambda _: None) == {
+        "status": "skipped", "reason": "cli_diagnosis_retired"}
+    assert opener.calls == []
+    assert not (tmp_path / "actions-state" / (NOW.date().isoformat() + ".json")).exists()
 
 
 NATIVE_ID = '42509a19-b704-4a4b-a66c-f163a15699f1'
