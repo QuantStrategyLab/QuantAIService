@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "build": "node scripts/build.mjs",
-    "test": "node test/oauth-ttl.mjs && node --test test/task-metadata.mjs && node --test test/routing.mjs && node test/delivery-log.mjs && node test/native.mjs && node test/native.mjs --pigbibi && node test/workload-cache.mjs && node --test test/subscription-grants.mjs",
+    "test": "node test/oauth-ttl.mjs && node --test test/task-metadata.mjs && node --test test/routing.mjs && node --test test/request-schema.mjs && node test/delivery-log.mjs && node test/native.mjs && node test/native.mjs --pigbibi && node test/workload-cache.mjs && node --test test/subscription-grants.mjs",
     "deploy": "echo \"Build first; deploy with explicit wrangler --config private path as documented\" && exit 1"
   },
   "dependencies": {

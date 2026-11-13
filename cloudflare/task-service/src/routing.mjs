@@ -121,10 +121,6 @@ function categoryDefault(routing,categoryId){
 }
 
 export function resolveComplexity(request,scenarioId,routing={}){
-  if(request.complexity!=null){
-    if(!TIERS.has(request.complexity))fail('complexity must be simple, standard or complex');
-    return request.complexity;
-  }
   routing=Object.keys(routing||{}).length?validateRoutingConfig(routing):{};
   const scenario=routing.scenarios?.[scenarioId]??{};
   const matching=scenario.matching??{};
@@ -136,7 +132,13 @@ export function resolveComplexity(request,scenarioId,routing={}){
   const thresholds=matching.size_thresholds??{};
   const sizeStandard=thresholds.standard??heuristics.size_standard;
   const sizeComplex=thresholds.complex??heuristics.size_complex;
-  let tier=matching.default_complexity??categoryDefault(routing,scenario.category);
+  let tier;
+  if(request.complexity!=null){
+    if(!TIERS.has(request.complexity))fail('complexity must be simple, standard or complex');
+    tier=request.complexity;
+  }else{
+    tier=matching.default_complexity??categoryDefault(routing,scenario.category);
+  }
   if(size>=sizeComplex||(hasImage&&size>=heuristics.image_complex_size)||materials.length>=heuristics.materials_complex_count){
     return raiseTier(tier,'complex');
   }
@@ -153,7 +155,7 @@ function tierEntry(routing,scenarioId,tier,provider){
   return entry;
 }
 
-export function decideRoute(routing,request,{project,providerReady,log}={}){
+export function decideRoute(routing,request,{project,providerReady,entryReady,log}={}){
   routing=validateRoutingConfig(routing);
   const scenarioId=request.scenario;
   if(typeof scenarioId!=='string'||!Object.hasOwn(routing.scenarios,scenarioId))fail('scenario is not configured for this project');
@@ -169,6 +171,10 @@ export function decideRoute(routing,request,{project,providerReady,log}={}){
     try{entry=tierEntry(routing,scenarioId,tier,provider);}
     catch(e){skips.push(`skip:${provider}:${e.message}`);continue;}
     if(Object.hasOwn(request,'model')&&request.model!==entry.model)fail('model does not match complexity tier');
+    if(typeof entryReady==='function'){
+      const [ok,why]=entryReady(provider,entry);
+      if(!ok){skips.push(`skip:${provider}:${why}`);continue;}
+    }
     let reason=`scenario:${scenarioId};tier:${tier}`;
     if(category)reason=`category:${category};`+reason;
     if(skips.length)reason+=';'+skips.join(';');

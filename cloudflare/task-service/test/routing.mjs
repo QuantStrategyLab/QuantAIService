@@ -28,9 +28,19 @@ test('validateRoutingConfig rejects empty preference lists and unknown categorie
 });
 
 test('resolveComplexity uses registry defaults then heuristics',()=>{
-  assert.equal(resolveComplexity({complexity:'simple',objective:'x'.repeat(80000),materials:[{type:'image'}]},'example_media',ROUTING),'simple');
+  // Explicit complexity is a floor: image/size heuristics may still raise.
+  assert.equal(resolveComplexity({complexity:'simple',objective:'x'.repeat(80000),materials:[{type:'image'}]},'example_media',ROUTING),'complex');
   assert.equal(resolveComplexity({objective:'review',materials:[{text:'y'.repeat(60000)}]},'example_media',ROUTING),'complex');
   assert.equal(resolveComplexity({objective:'hi',materials:[]},'example_short_api',ROUTING),'simple');
+});
+
+test('decideRoute skips API providers whose fixed model mismatches the tier',()=>{
+  assert.throws(()=>decideRoute(ROUTING,{mode:'api',scenario:'example_short_api',objective:'ping',materials:[],output_schema:{}},{
+    project:'example-org/ExampleApi',
+    providerReady:()=>[true,'ready'],
+    entryReady:()=>[false,'api_model_mismatch'],
+    log:{info(){}},
+  }),/no ready provider for scenario/);
 });
 
 test('decideRoute skips unready providers and accepts config-only scenario additions',()=>{

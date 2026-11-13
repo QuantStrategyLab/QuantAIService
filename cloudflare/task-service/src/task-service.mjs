@@ -6,6 +6,7 @@ import {WorkerEntrypoint} from 'cloudflare:workers';
 import {insufficientScope} from '@cloudflare/workers-oauth-provider';
 import {parseJson, serialize, valueOf, field, nodeFrom, objectNode, replaceFields} from './canonical.mjs';
 import {check, checkOutputSchema, outputValid} from './validation.mjs';
+import {REQUEST} from './request-contract.mjs';
 const fail=(name)=>{throw Object.assign(new Error(name),{name});};
 const bad=()=>fail('ValueError'), denied=()=>fail('PermissionError');
 const obj=v=>v!==null&&typeof v==='object'&&!Array.isArray(v);
@@ -21,7 +22,6 @@ export const TOOLS=[
   ['claim_task','Claim one execution attempt. Reuse the same attempt_id for retries.',['task_id','attempt_id'],['task_id','attempt_id']],
   ['report_task_result','Report a final advisory result for the claimed attempt and current revision.',Object.keys(fields),['task_id','attempt_id','revision','status']]
 ].map(([name,description,allowed,required])=>({name,description,inputSchema:schema(Object.fromEntries(allowed.map(k=>[k,fields[k]])),required),securitySchemes:securitySchemes(['tasks:work'])}));
-const REQUEST=schema({mode:{enum:['agent','api']},profile:{type:'string',minLength:1,maxLength:100,pattern:'^[^:]+$'},objective:{type:'string',minLength:1},model:string,materials:{type:'array'},output_schema:{type:'object'},timeout_seconds:{type:'integer',minimum:1},issue:{type:'object'}},['mode','objective','model','output_schema']);
 const MESSAGE=schema({text:string,materials:{type:'array'}},['text']);
 
 export class TaskService extends WorkerEntrypoint {
