@@ -34,13 +34,13 @@ fail-closed provider 选择由 Cloudflare task-service Worker
 
 ## 场景表
 
-| 场景 | 类别 | Mode | 有序 providers | 匹配提示（示例） |
+| 场景 | 类别 | Mode | providers | 匹配提示（示例） |
 | --- | --- | --- | --- | --- |
 | `pr_code_review` | quant_review | agent | muse → grokbot → dot | pull-request, code-review, architecture-audit |
 | `strategy_research_summary` | quant_research | agent | muse → grokbot → dot | research-summary, strategy-brief, portfolio-note |
 | `reconciliation_anomaly` | quant_ops | agent | muse → grokbot → dot | recon-diff, ops-anomaly, ledger-mismatch |
 | `signal_context` | quant_signals | agent | muse → grokbot → dot | signal-context, feature-note |
-| `quick_notification` | quant_notify | api | chatgpt-plan → gemini | short-alert, status-ping |
+| `quick_notification` | quant_notify | api | chatgpt-plan | short-alert, status-ping |
 
 示例显式设置 `matching.default_complexity`：`pr_code_review` 和
 `reconciliation_anomaly` 为 `complex`，`strategy_research_summary` 和
@@ -49,11 +49,12 @@ fail-closed provider 选择由 Cloudflare task-service Worker
 `matching.min_with_image`、`matching.size_thresholds` 与全局 `heuristics`，语义为
 共享契约中的只升不降。
 
-示例偏好保持 agent 与 api 分离，并把两套池子贯通（`providers`、`models`、场景列表、`complexity_tiers`）。
-Agent 场景统一 `muse → grokbot → dot`。API 的 `quick_notification` 为
-`chatgpt-plan → gemini`（ChatGPT plan OAuth 优先，Gemini API key 后备）；遗留
-profile 暴露 `api` → `chatgpt-plan`、`api:gemini` → `gemini`。列表不放
-`claudeduet`。Muse 占位未就绪时仍跳过——**两边付费 agent 都停之前必须先让 Muse 就绪**。
+Quant 场景与 PersonalAIService **不是同一套目录**，只共用 `task.routing.v1` 合同。
+
+Agent 与 API 模式分离：
+
+- **Agent** 场景用有序偏好（`muse → grokbot → dot`），未就绪则跳过；Muse 接上后打头。列表不放 `claudeduet`。**两边付费 agent 都停之前必须先让 Muse 就绪**。
+- **API** 场景只绑定**一个** provider。`quick_notification` 对应 `chatgpt-plan`；模型与推理档位由复杂度分层智能填充。API **没有**后备链——Gemini 走遗留 `api:gemini`（或另开场景），不挂在同一场景的第二偏好上。
 
 ## 复杂度档位表
 

@@ -37,13 +37,13 @@ policy, `scenario` / `complexity` / `reasoning_effort` remain rejected.
 
 ## Scenario table
 
-| Scenario | Category | Mode | Ordered providers | Matching hints (examples) |
+| Scenario | Category | Mode | Providers | Matching hints (examples) |
 | --- | --- | --- | --- | --- |
 | `pr_code_review` | quant_review | agent | muse → grokbot → dot | pull-request, code-review, architecture-audit |
 | `strategy_research_summary` | quant_research | agent | muse → grokbot → dot | research-summary, strategy-brief, portfolio-note |
 | `reconciliation_anomaly` | quant_ops | agent | muse → grokbot → dot | recon-diff, ops-anomaly, ledger-mismatch |
 | `signal_context` | quant_signals | agent | muse → grokbot → dot | signal-context, feature-note |
-| `quick_notification` | quant_notify | api | chatgpt-plan → gemini | short-alert, status-ping |
+| `quick_notification` | quant_notify | api | chatgpt-plan | short-alert, status-ping |
 
 The example explicitly sets `matching.default_complexity` to `complex` for
 `pr_code_review` and `reconciliation_anomaly`, `standard` for
@@ -52,13 +52,18 @@ The example explicitly sets `matching.default_complexity` to `complex` for
 category chain; an explicit `null` is invalid. Image / size floors use
 `matching.min_with_image`, `matching.size_thresholds` and global `heuristics` with raise-only semantics from the shared contract.
 
-Agent and API modes stay separate, and both pools are wired end-to-end
-(`providers`, `models`, scenario lists, `complexity_tiers`). Agent scenarios
-prefer `muse → grokbot → dot`. API `quick_notification` prefers
-`chatgpt-plan → gemini` (ChatGPT plan OAuth first, Gemini API key backup);
-legacy profiles expose `api` → `chatgpt-plan` and `api:gemini` → `gemini`.
-`claudeduet` is never listed. While Muse remains unavailable it is skipped —
-do not cancel both paid agents until Muse readiness is live.
+Quant scenarios are **not** PersonalAIService scenarios; only the
+`task.routing.v1` contract is shared.
+
+Agent and API modes stay separate:
+
+- **Agent** scenarios use an ordered preference (`muse → grokbot → dot`). Unready
+  entries are skipped; Muse leads once ready. `claudeduet` is never listed. Do
+  not cancel both paid agents until Muse readiness is live.
+- **API** scenarios bind **one** provider. `quick_notification` maps to
+  `chatgpt-plan`; complexity tiers choose model and reasoning effort. There is
+  no API fallback chain — Gemini stays available as legacy `api:gemini` (or a
+  separate scenario), not as a second preference on the same scenario.
 
 ## Complexity tier table
 

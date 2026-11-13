@@ -190,7 +190,7 @@
           "quick_notification": {
             "category": "quant_notify",
             "mode": "api",
-            "providers": ["chatgpt-plan", "gemini"],
+            "providers": ["chatgpt-plan"],
             "matching": {
               "hints": ["short-alert", "status-ping"],
               "default_complexity": "simple"

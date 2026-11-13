@@ -69,9 +69,10 @@ class TaskRoutingDataTests(unittest.TestCase):
 
         note = effective_route(self.routing, 'quick_notification')
         self.assertEqual(note['mode'], 'api')
-        self.assertEqual(note['providers'], ['chatgpt-plan', 'gemini'])
+        self.assertEqual(note['providers'], ['chatgpt-plan'])
         self.assertEqual(note['tier'], 'simple')
-        self.assertEqual(note['selections']['gemini']['reasoning_effort'], 'low')
+        self.assertEqual(note['selections']['chatgpt-plan']['reasoning_effort'], 'low')
+        self.assertEqual(note['selections']['chatgpt-plan']['model'], 'configured-chatgpt-plan-fast')
 
     def test_complexity_raises_only_from_matching_and_heuristics(self):
         self.assertEqual(resolve_complexity(self.routing, 'strategy_research_summary'), 'standard')
