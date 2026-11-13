@@ -74,6 +74,8 @@ jobs:
           AI_SERVICE_AUDIENCE: ${{ vars.AI_SERVICE_AUDIENCE }}
           AI_SERVICE_DIAGNOSIS_MODEL: ${{ vars.AI_SERVICE_DIAGNOSIS_MODEL }}
           AI_SERVICE_DIAGNOSIS_PROFILE: ${{ vars.AI_SERVICE_DIAGNOSIS_PROFILE || 'default' }}
+          # Emergency opt-in for *new* Codex audit-bridge jobs; pending legacy jobs drain without this.
+          AI_SERVICE_DIAGNOSIS_LEGACY_CODEX: ${{ vars.AI_SERVICE_DIAGNOSIS_LEGACY_CODEX || 'false' }}
           CODEX_AUDIT_SERVICE_URL: ${{ secrets.CODEX_AUDIT_SERVICE_URL }}
           CODEX_AUDIT_SERVICE_AUDIENCE: quant-codex-audit
           PYTHONDONTWRITEBYTECODE: '1'
