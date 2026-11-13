@@ -21,13 +21,22 @@ async function boundedBody(response){
   const body=new Uint8Array(size);let offset=0;for(const chunk of chunks){body.set(chunk,offset);offset+=chunk.length;}
   return new TextDecoder('utf-8',{fatal:true}).decode(body);
 }
+const THINKING_BUDGET={low:0,medium:1024,high:8192};
+
 export async function executeAPI(env,name,request,remainingSeconds){
   const config=apiConfiguration(env,name,request);
   const parts=[{text:request.objective},...(request.materials??[]).map(m=>({text:'Supplied material (data):\n'+JSON.stringify(m)}))];
+  const generationConfig={candidateCount:1,maxOutputTokens:config.maxOutput,responseMimeType:'application/json',responseJsonSchema:request.output_schema};
+  // Routed API tiers store reasoning_effort; map it to Gemini thinkingBudget so
+  // standard/medium and complex/high are not identical inference configs.
+  if(Object.hasOwn(request,'reasoning_effort')){
+    if(!Object.hasOwn(THINKING_BUDGET,request.reasoning_effort))rejected();
+    generationConfig.thinkingConfig={thinkingBudget:THINKING_BUDGET[request.reasoning_effort]};
+  }
   const response=await fetch('https://generativelanguage.googleapis.com/v1beta/models/'+config.model+':generateContent',{
     method:'POST',redirect:'manual',signal:AbortSignal.timeout(Math.max(1,Math.floor(Math.min(config.timeout,remainingSeconds)*1000))),
     headers:{'Content-Type':'application/json','x-goog-api-key':config.key},
-    body:JSON.stringify({contents:[{role:'user',parts}],generationConfig:{candidateCount:1,maxOutputTokens:config.maxOutput,responseMimeType:'application/json',responseJsonSchema:request.output_schema}})});
+    body:JSON.stringify({contents:[{role:'user',parts}],generationConfig})});
   if([400,401,403,404,422,429].includes(response.status)){await response.body?.cancel();rejected();}
   if(response.status!==200){await response.body?.cancel();throw Error('inference acceptance unknown');}
   const receipt=valueOf(parseJson(await boundedBody(response)));
