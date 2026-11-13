@@ -8,7 +8,7 @@ import threading
 from dataclasses import dataclass
 
 
-SCOPES = frozenset({'tasks:read', 'tasks:submit', 'tasks:work', 'events:subscribe', 'offline_access'})
+SCOPES = frozenset({'tasks:read', 'tasks:submit', 'tasks:work', 'events:subscribe', 'dashboard:read', 'offline_access'})
 TOOLS = frozenset({'get_task', 'claim_task', 'report_task_result',
                    'get_event_subscription', 'delete_event_subscription'})
 METHODS = frozenset({'initialize', 'ping', 'server/discover', 'tools/list', 'tools/call',
