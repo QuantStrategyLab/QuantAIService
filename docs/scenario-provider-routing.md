@@ -43,7 +43,7 @@ policy, `scenario` / `complexity` / `reasoning_effort` remain rejected.
 | `strategy_research_summary` | quant_research | agent | muse → grokbot → dot | research-summary, strategy-brief, portfolio-note |
 | `reconciliation_anomaly` | quant_ops | agent | muse → grokbot → dot | recon-diff, ops-anomaly, ledger-mismatch |
 | `signal_context` | quant_signals | agent | muse → grokbot → dot | signal-context, feature-note |
-| `quick_notification` | quant_notify | api | chatgpt-plan | short-alert, status-ping |
+| `quick_notification` | quant_notify | api | gemini | short-alert, status-ping |
 
 The example explicitly sets `matching.default_complexity` to `complex` for
 `pr_code_review` and `reconciliation_anomaly`, `standard` for
@@ -61,9 +61,10 @@ Agent and API modes stay separate:
   entries are skipped; Muse leads once ready. `claudeduet` is never listed. Do
   not cancel both paid agents until Muse readiness is live.
 - **API** scenarios bind **one** provider. `quick_notification` maps to
-  `chatgpt-plan`; complexity tiers choose model and reasoning effort. There is
-  no API fallback chain — Gemini stays available as legacy `api:gemini` (or a
-  separate scenario), not as a second preference on the same scenario.
+  `gemini` (the Worker-executable `gemini_api` adapter); complexity tiers
+  choose model and reasoning effort. There is no API fallback chain —
+  `chatgpt-plan` stays on the named `api` route (and Python wiring) until a
+  Worker adapter exists; do not list both on the same scenario.
 
 ## Complexity tier table
 

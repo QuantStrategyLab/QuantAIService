@@ -40,7 +40,7 @@ fail-closed provider 选择由 Cloudflare task-service Worker
 | `strategy_research_summary` | quant_research | agent | muse → grokbot → dot | research-summary, strategy-brief, portfolio-note |
 | `reconciliation_anomaly` | quant_ops | agent | muse → grokbot → dot | recon-diff, ops-anomaly, ledger-mismatch |
 | `signal_context` | quant_signals | agent | muse → grokbot → dot | signal-context, feature-note |
-| `quick_notification` | quant_notify | api | chatgpt-plan | short-alert, status-ping |
+| `quick_notification` | quant_notify | api | gemini | short-alert, status-ping |
 
 示例显式设置 `matching.default_complexity`：`pr_code_review` 和
 `reconciliation_anomaly` 为 `complex`，`strategy_research_summary` 和
@@ -54,7 +54,7 @@ Quant 场景与 PersonalAIService **不是同一套目录**，只共用 `task.ro
 Agent 与 API 模式分离：
 
 - **Agent** 场景用有序偏好（`muse → grokbot → dot`），未就绪则跳过；Muse 接上后打头。列表不放 `claudeduet`。**两边付费 agent 都停之前必须先让 Muse 就绪**。
-- **API** 场景只绑定**一个** provider。`quick_notification` 对应 `chatgpt-plan`；模型与推理档位由复杂度分层智能填充。API **没有**后备链——Gemini 走遗留 `api:gemini`（或另开场景），不挂在同一场景的第二偏好上。
+- **API** 场景只绑定**一个** provider。`quick_notification` 对应 `gemini`（Worker 可执行的 `gemini_api`）；模型与推理档位由复杂度分层智能填充。API **没有**后备链——`chatgpt-plan` 留在命名路由 `api`（及 Python wiring），等有 Worker 适配后再挂场景；不要在同一场景列两个。
 
 ## 复杂度档位表
 
