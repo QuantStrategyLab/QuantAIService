@@ -231,7 +231,7 @@ export function providerReadiness(name,{env={},configuredProviders={},hasDotSubs
     if(typeof item.token_env!=='string'||!env[item.token_env])return [false,'missing_credential'];
     return [true,'ready'];
   }
-  if(kind==='claudeduet')return [false,'unavailable'];
+  if(kind==='claudeduet'||kind==='muse')return [false,'unavailable'];
   return [false,'unsupported'];
 }
 

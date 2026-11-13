@@ -1,13 +1,15 @@
 # Named agent providers
 
-`grokbot` (Grok Bot) and `claudeduet` (Claude Duet) are separate provider
-identities. Existing `dot`, `grok`, `claude` and API routes keep their meanings.
-Names are not interchangeable worker credentials or model attestations.
+`grokbot` (Grok Bot), `claudeduet` (Claude Duet) and `muse` (Muse Wonder agent)
+are separate provider identities. Existing `dot`, `grok`, `claude` and API routes
+keep their meanings. Names are not interchangeable worker credentials or model
+attestations. Agent mode stays separate from API mode (`gemini_api` and similar).
 
 | Provider | Configuration type | Example enablement | Invocation |
 | --- | --- | --- | --- |
 | `grokbot` | `grok_webhook` | `true` | Existing Grok Bot Routine webhook |
 | `claudeduet` | `claudeduet` | `false` | Scaffold only; no verified trigger protocol |
+| `muse` | `muse` | `false` | Scaffold only; intended Cursor Cloud Agent + MCP claim |
 
 The enclosing Python example service remains `enabled: false`. Grok Bot is
 explicitly enabled at the provider level as requested, but this does not deploy
@@ -31,24 +33,35 @@ Confirm a supported trigger, scoped MCP connection, cancellation and delivery se
 before implementing a live adapter. The existing `claude_routine` adapter stays
 available for its original Claude Code purpose.
 
+`muse` is the reserved long-conversation agent identity for Muse Wonder. It is
+not an API-mode model slot and must not share Gemini or ChatGPT plan routes.
+The intended live shape is: service notifies or launches a Cursor Cloud Agent
+configured with Muse Wonder, that agent authenticates to this service's MCP as
+the `muse` worker, then `claim_task` / `report_task_result` like Dot or Grok Bot.
+Until that trigger, OAuth client, admission and cancel/receipt contract are
+verified offline, `enabled: true` fails closed in both runtimes. No Cursor API
+key, Cloud Agent endpoint or speculative webhook is configured in examples.
+
 ## Routing and admission
 
-Python examples register `agent:grokbot` -> `grokbot` and
-`agent:claudeduet` -> `claudeduet`, with separate `configured-grokbot` and
-`configured-claudeduet` model allowlists. Requests use `mode: "agent"` and the
-approved `profile`; they cannot choose a provider directly. The default
-`agent` -> `dot` and existing `agent:second-opinion` -> `grok` are preserved.
+Python examples register `agent:grokbot` -> `grokbot`,
+`agent:claudeduet` -> `claudeduet` and `agent:muse` -> `muse`, with separate
+`configured-grokbot`, `configured-claudeduet` and `configured-muse*` model
+allowlists. Requests use `mode: "agent"` and the approved `profile`; they cannot
+choose a provider directly. The default `agent` -> `dot` and existing
+`agent:second-opinion` -> `grok` are preserved.
 
 Placeholder worker grants use distinct subjects and `azp` clients, with only
 `tasks:read` and `tasks:work`. They are examples, not live admissions.
 
 For the Worker, `AGENT_PROVIDERS` in `cloudflare/task-service/wrangler.example.jsonc`
-contains the two registrations. The other admission maps intentionally stay
+contains the registrations. The other admission maps intentionally stay
 empty. An operator must separately provide all of the following through the
 existing protected configuration process:
 
 - `PROJECT_POLICIES[project].providers["agent:grokbot"] = "grokbot"` and
-  `models.grokbot = ["configured-grokbot"]` (analogous reserved route for Duet).
+  `models.grokbot = ["configured-grokbot"]` (analogous reserved routes for Duet
+  and Muse).
 - `PROJECT_CONTEXTS[projectId].providers` containing the exact provider identity.
 - A distinct `AUTH_CLIENTS[clientId]` entry with that provider, the MCP resource
   and read/work scopes; explicit same-owner `projects` only where required.
@@ -57,14 +70,15 @@ existing protected configuration process:
   owner, client and provider. Caller identities remain submit/read only.
 
 No worker gains `events:subscribe` for these names: event delivery stays with
-Dot; Grok Bot uses Routine webhooks. Existing project/provider checks reject
+Dot; Grok Bot uses Routine webhooks; Muse will use Cloud Agent + MCP claim when
+live. Existing project/provider checks reject
 legacy `grok` or `claude` workers claiming a new provider's task. Registering an
 OAuth public client alone does not grant task access. This change runs no
 registration or grant-writing tooling.
 
 ## Scenario contracts and verification
 
-Both names are accepted in the instance and task schemas wherever other agent
+These names are accepted in the instance and task schemas wherever other agent
 workers are accepted, including the agent phase of `protocol_probe`. API-only
 phase, tool and budget restrictions remain. Offline compilation does not enable
 a provider or change its policy.
@@ -86,7 +100,9 @@ scoped claim/report, cross-provider/project denial and no retry after ambiguous
 receipts. They use synthetic credentials and intercepted transports only; they
 do not verify real connections, billing, latency or business completion.
 
-The native three-role briefing consumer also accepts the two new provider names
+The native three-role briefing consumer also accepts the new provider names
 in its protected role binding. Distinct worker identities and current readback
-remain required; a name alone never yields approval, and Duet remains unavailable
-in the production runtime until an adapter is verified.
+remain required; a name alone never yields approval, and Duet / Muse remain
+unavailable in the production runtime until an adapter is verified.
+Keep `muse` disabled until the Cloud Agent launch/notify path, MCP worker
+identity and cancel/receipt checks are verified the same way.

@@ -39,7 +39,7 @@ policy, `scenario` / `complexity` / `reasoning_effort` remain rejected.
 
 | Scenario | Category | Mode | Ordered providers | Matching hints (examples) |
 | --- | --- | --- | --- | --- |
-| `pr_code_review` | quant_review | agent | dot → grokbot | pull-request, code-review, architecture-audit |
+| `pr_code_review` | quant_review | agent | dot → muse → grokbot | pull-request, code-review, architecture-audit |
 | `strategy_research_summary` | quant_research | agent | dot → grokbot | research-summary, strategy-brief, portfolio-note |
 | `reconciliation_anomaly` | quant_ops | agent | dot → grokbot | recon-diff, ops-anomaly, ledger-mismatch |
 | `signal_context` | quant_signals | agent | dot | signal-context, feature-note |
@@ -52,18 +52,23 @@ The example explicitly sets `matching.default_complexity` to `complex` for
 category chain; an explicit `null` is invalid. Image / size floors use
 `matching.min_with_image`, `matching.size_thresholds` and global `heuristics` with raise-only semantics from the shared contract.
 
+Agent and API modes stay separate in the example preferences: `quick_notification`
+stays gemini-only (API). `muse` appears only on the long code-review scenario
+between `dot` and `grokbot`; while the Muse scaffold remains unavailable it is
+always skipped at readiness.
+
 ## Complexity tier table
 
 | Tier | Provider | Model (example alias) | Reasoning effort |
 | --- | --- | --- | --- |
-| simple | dot / grokbot / gemini | `*-fast` / `configured-api-fast` | low |
-| standard | dot / grokbot / gemini | `configured-dot` / `configured-grokbot` / `configured-api` | medium |
-| complex | dot / grokbot / gemini | `*-strong` / `configured-api` | high |
+| simple | dot / muse / grokbot / gemini | `*-fast` / `configured-api-fast` | low |
+| standard | dot / muse / grokbot / gemini | `configured-dot` / `configured-muse` / `configured-grokbot` / `configured-api` | medium |
+| complex | dot / muse / grokbot / gemini | `*-strong` / `configured-api` | high |
 
-`pr_code_review` sets `tier_overrides.complex` to the strong models explicitly.
-Aliases are synthetic; production names stay in private `models` allowlists.
-Real account ids never appear in the registry; diagnostics mask account-like
-tokens.
+`pr_code_review` sets `tier_overrides.complex` to the strong models explicitly
+(including `muse`). Aliases are synthetic; production names stay in private
+`models` allowlists. Real account ids never appear in the registry; diagnostics
+mask account-like tokens.
 
 ## Validation contract
 

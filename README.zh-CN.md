@@ -64,4 +64,4 @@ tests/      单元与契约测试
 
 MIT，见 [LICENSE](LICENSE)。task-service 组件另有自己的 MIT 许可证，见 [`LICENSE.task-service`](LICENSE.task-service)。
 
-`grokbot` 和 `claudeduet` 的启用与准入规则见 [agent providers](docs/agent-providers.md)。
+`grokbot`、`claudeduet` 和 `muse` 的启用与准入规则见 [agent providers](docs/agent-providers.md)。

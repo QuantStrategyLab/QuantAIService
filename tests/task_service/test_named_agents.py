@@ -34,16 +34,20 @@ class NamedAgentTests(unittest.TestCase):
         env.assert_called_once_with('AI_SERVICE_GROKBOT_WEBHOOK_KEY')
         return app
 
-    def test_examples_load_enabled_grokbot_and_leave_duet_unavailable(self):
+    def test_examples_load_enabled_grokbot_and_leave_scaffolds_unavailable(self):
         app = self.build()
         self.assertIsInstance(app.runtime.providers['grokbot'], GrokWebhookProvider)
         self.assertNotIn('claudeduet', app.runtime.providers)
+        self.assertNotIn('muse', app.runtime.providers)
         with self.assertRaises(PermissionError):
             app.runtime.submit(self.project, 'duet-disabled',
                 {**self.request, 'profile': 'claudeduet', 'model': 'configured-claudeduet'})
+        with self.assertRaises(PermissionError):
+            app.runtime.submit(self.project, 'muse-disabled',
+                {**self.request, 'profile': 'muse', 'model': 'configured-muse'})
         self.assertEqual(app.runtime.policies[self.project].providers['agent'], 'dot')
         self.assertEqual(app.runtime.policies[self.project].providers['agent:second-opinion'], 'grok')
-        for name in ('grokbot', 'claudeduet'):
+        for name in ('grokbot', 'claudeduet', 'muse'):
             grant = next(g for g in self.config['grants'] if g.get('provider') == name)
             self.assertEqual(set(grant['scopes']), {'tasks:read', 'tasks:work'})
             self.assertIn(name.upper(), grant['claims']['azp'])
@@ -52,6 +56,14 @@ class NamedAgentTests(unittest.TestCase):
         self.config['providers']['claudeduet']['enabled'] = True
         with patch('ai_service.server.os.environ.get', side_effect=AssertionError('credential read')):
             with self.assertRaisesRegex(ValueError, 'Duet invocation is not configured'):
+                validate_configuration(self.config)
+            with self.assertRaises(ValueError):
+                build_application(self.config)
+
+    def test_muse_cannot_be_enabled_without_verified_agent_contract(self):
+        self.config['providers']['muse']['enabled'] = True
+        with patch('ai_service.server.os.environ.get', side_effect=AssertionError('credential read')):
+            with self.assertRaisesRegex(ValueError, 'Muse agent invocation is not configured'):
                 validate_configuration(self.config)
             with self.assertRaises(ValueError):
                 build_application(self.config)
@@ -82,7 +94,7 @@ class NamedAgentTests(unittest.TestCase):
         self.assertEqual(app.runtime.get(self.project, task['id'])['status'], 'running')
         scopes = frozenset({'tasks:read', 'tasks:work'})
         worker = Principal('grokbot-worker', self.project, scopes, 'grokbot')
-        for wrong in ('dot', 'grok', 'claude', 'claudeduet'):
+        for wrong in ('dot', 'grok', 'claude', 'claudeduet', 'muse'):
             with self.subTest(provider=wrong), self.assertRaises(PermissionError):
                 app.read_task(Principal('other-worker', self.project, scopes, wrong), task['id'])
         with self.assertRaises(PermissionError):

@@ -291,6 +291,11 @@ def validate_configuration(config):
             # Duet is not Claude Code Routines; no verified invocation protocol yet.
             if item.get('enabled') is True:
                 raise ValueError('Claude Duet invocation is not configured')
+        elif kind == 'muse':
+            # Muse Wonder agent mode is reserved; Cursor Cloud Agents + MCP claim
+            # is not a verified service trigger/receipt contract yet.
+            if item.get('enabled') is True:
+                raise ValueError('Muse agent invocation is not configured')
         elif kind == 'chatgpt_plan_oauth':
             item['token_env']
             ChatGPTPlanProvider(lambda: None, plan_usage_authorized=item.get('plan_usage_authorized', False))
@@ -359,7 +364,7 @@ def build_application(config, *, github_key_loader=None, github_transport=None):
             key = os.environ.get(item['key_env'])
             provider_class = ClaudeRoutineProvider if item['type'] == 'claude_routine' else GrokWebhookProvider
             providers[name] = provider_class(item['url'], key, config['resource'])
-        elif item['type'] == 'claudeduet':
+        elif item['type'] in {'claudeduet', 'muse'}:
             # validate_configuration rejects enablement before reading credentials.
             continue
         elif item['type'] == 'dot_events':

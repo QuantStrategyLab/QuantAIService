@@ -36,7 +36,7 @@ fail-closed provider 选择由 Cloudflare task-service Worker
 
 | 场景 | 类别 | Mode | 有序 providers | 匹配提示（示例） |
 | --- | --- | --- | --- | --- |
-| `pr_code_review` | quant_review | agent | dot → grokbot | pull-request, code-review, architecture-audit |
+| `pr_code_review` | quant_review | agent | dot → muse → grokbot | pull-request, code-review, architecture-audit |
 | `strategy_research_summary` | quant_research | agent | dot → grokbot | research-summary, strategy-brief, portfolio-note |
 | `reconciliation_anomaly` | quant_ops | agent | dot → grokbot | recon-diff, ops-anomaly, ledger-mismatch |
 | `signal_context` | quant_signals | agent | dot | signal-context, feature-note |
@@ -49,17 +49,21 @@ fail-closed provider 选择由 Cloudflare task-service Worker
 `matching.min_with_image`、`matching.size_thresholds` 与全局 `heuristics`，语义为
 共享契约中的只升不降。
 
+示例偏好保持 agent 与 api 分离：`quick_notification` 仍仅走 gemini（API）。
+`muse` 只出现在长代码审查场景，排在 `dot` 与 `grokbot` 之间；Muse 仍为占位时
+就绪检查一律跳过。
+
 ## 复杂度档位表
 
 | 档位 | Provider | 模型（示例别名） | Reasoning effort |
 | --- | --- | --- | --- |
-| simple | dot / grokbot / gemini | `*-fast` / `configured-api-fast` | low |
-| standard | dot / grokbot / gemini | `configured-dot` / `configured-grokbot` / `configured-api` | medium |
-| complex | dot / grokbot / gemini | `*-strong` / `configured-api` | high |
+| simple | dot / muse / grokbot / gemini | `*-fast` / `configured-api-fast` | low |
+| standard | dot / muse / grokbot / gemini | `configured-dot` / `configured-muse` / `configured-grokbot` / `configured-api` | medium |
+| complex | dot / muse / grokbot / gemini | `*-strong` / `configured-api` | high |
 
-`pr_code_review` 在 `tier_overrides.complex` 中显式指定强模型。别名为合成占位；
-生产模型名保留在私有 `models` 白名单。注册表不得出现真实账户 id；诊断日志对
-账户类 token 脱敏。
+`pr_code_review` 在 `tier_overrides.complex` 中显式指定强模型（含 `muse`）。
+别名为合成占位；生产模型名保留在私有 `models` 白名单。注册表不得出现真实账户
+id；诊断日志对账户类 token 脱敏。
 
 ## 校验契约
 

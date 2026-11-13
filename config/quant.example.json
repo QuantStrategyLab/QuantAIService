@@ -38,6 +38,10 @@
       "type": "claudeduet",
       "enabled": false
     },
+    "muse": {
+      "type": "muse",
+      "enabled": false
+    },
     "gemini": {
       "type": "gemini_api",
       "enabled": false,
@@ -53,6 +57,7 @@
         "agent:second-opinion": "grok",
         "agent:grokbot": "grokbot",
         "agent:claudeduet": "claudeduet",
+        "agent:muse": "muse",
         "api": "gemini"
       },
       "models": {
@@ -71,6 +76,11 @@
         ],
         "claudeduet": [
           "configured-claudeduet"
+        ],
+        "muse": [
+          "configured-muse",
+          "configured-muse-fast",
+          "configured-muse-strong"
         ],
         "gemini": [
           "configured-api",
@@ -111,7 +121,7 @@
           "pr_code_review": {
             "category": "quant_review",
             "mode": "agent",
-            "providers": ["dot", "grokbot"],
+            "providers": ["dot", "muse", "grokbot"],
             "matching": {
               "hints": ["pull-request", "code-review", "architecture-audit"],
               "default_complexity": "complex",
@@ -125,6 +135,10 @@
               "complex": {
                 "dot": {
                   "model": "configured-dot-strong",
+                  "reasoning_effort": "high"
+                },
+                "muse": {
+                  "model": "configured-muse-strong",
                   "reasoning_effort": "high"
                 },
                 "grokbot": {
@@ -182,6 +196,10 @@
               "model": "configured-grokbot-fast",
               "reasoning_effort": "low"
             },
+            "muse": {
+              "model": "configured-muse-fast",
+              "reasoning_effort": "low"
+            },
             "gemini": {
               "model": "configured-api-fast",
               "reasoning_effort": "low"
@@ -196,6 +214,10 @@
               "model": "configured-grokbot",
               "reasoning_effort": "medium"
             },
+            "muse": {
+              "model": "configured-muse",
+              "reasoning_effort": "medium"
+            },
             "gemini": {
               "model": "configured-api",
               "reasoning_effort": "medium"
@@ -208,6 +230,10 @@
             },
             "grokbot": {
               "model": "configured-grokbot-strong",
+              "reasoning_effort": "high"
+            },
+            "muse": {
+              "model": "configured-muse-strong",
               "reasoning_effort": "high"
             },
             "gemini": {
@@ -282,6 +308,20 @@
       "owner": "example-org",
       "claims": {
         "azp": "CONFIGURE_CLAUDEDUET_CLIENT"
+      }
+    },
+    {
+      "issuer": "https://CONFIGURE_IDENTITY_PROVIDER",
+      "subject": "CONFIGURE_MUSE_CONNECTION_SUBJECT",
+      "identity": "quant-muse",
+      "provider": "muse",
+      "scopes": [
+        "tasks:read",
+        "tasks:work"
+      ],
+      "owner": "example-org",
+      "claims": {
+        "azp": "CONFIGURE_MUSE_CLIENT"
       }
     },
     {

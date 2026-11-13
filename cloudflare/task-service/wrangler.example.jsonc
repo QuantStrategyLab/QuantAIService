@@ -33,6 +33,10 @@
       "claudeduet": {
         "type": "claudeduet",
         "enabled": false
+      },
+      "muse": {
+        "type": "muse",
+        "enabled": false
       }
     }
   },
