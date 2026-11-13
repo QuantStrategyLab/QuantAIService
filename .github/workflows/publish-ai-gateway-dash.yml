@@ -43,10 +43,12 @@ jobs:
       - name: Validate request
         run: |
           set -euo pipefail
-          [[ "$GITHUB_REF" == "$DEFAULT_REF" ]]
-          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
-          [[ "$SOURCE_SHA" == "$REVIEWED_SOURCE_SHA" ]]
-          [[ "$DRY_RUN" == true || "$DRY_RUN" == false ]]
+          # bash 3.2 (macOS) ignores set -e for a failing standalone [[ ]];
+          # keep || exit 1 so local workflow-contract tests match Ubuntu CI.
+          [[ "$GITHUB_REF" == "$DEFAULT_REF" ]] || exit 1
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          [[ "$SOURCE_SHA" == "$REVIEWED_SOURCE_SHA" ]] || exit 1
+          [[ "$DRY_RUN" == true || "$DRY_RUN" == false ]] || exit 1
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           ref: ${{ env.REVIEWED_SOURCE_SHA }}
@@ -57,7 +59,7 @@ jobs:
       - name: Test reviewed dashboard
         run: |
           set -euo pipefail
-          [[ "$(git rev-parse HEAD)" == "$REVIEWED_SOURCE_SHA" ]]
+          [[ "$(git rev-parse HEAD)" == "$REVIEWED_SOURCE_SHA" ]] || exit 1
           node --test cloudflare/ai-gateway-dash/tests/index.test.mjs
       # No package.json exists in this Worker. Install the fixed CLI outside
       # the source tree; neither install nor dry-run receives Cloudflare secrets.
@@ -72,7 +74,7 @@ jobs:
         working-directory: cloudflare/ai-gateway-dash
         run: |
           set -euo pipefail
-          [[ "$(git rev-parse HEAD)" == "$REVIEWED_SOURCE_SHA" ]]
+          [[ "$(git rev-parse HEAD)" == "$REVIEWED_SOURCE_SHA" ]] || exit 1
           if ! "$RUNNER_TEMP/ai-gateway-tools/node_modules/.bin/wrangler" deploy --dry-run --config wrangler.jsonc >/dev/null 2>&1; then
             echo 'Dashboard bundle validation failed; tool diagnostics suppressed.' >&2
             exit 1
@@ -107,11 +109,11 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
           set -euo pipefail
-          [[ "$GITHUB_REF" == "$DEFAULT_REF" ]]
-          [[ "$DRY_RUN" == false ]]
-          [[ "$SOURCE_SHA" == "$REVIEWED_SOURCE_SHA" ]]
-          [[ "$(git rev-parse HEAD)" == "$REVIEWED_SOURCE_SHA" ]]
-          [[ -n "$CLOUDFLARE_API_TOKEN" && -n "$CLOUDFLARE_ACCOUNT_ID" ]]
+          [[ "$GITHUB_REF" == "$DEFAULT_REF" ]] || exit 1
+          [[ "$DRY_RUN" == false ]] || exit 1
+          [[ "$SOURCE_SHA" == "$REVIEWED_SOURCE_SHA" ]] || exit 1
+          [[ "$(git rev-parse HEAD)" == "$REVIEWED_SOURCE_SHA" ]] || exit 1
+          [[ -n "$CLOUDFLARE_API_TOKEN" && -n "$CLOUDFLARE_ACCOUNT_ID" ]] || exit 1
           if ! "$RUNNER_TEMP/ai-gateway-tools/node_modules/.bin/wrangler" deploy --config wrangler.jsonc >/dev/null 2>&1; then
             echo 'Dashboard publish failed; outcome requires readback before any retry.' >&2
             exit 1
