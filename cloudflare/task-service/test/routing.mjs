@@ -97,3 +97,21 @@ test('policy validation rejects unadmitted effective scenario tier models',()=>{
   overrides.scenarios.example_short_api.tier_overrides={simple:{'gemini-text':{model:'synthetic-unadmitted',reasoning_effort:'low'}}};
   assert.throws(()=>validateRoutingConfig(overrides,models),/scenario tier model is not admitted/);
 });
+
+test('validateRoutingConfig rejects inverted effective size thresholds',()=>{
+  const bad=structuredClone(ROUTING);
+  bad.scenarios.example_media.matching={...bad.scenarios.example_media.matching,size_thresholds:{standard:60000,complex:4000}};
+  assert.throws(()=>validateRoutingConfig(bad),/effective size_thresholds must keep standard < complex/);
+});
+
+test('decideRoute checks entryReady before rejecting a requested model',()=>{
+  assert.throws(()=>decideRoute(ROUTING,{
+    mode:'api',scenario:'example_short_api',objective:'ping',materials:[],output_schema:{},
+    model:'gemini-flash',
+  },{
+    project:'example-org/ExampleApi',
+    providerReady:()=>[true,'ready'],
+    entryReady:()=>[false,'api_model_mismatch'],
+    log:{info(){}},
+  }),/no ready provider for scenario/);
+});

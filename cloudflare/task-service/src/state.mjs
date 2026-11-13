@@ -199,6 +199,9 @@ export class TaskStore extends DurableObject {
     const existing = this.sql.exec("SELECT * FROM tasks WHERE owner=? AND idem=?", owner, idempotencyKey).toArray()[0];
     if (existing) {
       if (existing.digest !== requestDigest) conflict("idempotency key already binds a different request");
+      // Replay still wakes the processor in case the first attempt persisted
+      // the row but failed before scheduling an alarm.
+      await this.#wake();
       return this.#record(existing);
     }
     let provider;

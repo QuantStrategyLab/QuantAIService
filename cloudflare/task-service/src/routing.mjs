@@ -48,6 +48,13 @@ function validateMatching(matching){
   return matching;
 }
 
+function validateEffectiveThresholds(matching,heuristics){
+  const thresholds=matching?.size_thresholds??{};
+  const standard=thresholds.standard??heuristics.size_standard;
+  const complex=thresholds.complex??heuristics.size_complex;
+  if(!(standard<complex))fail('effective size_thresholds must keep standard < complex');
+}
+
 function validateHeuristics(heuristics){
   if(heuristics==null)return {...DEFAULT_HEURISTICS};
   if(!object(heuristics)||Object.keys(heuristics).some(k=>!Object.hasOwn(DEFAULT_HEURISTICS,k)))fail('unknown heuristics fields');
@@ -106,7 +113,9 @@ export function validateRoutingConfig(routing,models){
       }
     }
   }
-  return {schema_version:SCHEMA_VERSION,categories,scenarios,complexity_tiers:tiers,heuristics:validateHeuristics(routing.heuristics)};
+  const heuristics=validateHeuristics(routing.heuristics);
+  for(const scenario of Object.values(scenarios))validateEffectiveThresholds(scenario.matching,heuristics);
+  return {schema_version:SCHEMA_VERSION,categories,scenarios,complexity_tiers:tiers,heuristics};
 }
 
 function categoryDefault(routing,categoryId){
@@ -176,11 +185,11 @@ export function decideRoute(routing,request,{project,providerReady,entryReady,lo
     let entry;
     try{entry=tierEntry(routing,scenarioId,tier,provider);}
     catch(e){skips.push(`skip:${provider}:${e.message}`);continue;}
-    if(Object.hasOwn(request,'model')&&request.model!==entry.model)fail('model does not match complexity tier');
     if(typeof entryReady==='function'){
       const [ok,why]=entryReady(provider,entry);
       if(!ok){skips.push(`skip:${provider}:${why}`);continue;}
     }
+    if(Object.hasOwn(request,'model')&&request.model!==entry.model)fail('model does not match complexity tier');
     let reason=`scenario:${scenarioId};tier:${tier}`;
     if(category)reason=`category:${category};`+reason;
     if(skips.length)reason+=';'+skips.join(';');
