@@ -65,3 +65,15 @@ class ImageCommandTests(unittest.TestCase):
                 execute('中文测试', [], {'type': 'object'}, **kwargs)
             with self.assertRaisesRegex(ValueError, 'changed'):
                 execute('other material', [], {'type': 'object'}, **kwargs)
+
+    def test_scenario_route_omits_locked_profile(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            client = Client()
+            env = {'AI_SERVICE_SCENARIO': 'compliance_scan',
+                   'GITHUB_REPOSITORY': 'Synthetic/Project', 'GITHUB_RUN_ID': '456'}
+            execute('audit rewrite', [], {'type': 'object'}, state_path=root / 'state',
+                    timeout=60, env=env, client=client)
+            self.assertEqual(client.request['scenario'], 'compliance_scan')
+            self.assertNotIn('profile', client.request)
+            self.assertNotIn('model', client.request)

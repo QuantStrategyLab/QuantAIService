@@ -9,7 +9,7 @@ attestations. Agent mode stays separate from API mode (`gemini_api` and similar)
 | --- | --- | --- | --- |
 | `grokbot` | `grok_webhook` | `true` | Existing Grok Bot Routine webhook |
 | `claudeduet` | `claudeduet` | `false` | Scaffold only; no verified trigger protocol |
-| `muse` | `muse` | `false` | Scaffold only; intended Cursor Cloud Agent + MCP claim |
+| `muse` | `muse` | `false` | Cursor Cloud Agents `POST /v1/agents` + muse worker MCP claim |
 
 The enclosing Python example service remains `enabled: false`. Grok Bot is
 explicitly enabled at the provider level as requested, but this does not deploy
@@ -35,12 +35,11 @@ available for its original Claude Code purpose.
 
 `muse` is the reserved long-conversation agent identity for Muse Wonder. It is
 not an API-mode model slot and must not share Gemini or ChatGPT plan routes.
-The intended live shape is: service notifies or launches a Cursor Cloud Agent
-configured with Muse Wonder, that agent authenticates to this service's MCP as
-the `muse` worker, then `claim_task` / `report_task_result` like Dot or Grok Bot.
-Until that trigger, OAuth client, admission and cancel/receipt contract are
-verified offline, `enabled: true` fails closed in both runtimes. No Cursor API
-key, Cloud Agent endpoint or speculative webhook is configured in examples.
+Live shape: launch via `POST https://api.cursor.com/v1/agents` with identifiers
+only in `prompt.text`; the Cloud Agent uses a preconfigured Muse Wonder + muse
+worker MCP connection to claim/report. Example stays `enabled: false` with
+`url` and `key_env: AI_SERVICE_MUSE_API_KEY`. Readiness also requires
+`AI_SERVICE_MUSE_READY`.
 
 ## Routing and admission
 
@@ -70,8 +69,8 @@ existing protected configuration process:
   owner, client and provider. Caller identities remain submit/read only.
 
 No worker gains `events:subscribe` for these names: event delivery stays with
-Dot; Grok Bot uses Routine webhooks; Muse will use Cloud Agent + MCP claim when
-live. Existing project/provider checks reject
+Dot; Grok Bot uses Routine webhooks; Muse uses Cloud Agent launch + MCP claim.
+Existing project/provider checks reject
 legacy `grok` or `claude` workers claiming a new provider's task. Registering an
 OAuth public client alone does not grant task access. This change runs no
 registration or grant-writing tooling.

@@ -36,7 +36,9 @@
       },
       "muse": {
         "type": "muse",
-        "enabled": false
+        "enabled": false,
+        "url": "https://api.cursor.com/v1/agents",
+        "key_env": "AI_SERVICE_MUSE_API_KEY"
       }
     }
   },
