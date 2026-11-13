@@ -60,12 +60,12 @@ jobs:
       - name: Validate SDK packages without monitor readiness in a temporary venv
         run: |
           pin=$(cat ops/quant-monitor/qpk-runtime.sha)
-          [[ "$pin" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$pin" =~ ^[0-9a-f]{40}$ ]] || exit 1
           qpk="$RUNNER_TEMP/monitor-sdk-qpk"
           git init "$qpk"
           git -C "$qpk" fetch --depth=1 https://github.com/QuantStrategyLab/QuantPlatformKit.git "$pin"
           git -C "$qpk" checkout --detach FETCH_HEAD
-          [[ "$(git -C "$qpk" rev-parse HEAD)" == "$pin" ]]
+          [[ "$(git -C "$qpk" rev-parse HEAD)" == "$pin" ]] || exit 1
           # Package/source imports only; watcher imports do not qualify full
           # monitor readiness or invoke its issue-writing entrypoints.
           sdk_venv="$RUNNER_TEMP/monitor-sdk-packages-venv"

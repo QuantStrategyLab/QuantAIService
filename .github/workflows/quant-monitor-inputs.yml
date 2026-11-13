@@ -51,7 +51,7 @@ jobs:
           set -euo pipefail
           python -m pip --isolated install --require-hashes --only-binary=:all: -r ops/quant-monitor/requirements-linux-py312.lock
           pin=$(cat ops/quant-monitor/qpk-runtime.sha)
-          [[ "$pin" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$pin" =~ ^[0-9a-f]{40}$ ]] || exit 1
           git init "$RUNNER_TEMP/qpk"
           git -C "$RUNNER_TEMP/qpk" fetch --depth=1 https://github.com/QuantStrategyLab/QuantPlatformKit.git "$pin"
           git -C "$RUNNER_TEMP/qpk" checkout --detach FETCH_HEAD
