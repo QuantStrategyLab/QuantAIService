@@ -31,11 +31,19 @@ def save(path, value):
             os.unlink(temporary)
 
 
-def execute(prompt, images, schema, *, state_path, timeout, env, client=None):
+def execute(prompt, images, schema, *, state_path, timeout, env, client=None,
+            scenario=None, complexity=None):
     model, profile = env.get('AI_SERVICE_MODEL', ''), env.get('AI_SERVICE_PROFILE', '')
     owner = env.get('AI_SERVICE_PROJECT') or env.get('GITHUB_REPOSITORY')
     operation = env.get('AI_SERVICE_OPERATION_ID') or env.get('GITHUB_RUN_ID')
-    if not all(isinstance(v, str) and v.strip() for v in [model, profile, owner, operation]):
+    scenario = (scenario or env.get('AI_SERVICE_SCENARIO') or '').strip() or None
+    complexity = (complexity or env.get('AI_SERVICE_COMPLEXITY') or '').strip() or None
+    if not all(isinstance(v, str) and v.strip() for v in [owner, operation]):
+        raise ValueError('explicit project and operation identity required')
+    if scenario:
+        if complexity is not None and complexity not in {'simple', 'standard', 'complex'}:
+            raise ValueError('invalid complexity')
+    elif not all(isinstance(v, str) and v.strip() for v in [model, profile]):
         raise ValueError('explicit model, profile, project and operation identity required')
     if not isinstance(timeout, int) or not 1 <= timeout <= 900:
         raise ValueError('invalid timeout')
@@ -53,8 +61,15 @@ def execute(prompt, images, schema, *, state_path, timeout, env, client=None):
                           'base64': base64.b64encode(data).decode('ascii')})
     if len(materials) > 3:
         raise ValueError('too many images')
-    request = {'mode': 'agent', 'model': model, 'profile': profile, 'objective': prompt,
-               'materials': materials, 'output_schema': schema, 'timeout_seconds': timeout}
+    request = {'mode': 'agent', 'objective': prompt, 'materials': materials,
+               'output_schema': schema, 'timeout_seconds': timeout}
+    if scenario:
+        request['scenario'] = scenario
+        if complexity:
+            request['complexity'] = complexity
+    else:
+        request['model'] = model
+        request['profile'] = profile
     request_hash = hashlib.sha256(json_body(request)).hexdigest()
     key = 'image-task:' + digest({'operation': operation, 'request': request_hash})
     client = client or client_from_env()
@@ -111,7 +126,8 @@ def main():
                            str(Path(tempfile.gettempdir()) / ('ai-service-command-' + str(os.getuid()))))
                       / (digest(identity) + '.json'))
         output = execute(prompt, args.image, schema, state_path=state_path,
-                         timeout=args.timeout_seconds, env=os.environ)
+                         timeout=args.timeout_seconds, env=os.environ,
+                         scenario=args.task, complexity=args.complexity)
         if args.out:
             save(args.out, output)
         else:

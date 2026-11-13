@@ -114,14 +114,18 @@ No Python scenario table update is required.
 ## Readiness and operations
 
 Unready providers are skipped at submit; if none remain, submit is denied.
-Dot readiness still requires a live event subscription. In the example,
+Dot readiness still requires a live event subscription. `muse` is ready when
+enabled, `AI_SERVICE_MUSE_READY` is set, and `AI_SERVICE_MUSE_API_KEY` is bound;
+launch is Cursor Cloud Agents `POST https://api.cursor.com/v1/agents`, completion
+via muse worker MCP claim (same contract as PersonalAIService). In the example,
 `gemini` stays `enabled: false` / `api_usage_authorized: false` until
 separately authorized. `chatgpt-plan` is ready in routing when
 `plan_usage_authorized` and its token env are set; **Python** executes
 Responses, while the task-service Worker still only runs `gemini_api`
 (`cloudflare/task-service/README.zh-CN.md`). Do not rewrite Quant API scenarios
 onto Gemini to paper over that adapter gap. Shipping this runtime does not
-deploy services, rotate secrets or enable providers.
+deploy services, rotate secrets or enable providers. Live agent prefs must be
+`muse → grokbot → dot`; keep paid agents until Muse is ready.
 
 Worker routing unit tests under `cloudflare/task-service/test/routing.mjs` use
 Quant scenario ids (`quick_notification`, `pr_code_review`, …), not Personal’s

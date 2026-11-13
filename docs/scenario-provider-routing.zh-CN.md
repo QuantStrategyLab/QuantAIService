@@ -99,7 +99,11 @@ provider 在各档位的完整配置以及项目 provider/model 白名单。兼�
 `api_usage_authorized: false`，直至另行授权。`chatgpt-plan` 在
 `plan_usage_authorized` 且 token 环境已绑定时对路由就绪；**Python** 执行
 Responses，而 task-service Worker 目前仍只跑 `gemini_api`
-（见 `cloudflare/task-service/README.zh-CN.md`）。不要为迁就该适配器缺口，
+（见 `cloudflare/task-service/README.zh-CN.md`）。`muse` 在已启用、
+`AI_SERVICE_MUSE_READY` 已设且 `AI_SERVICE_MUSE_API_KEY` 已绑定时就绪；触发为
+Cursor Cloud Agents `POST https://api.cursor.com/v1/agents`，经 muse worker MCP
+claim 完成（与 PersonalAIService 同合同）。线上 agent 偏好须为
+`muse → grokbot → dot`；Muse 就绪前保留付费 agent。不要为迁就适配器缺口，
 把 Quant API 场景改写成 Gemini。合入本运行时不等于部署服务、轮换密钥或启用
 provider。
 
