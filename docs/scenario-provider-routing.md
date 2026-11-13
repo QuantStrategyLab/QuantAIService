@@ -43,7 +43,7 @@ policy, `scenario` / `complexity` / `reasoning_effort` remain rejected.
 | `strategy_research_summary` | quant_research | agent | muse → grokbot → dot | research-summary, strategy-brief, portfolio-note |
 | `reconciliation_anomaly` | quant_ops | agent | muse → grokbot → dot | recon-diff, ops-anomaly, ledger-mismatch |
 | `signal_context` | quant_signals | agent | muse → grokbot → dot | signal-context, feature-note |
-| `quick_notification` | quant_notify | api | gemini | short-alert, status-ping |
+| `quick_notification` | quant_notify | api | chatgpt-plan | short-alert, status-ping |
 
 The example explicitly sets `matching.default_complexity` to `complex` for
 `pr_code_review` and `reconciliation_anomaly`, `standard` for
@@ -53,7 +53,9 @@ category chain; an explicit `null` is invalid. Image / size floors use
 `matching.min_with_image`, `matching.size_thresholds` and global `heuristics` with raise-only semantics from the shared contract.
 
 Quant scenarios are **not** PersonalAIService scenarios; only the
-`task.routing.v1` contract is shared.
+`task.routing.v1` contract is shared. Personal’s short API example is Gemini;
+Quant’s short API example is `chatgpt-plan`, and Quant also operates OpenAI /
+Claude API plus dual-AI audit outside this registry.
 
 Agent and API modes stay separate:
 
@@ -61,10 +63,13 @@ Agent and API modes stay separate:
   entries are skipped; Muse leads once ready. `claudeduet` is never listed. Do
   not cancel both paid agents until Muse readiness is live.
 - **API** scenarios bind **one** provider. `quick_notification` maps to
-  `gemini` (the Worker-executable `gemini_api` adapter); complexity tiers
-  choose model and reasoning effort. There is no API fallback chain —
-  `chatgpt-plan` stays on the named `api` route (and Python wiring) until a
-  Worker adapter exists; do not list both on the same scenario.
+  `chatgpt-plan` (OpenAI plan OAuth / Responses); complexity tiers choose
+  model and reasoning effort. There is no API fallback chain — Gemini stays
+  on legacy `api:gemini` (or another scenario), not a second preference.
+  Quant’s broader surface also keeps **OpenAI API**, **Anthropic Claude API**,
+  and **dual-AI audit** (Codex primary + independent GPT/Claude secondary) on
+  the AiGateway / audit path; those are not PersonalAIService scenarios and
+  are not expressed as ordered API providers here.
 
 ## Complexity tier table
 
