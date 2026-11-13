@@ -34,6 +34,10 @@ test('resolveComplexity uses registry defaults then heuristics',()=>{
   assert.equal(resolveComplexity({objective:'hi',materials:[]},'example_short_api',ROUTING),'simple');
   // Multilingual size floors use UTF-8 bytes, not JS string length.
   assert.equal(resolveComplexity({objective:'研'.repeat(20000),materials:[]},'example_support_text',ROUTING),'complex');
+  // Explicit min_with_image wins over the image-size fallback.
+  assert.equal(resolveComplexity({
+    objective:'x'.repeat(25000),materials:[{type:'image'}],
+  },'example_media',ROUTING),'standard');
 });
 
 test('decideRoute skips API providers whose fixed model mismatches the tier',()=>{

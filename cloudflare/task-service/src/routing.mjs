@@ -140,11 +140,16 @@ export function resolveComplexity(request,scenarioId,routing={}){
   }else{
     tier=matching.default_complexity??categoryDefault(routing,scenario.category);
   }
-  if(size>=sizeComplex||(hasImage&&size>=heuristics.image_complex_size)||materials.length>=heuristics.materials_complex_count){
-    return raiseTier(tier,'complex');
+  // Match the shared Python helper: min_with_image wins over the image-size
+  // fallback; overall size and material-count floors stay independent.
+  if(hasImage){
+    const floor=Object.hasOwn(matching,'min_with_image')?matching.min_with_image:
+      (size>=heuristics.image_complex_size?'complex':null);
+    if(floor)tier=raiseTier(tier,floor);
   }
-  if(hasImage)tier=raiseTier(tier,matching.min_with_image??'standard');
-  if(size>=sizeStandard)tier=raiseTier(tier,'standard');
+  if(materials.length>=heuristics.materials_complex_count)tier=raiseTier(tier,'complex');
+  if(size>=sizeComplex)tier=raiseTier(tier,'complex');
+  else if(size>=sizeStandard)tier=raiseTier(tier,'standard');
   return tier;
 }
 
