@@ -189,6 +189,24 @@ on port 8797 by default. It is deployed behind nginx on a VPS with:
 
 ## Native operational diagnosis
 
-The Actions diagnostic caller can send new saved-observation reviews through the common task service when `AI_SERVICE_DIAGNOSIS_READY=true`. Configure the new origin, its exact `/mcp` audience, and an admitted model/profile through repository variables. It submits only the existing bounded incident classification and consumes advisory JSON; it cannot run the monitor, repair, publish or place orders. The result records `model_verification=unavailable` for Dot.
+The Actions diagnostic caller uses the shared AI Service contract only:
+`mode=agent` (Dot / Grokbot / Muse) or `mode=api` (chatgpt-plan / gemini).
+Set `AI_SERVICE_DIAGNOSIS_READY=true` (or provide `AI_SERVICE_URL` plus
+`AI_SERVICE_DIAGNOSIS_MODEL`) with the admitted origin, `/mcp` audience, and
+model/profile through repository variables. It submits only the existing
+bounded incident classification and consumes advisory JSON; it cannot run the
+monitor, repair, publish or place orders. The result records
+`model_verification=unavailable` for Dot.
 
-Each intent is checkpointed before its single POST. Accepted tasks retain their ID, service digest, original request digest and polling deadline. An expired polling budget permits one read of the original ID, never another submission. Existing legacy audit jobs are recovered on their original route before any new native task; keep the old read endpoint until their ledger is drained. Unknown submissions and uncertain checkpoints retain the existing claim protection. Enabling the native route does not clear or rewrite those histories.
+Codex CLI / Cursor CLI audit-bridge jobs are not the default path. Without a
+native configuration the caller returns `skipped` / `cli_diagnosis_retired`.
+Set `AI_SERVICE_DIAGNOSIS_LEGACY_CODEX=true` only to drain already-accepted
+legacy jobs on their original route; keep that read endpoint until the ledger
+is empty.
+
+Each intent is checkpointed before its single POST. Accepted tasks retain their
+ID, service digest, original request digest and polling deadline. An expired
+polling budget permits one read of the original ID, never another submission.
+Pending native or legacy jobs are recovered before any new submission. Unknown
+submissions and uncertain checkpoints retain the existing claim protection.
+Enabling the native route does not clear or rewrite those histories.

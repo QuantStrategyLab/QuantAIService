@@ -1,9 +1,14 @@
 #!/usr/bin/env python3
-"""Actions-only, read-only diagnostic caller for the existing audit service.
+"""Actions-only, read-only diagnostic caller for Quant Monitor observations.
 
 Consumes saved observations, never runs the monitor, publishes, or repairs.
-New diagnoses use the common native task contract after explicit configuration.
-Accepted legacy jobs retain their exact recovery route until drained.
+
+Current execution model is the shared AI Service contract only:
+``mode=agent`` (Dot / Grokbot / …) or ``mode=api`` (chatgpt-plan / gemini).
+Codex CLI / Cursor CLI audit-bridge jobs are not the default path; they remain
+only behind ``AI_SERVICE_DIAGNOSIS_LEGACY_CODEX=true`` so accepted legacy jobs
+can drain. Prefer ``AI_SERVICE_DIAGNOSIS_READY=true`` with ``AI_SERVICE_URL``.
+
 See ../AGENTS.md for operating and authorization boundaries.
 """
 from __future__ import annotations
@@ -44,6 +49,20 @@ CLOUD_FAILURE_REASONS = frozenset({
 
 class Rejected(ValueError):
     pass
+
+
+def native_diagnosis_ready(env) -> bool:
+    """True when the shared agent/api task service is configured for diagnosis."""
+    if env.get("AI_SERVICE_DIAGNOSIS_READY") == "true":
+        return True
+    url = env.get("AI_SERVICE_URL", "")
+    model = env.get("AI_SERVICE_DIAGNOSIS_MODEL", "")
+    return bool(isinstance(url, str) and url.strip() and isinstance(model, str) and model.strip())
+
+
+def legacy_codex_diagnosis_allowed(env) -> bool:
+    """Opt-in only: Codex CLI audit-bridge path is retired as the default."""
+    return env.get("AI_SERVICE_DIAGNOSIS_LEGACY_CODEX") == "true"
 
 
 class NoRedirect(request.HTTPRedirectHandler):
@@ -310,10 +329,13 @@ def diagnose(root, state_dir, *, include_healthy=False, env=None, opener=None,
         path = state_dir / (now.date().isoformat() + ".json")
         pending = unresolved_attempts(state_dir)
         native_pending = pending and pending[0][1].get('protocol') == 'native_tasks_v1'
-        if native_pending or (not pending and env.get('AI_SERVICE_DIAGNOSIS_READY') == 'true'):
+        legacy_pending = pending and pending[0][1].get('protocol') != 'native_tasks_v1'
+        if native_pending or (not pending and native_diagnosis_ready(env)):
             return native_diagnosis(root, state_dir, path, pending, env=env, opener=opener, now=now,
                                     monotonic=monotonic, sleep=sleep, persist=persist,
                                     include_healthy=include_healthy, prepare_observation=prepare_observation)
+        if not legacy_pending and not legacy_codex_diagnosis_allowed(env):
+            return {"status": "skipped", "reason": "cli_diagnosis_retired"}
         https_url(service, base=True)
         for previous, state in pending:
             if previous != path and not state.get("job_id"):
@@ -407,7 +429,12 @@ def diagnose_cloud(*, include_healthy=False, verify_state_only=False, env=None,
     if not identity_available(env, include_healthy=include_healthy):
         return {"status": "skipped", "reason": "no_oidc"}
     if not verify_state_only:
-        https_url((env.get("AI_SERVICE_URL", "") if env.get("AI_SERVICE_DIAGNOSIS_READY") == "true" else env.get("CODEX_AUDIT_SERVICE_URL", "")).rstrip("/"), base=True)
+        if native_diagnosis_ready(env):
+            https_url(env.get("AI_SERVICE_URL", "").rstrip("/"), base=True)
+        elif legacy_codex_diagnosis_allowed(env):
+            https_url(env.get("CODEX_AUDIT_SERVICE_URL", "").rstrip("/"), base=True)
+        # Otherwise diagnose() returns cli_diagnosis_retired, or recovers a
+        # pending legacy job and validates CODEX_AUDIT_SERVICE_URL itself.
     elif env["GITHUB_EVENT_NAME"] != "workflow_dispatch":
         raise Rejected("state_verification_requires_manual_dispatch")
     if (not re.fullmatch(r"[0-9]{1,24}", env.get("GITHUB_RUN_ID", ""))
