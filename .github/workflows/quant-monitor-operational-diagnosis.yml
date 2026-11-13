@@ -122,6 +122,13 @@ jobs:
                   f"::notice::Native diagnosis completed via provider={provider} model={model}."
               )
               sys.exit(0)
+          if status == "verified":
+              mode = payload.get("mode") or "unspecified"
+              print(
+                  f"::notice::Cloud state verification completed (mode={mode}); "
+                  "no diagnosis task was submitted."
+              )
+              sys.exit(0)
           print(f"::error::Unexpected diagnosis receipt status={status!r} reason={reason!r}")
           sys.exit(1)
           PY
