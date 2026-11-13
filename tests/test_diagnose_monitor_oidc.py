@@ -759,6 +759,17 @@ def test_workflow_has_no_trading_deployment_or_static_credentials():
         assert forbidden not in text
 
 
+def test_workflow_surfaces_skipped_diagnosis_distinct_from_success():
+    path = Path(__file__).resolve().parents[1] / ".github/workflows/quant-monitor-operational-diagnosis.yml"
+    text = path.read_text()
+    assert "- name: Surface skipped vs completed diagnosis" in text
+    assert "Native diagnosis skipped" in text
+    assert "does not mean a Dot/Grokbot task completed" in text
+    assert "Native diagnosis completed via provider=" in text
+    assert "Cloud state verification completed" in text
+    assert 'status == "verified"' in text
+
+
 NATIVE_ID = '42509a19-b704-4a4b-a66c-f163a15699f1'
 
 

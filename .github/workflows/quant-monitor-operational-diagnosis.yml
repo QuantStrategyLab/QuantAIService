@@ -94,6 +94,44 @@ jobs:
           python3 -B scripts/diagnose_monitor_oidc.py \
             --cloud \
             --receipt "$RUNNER_TEMP/operational-diagnosis-receipt.json" "${args[@]}"
+      - name: Surface skipped vs completed diagnosis
+        if: always()
+        run: |
+          set -euo pipefail
+          receipt="$RUNNER_TEMP/operational-diagnosis-receipt.json"
+          if [ ! -f "$receipt" ]; then
+            echo "::error::Diagnosis receipt missing after the diagnose step."
+            exit 1
+          fi
+          python3 - <<'PY'
+          import json, os, pathlib, sys
+          receipt = pathlib.Path(os.environ["RUNNER_TEMP"]) / "operational-diagnosis-receipt.json"
+          payload = json.loads(receipt.read_text())
+          status = payload.get("status")
+          reason = payload.get("reason")
+          provider = payload.get("provider")
+          model = payload.get("model")
+          if status == "skipped":
+              print(
+                  f"::warning::Native diagnosis skipped ({reason or 'unspecified'}); "
+                  "workflow success does not mean a Dot/Grokbot task completed."
+              )
+              sys.exit(0)
+          if status == "succeeded":
+              print(
+                  f"::notice::Native diagnosis completed via provider={provider} model={model}."
+              )
+              sys.exit(0)
+          if status == "verified":
+              mode = payload.get("mode") or "unspecified"
+              print(
+                  f"::notice::Cloud state verification completed (mode={mode}); "
+                  "no diagnosis task was submitted."
+              )
+              sys.exit(0)
+          print(f"::error::Unexpected diagnosis receipt status={status!r} reason={reason!r}")
+          sys.exit(1)
+          PY
       - name: Save sanitized service receipt
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
