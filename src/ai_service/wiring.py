@@ -64,8 +64,11 @@ def validate_configuration(config):
             if item.get('enabled') is True:
                 raise ValueError('Muse agent invocation is not configured')
         elif kind == 'chatgpt_plan_oauth':
+            # Unauthorized entries stay as routing placeholders (same as disabled gemini).
             item['token_env']
-            ChatGPTPlanProvider(lambda: None, plan_usage_authorized=item.get('plan_usage_authorized', False))
+            if item.get('plan_usage_authorized') is not True:
+                continue
+            ChatGPTPlanProvider(lambda: None, plan_usage_authorized=True)
         elif kind == 'gemini_api':
             if item.get('enabled') is not True:
                 continue
@@ -143,9 +146,11 @@ def build_application(config, *, github_key_loader=None, github_transport=None):
             events = EventSubscriptions(runtime, provider_name=name, can_access=auth.can_access_events)
             providers[name] = DotEventProvider(events)
         elif item['type'] == 'chatgpt_plan_oauth':
+            if item.get('plan_usage_authorized') is not True:
+                continue
             environment_name = item['token_env']
             providers[name] = ChatGPTPlanProvider(lambda name=environment_name: srv.os.environ.get(name),
-                                                  plan_usage_authorized=item.get('plan_usage_authorized', False))
+                                                  plan_usage_authorized=True)
         elif item['type'] == 'gemini_api':
             if item.get('enabled') is not True:
                 continue
