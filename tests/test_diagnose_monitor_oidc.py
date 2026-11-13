@@ -125,12 +125,26 @@ def test_bad_admission_never_polls_or_retries(tmp_path, changes):
         run(tmp_path, Opener([]))
 
 
-@pytest.mark.parametrize("last", [job("failed", error="sensitive backend details"),
-                                  job("succeeded", output=""),
-                                  job("succeeded", job_id="b" * 32, output="advice"),
+@pytest.mark.parametrize("last,receipt_status", [
+    (job("failed", error="sensitive backend details"), "audit_job_failed"),
+    (job("succeeded", output=""), "empty_diagnosis_output"),
+])
+def test_terminal_poll_failures_persist_receipt_without_success(tmp_path, last, receipt_status):
+    snapshot(tmp_path)
+    opener = Opener([{"value": "synthetic-oidc"}, job(), {"value": "synthetic-oidc"}, last])
+    with pytest.raises(caller.Rejected):
+        run(tmp_path, opener)
+    state = json.loads(next((tmp_path / "actions-state").glob("*.json")).read_text())
+    assert state["receipt"]["status"] == receipt_status
+    assert "sensitive" not in json.dumps(state["receipt"])
+    assert len([r for r in opener.calls if r.method == "POST"]) == 1
+    assert caller.unresolved_attempts(tmp_path / "actions-state") == []
+
+
+@pytest.mark.parametrize("last", [job("succeeded", job_id="b" * 32, output="advice"),
                                   job("succeeded", model="changed", output="advice"),
                                   b"not-json-private-details"])
-def test_poll_failures_cannot_be_success(tmp_path, last):
+def test_ambiguous_poll_failures_cannot_be_success(tmp_path, last):
     snapshot(tmp_path)
     opener = Opener([{"value": "synthetic-oidc"}, job(), {"value": "synthetic-oidc"}, last])
     with pytest.raises((caller.Rejected, ValueError)):
@@ -780,6 +794,7 @@ class NativeOpener:
         self.lost_submit = False
         self.status = 'completed'
         self.owner = caller.REPOSITORY
+        self.empty_output = False
 
     def open(self, req, timeout):
         self.calls.append(req)
@@ -792,8 +807,9 @@ class NativeOpener:
             status = 'queued'
         else:
             status = self.status
+        output = {'diagnosis': ''} if self.empty_output else {'diagnosis': 'synthetic advisory'}
         value = {'id': NATIVE_ID, 'owner': self.owner, 'provider': 'dot', 'request': self.payload,
-                 'status': status, 'result_kind': 'advisory', 'output': {'diagnosis': 'synthetic advisory'}}
+                 'status': status, 'result_kind': 'advisory', 'output': output}
         return io.BytesIO(json.dumps(value).encode())
 
 
@@ -806,6 +822,47 @@ def native_environment():
 def native_run(root, opener, **kwargs):
     return caller.diagnose(root, root / 'actions-state', env=native_environment(), opener=opener,
                            now=NOW, monotonic=lambda: 0, sleep=lambda _: None, **kwargs)
+
+
+
+def test_legacy_failed_job_persists_receipt_and_stops_retry(tmp_path):
+    snapshot(tmp_path)
+    opener = Opener([{"value": "synthetic-oidc"}, job(), {"value": "synthetic-poll-oidc"},
+                     job("failed")])
+    with pytest.raises(caller.Rejected, match="audit_job_failed"):
+        run(tmp_path, opener)
+    path = tmp_path / "actions-state" / (NOW.date().isoformat() + ".json")
+    state = json.loads(path.read_text())
+    assert state["receipt"]["status"] == "audit_job_failed"
+    assert state["receipt"]["job_id"] == ID
+    assert caller.unresolved_attempts(tmp_path / "actions-state") == []
+    retry = Opener([])
+    assert run(tmp_path, retry) == {"status": "skipped", "reason": "daily_attempt_limit"}
+    assert retry.calls == []
+
+
+def test_legacy_empty_output_persists_receipt_and_stops_retry(tmp_path):
+    snapshot(tmp_path)
+    opener = Opener([{"value": "synthetic-oidc"}, job(), {"value": "synthetic-poll-oidc"},
+                     job("succeeded", output="   ")])
+    with pytest.raises(caller.Rejected, match="empty_diagnosis_output"):
+        run(tmp_path, opener)
+    path = tmp_path / "actions-state" / (NOW.date().isoformat() + ".json")
+    assert json.loads(path.read_text())["receipt"]["status"] == "empty_diagnosis_output"
+    assert caller.unresolved_attempts(tmp_path / "actions-state") == []
+
+
+def test_native_empty_output_persists_receipt_and_stops_retry(tmp_path):
+    snapshot(tmp_path)
+    opener = NativeOpener()
+    opener.status = 'completed'
+    opener.empty_output = True
+    with pytest.raises(caller.Rejected, match='empty_diagnosis_output'):
+        native_run(tmp_path, opener)
+    path = tmp_path / 'actions-state' / (NOW.date().isoformat() + '.json')
+    assert json.loads(path.read_text())['receipt']['status'] == 'empty_diagnosis_output'
+    assert caller.unresolved_attempts(tmp_path / 'actions-state') == []
+    assert native_run(tmp_path, NativeOpener()) == {'status': 'skipped', 'reason': 'daily_attempt_limit'}
 
 
 def test_native_diagnosis_uses_common_task_contract_and_advisory_receipt(tmp_path):
