@@ -1,4 +1,7 @@
-"""Task service application: composes HTTP, MCP, and worker capabilities."""
+"""Task service application: composes task, MCP, and worker capabilities.
+
+The HTTP server calls into this object; it is not itself a transport.
+"""
 from __future__ import annotations
 
 from ..notifications import NativeNotifications
