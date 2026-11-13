@@ -253,6 +253,10 @@ def native_diagnosis(root, state_dir, path, pending, *, env, opener, now, monoto
         if task.get('status') == 'completed':
             output = task.get('output')
             if not isinstance(output, dict) or set(output) != {'diagnosis'} or not isinstance(output['diagnosis'], str) or not output['diagnosis'].strip():
+                persist(path, {**state, 'receipt': {'status': 'empty_diagnosis_output',
+                                                     'protocol': 'native_tasks_v1',
+                                                     'advisory_only': True,
+                                                     'execution_authority_granted': False}})
                 raise Rejected('empty_diagnosis_output')
             text = output['diagnosis']
             receipt = {'status': 'succeeded', 'protocol': 'native_tasks_v1', 'job_id': state['job_id'],
@@ -366,10 +370,20 @@ def diagnose(root, state_dir, *, include_healthy=False, env=None, opener=None,
             job = json_request(opener, service + JOBS + "/" + state["job_id"], oidc_token(env, opener))
             check_job(job, state["job_id"], state["route"])
             if job["status"] == "failed":
+                # Terminal failure must leave a receipt so schedule retries do not
+                # keep re-polling the same resolved job as unresolved_attempts.
+                persist(path, {**state, "receipt": {"status": "audit_job_failed",
+                                                    "job_id": job["job_id"],
+                                                    "advisory_only": True,
+                                                    "execution_authority_granted": False}})
                 raise Rejected("audit_job_failed")
             if job["status"] == "succeeded":
                 output = job.get("output")
                 if not isinstance(output, str) or not output.strip():
+                    persist(path, {**state, "receipt": {"status": "empty_diagnosis_output",
+                                                        "job_id": job["job_id"],
+                                                        "advisory_only": True,
+                                                        "execution_authority_granted": False}})
                     raise Rejected("empty_diagnosis_output")
                 receipt = {"status": "succeeded", "job_id": job["job_id"], **state["route"],
                            "task": TASK, "mode": "review_only", "sandbox": "read-only",

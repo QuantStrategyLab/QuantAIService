@@ -98,4 +98,4 @@ and result binding remain unchanged. `python -m ai_service.image_command` adapts
 existing read-only prompt/image/schema commands to explicitly configured task
 routes. Unknown submissions retain their state and use read-only lookup.
 
-Provider names `grokbot` and `claudeduet`, enablement and admission requirements are documented in [agent providers](docs/agent-providers.md).
+Provider names `grokbot`, `claudeduet` and `muse`, enablement and admission requirements are documented in [agent providers](docs/agent-providers.md).

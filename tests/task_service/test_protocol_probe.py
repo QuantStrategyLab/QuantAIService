@@ -72,7 +72,7 @@ class ProtocolProbeTests(unittest.TestCase):
         instance['stages'][0]['worker_type'] = 'api'
         with self.assertRaises(ContractError):
             prepared(instance=instance)
-        for worker in ('grok', 'grokbot', 'claudeduet'):
+        for worker in ('grok', 'grokbot', 'claudeduet', 'muse'):
             instance = approved()
             instance['stages'][0]['worker_type'] = worker
             with self.subTest(worker=worker), self.assertRaises(ContractError):

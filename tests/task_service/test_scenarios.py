@@ -92,7 +92,7 @@ class ScenarioContractTests(unittest.TestCase):
         self.assertEqual(loaded['stages'][0]['limits']['monthly_budget_usd'], 2)
 
     def test_optional_agents_compile_all_templates_without_enabling_instances(self):
-        for worker in ('claude', 'grokbot', 'claudeduet'):
+        for worker in ('claude', 'grokbot', 'claudeduet', 'muse'):
             for template in FIELDS:
                 with self.subTest(template=template, worker=worker):
                     value = instance(template, worker)

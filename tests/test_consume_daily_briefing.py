@@ -322,6 +322,15 @@ def test_native_briefing_rejects_claudeduet_until_adapter_exists(tmp_path, capsy
     assert transport.claims == []
 
 
+def test_native_briefing_rejects_muse_until_adapter_exists(tmp_path, capsys):
+    context, transport = _native_briefing_context(tmp_path)
+    context["roles"]["secondary"]["provider"] = "muse"
+    assert _call_native_briefing(tmp_path, context) != 0
+    capsys.readouterr()
+    assert not [c for c in transport.calls if c[:2] == ("POST", "/v1/tasks")]
+    assert transport.claims == []
+
+
 @pytest.mark.parametrize("field,value", [
     ("owner", "Pigbibi/PhotoStory"), ("provider", "other-provider"),
     ("worker", "q02-other-worker"), ("revision", 2), ("revision", True),
