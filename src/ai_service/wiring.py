@@ -1,4 +1,8 @@
-"""Configuration validation and runtime assembly."""
+"""Configuration validation and runtime assembly (composition root).
+
+Builds ``Application`` for the HTTP transport. Keep request handlers in
+``application/`` and socket framing in ``server.py``.
+"""
 from __future__ import annotations
 
 from pathlib import Path

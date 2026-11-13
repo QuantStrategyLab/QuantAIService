@@ -1,4 +1,7 @@
-"""MCP JSON-RPC: tools, events, and worker operations."""
+"""MCP JSON-RPC operations: tools, events, and worker methods.
+
+Invoked by the HTTP ``/mcp`` transport path; framing stays in ``server.py``.
+"""
 from __future__ import annotations
 
 import json
