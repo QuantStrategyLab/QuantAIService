@@ -96,5 +96,13 @@ provider 在各档位的完整配置以及项目 provider/model 白名单。兼�
 
 提交时跳过未就绪 provider；若列表耗尽则拒绝提交。Dot 就绪仍要求有效的
 事件订阅。示例中 `gemini` 保持 `enabled: false` /
-`api_usage_authorized: false`，直至另行授权。合入本运行时不等于部署服务、
-轮换密钥或启用 provider。
+`api_usage_authorized: false`，直至另行授权。`chatgpt-plan` 在
+`plan_usage_authorized` 且 token 环境已绑定时对路由就绪；**Python** 执行
+Responses，而 task-service Worker 目前仍只跑 `gemini_api`
+（见 `cloudflare/task-service/README.zh-CN.md`）。不要为迁就该适配器缺口，
+把 Quant API 场景改写成 Gemini。合入本运行时不等于部署服务、轮换密钥或启用
+provider。
+
+Worker 路由单测 `cloudflare/task-service/test/routing.mjs` 使用 Quant 场景 id
+（`quick_notification`、`pr_code_review` 等），不用 Personal 的 `example_*` /
+`gemini-text` 目录。
