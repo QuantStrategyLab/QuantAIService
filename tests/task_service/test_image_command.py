@@ -47,6 +47,9 @@ class ImageCommandTests(unittest.TestCase):
             output = execute('测试图片', [image], {'type': 'object'}, **kwargs)
             self.assertEqual(output, {'answer': '样例'})
             self.assertEqual(client.request['materials'], [{'type': 'image', 'mime_type': 'image/png', 'base64': PNG}])
+            self.assertEqual(list(client.request), [
+                'mode', 'model', 'profile', 'objective', 'materials',
+                'output_schema', 'timeout_seconds'])
             execute('测试图片', [image], {'type': 'object'}, **kwargs)
             self.assertEqual(len(client.posts), 1)
 

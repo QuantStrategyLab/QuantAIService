@@ -61,15 +61,17 @@ def execute(prompt, images, schema, *, state_path, timeout, env, client=None,
                           'base64': base64.b64encode(data).decode('ascii')})
     if len(materials) > 3:
         raise ValueError('too many images')
-    request = {'mode': 'agent', 'objective': prompt, 'materials': materials,
-               'output_schema': schema, 'timeout_seconds': timeout}
     if scenario:
-        request['scenario'] = scenario
+        request = {'mode': 'agent', 'objective': prompt, 'materials': materials,
+                   'output_schema': schema, 'timeout_seconds': timeout,
+                   'scenario': scenario}
         if complexity:
             request['complexity'] = complexity
     else:
-        request['model'] = model
-        request['profile'] = profile
+        # Keep historical key order so frozen non-scenario hashes stay stable.
+        request = {'mode': 'agent', 'model': model, 'profile': profile,
+                   'objective': prompt, 'materials': materials,
+                   'output_schema': schema, 'timeout_seconds': timeout}
     request_hash = hashlib.sha256(json_body(request)).hexdigest()
     key = 'image-task:' + digest({'operation': operation, 'request': request_hash})
     client = client or client_from_env()
