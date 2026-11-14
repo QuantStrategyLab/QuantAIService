@@ -18,6 +18,71 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def offline_setup_python():
+    """Install fixture bytes, then execute the real SDK provenance checks."""
+    return f"#!{sys.executable}\n" + textwrap.dedent('''\
+            import json, os, pathlib, platform, shutil, sys
+            path = pathlib.Path
+            args = sys.argv[1:]
+            with open(os.environ['FIXTURE_LOG'], 'a') as out:
+                out.write(json.dumps({'command': 'python', 'args': args, 'pythonpath': 'PYTHONPATH' in os.environ}) + '\\n')
+            if args[:1] == ['-I']:
+                assert 'PYTHONPATH' not in os.environ
+                args = args[1:]
+            fault = os.environ.get('FIXTURE_FAULT', '')
+            venv = path(__file__).resolve().parent.parent
+            site = venv / 'fixture-site'
+            if args[:2] == ['-m', 'venv']:
+                target = path(args[-1]) / 'bin/python'
+                target.parent.mkdir(parents=True)
+                shutil.copyfile(__file__, target)
+                target.chmod(0o755)
+            elif args[:2] == ['-m', 'pip']:
+                args = args[2:]
+                if args[:1] == ['--isolated']:
+                    args = args[1:]
+                if args == ['check']:
+                    raise SystemExit(0)
+                assert args[:1] == ['install']
+                if '--require-hashes' in args:
+                    raise SystemExit(17 if fault == 'dependencies' else 0)
+                assert '--no-deps' in args and '--no-build-isolation' in args
+                source = path(args[-1])
+                qas = 'quant-ai-service' in (source / 'pyproject.toml').read_text()
+                if qas and fault == 'qas_install':
+                    raise SystemExit(18)
+                for package in (source / 'src').iterdir():
+                    shutil.copytree(package, site / package.name, dirs_exist_ok=True)
+                if qas:
+                    import tomllib
+                    sdk_version = tomllib.loads((source / 'pyproject.toml').read_text())['project']['version']
+                    metadata = site / ('quant_ai_service-' + sdk_version + '.dist-info/METADATA')
+                    metadata.parent.mkdir()
+                    metadata.write_text('Name: quant-ai-service\\nVersion: ' + ('0.0.0' if fault == 'version' else sdk_version) + '\\n')
+                    if fault == 'digest':
+                        with (site / 'ai_service/client.py').open('a') as out:
+                            out.write('\\n# changed fixture bytes\\n')
+            elif args[:1] == ['-']:
+                code = sys.stdin.read()
+                if 'glibc' in code and 'need 3.12' in code:
+                    from collections import namedtuple
+                    sys.version_info = namedtuple('Version', 'major minor micro releaselevel serial')(3, 11 if fault == 'platform' else 12, 0, 'final', 0)
+                    platform.system = lambda: 'Linux'
+                    platform.machine = lambda: 'x86_64'
+                    platform.python_implementation = lambda: 'CPython'
+                    os.confstr = lambda key: 'glibc 2.35'
+                else:
+                    sys.prefix = str(venv)
+                    sys.path[:] = [str(site), *[p for p in sys.path if 'site-packages' not in p]]
+                    if fault == 'origin':
+                        sys.path.insert(0, str(path(os.environ['AIAUDIT_BRIDGE_ROOT']) / 'src'))
+                sys.argv = ['-', *args[1:]]
+                exec(compile(code, '<setup-offline-fixture>', 'exec'), {'__name__': '__main__'})
+            else:
+                raise SystemExit('unexpected Python call: ' + repr(args))
+            ''')
+
+
 class DeployScriptTests(unittest.TestCase):
     def test_staging_preflight_ignores_shared_mirror_python_startup(self) -> None:
         """A clean caller must not execute Python startup code from the old mirror."""
@@ -1519,7 +1584,14 @@ sys.argv = ['offline-fixture', 'synthetic-checkout'] + ([{str(root)!r}, '12345']
             self._git(upstream, "config", "user.name", "Test")
             self._git(upstream, "config", "user.email", "test@example.invalid")
             (upstream / "module.py").write_text("VERSION = 1\n", encoding="utf-8")
-            self._git(upstream, "add", "module.py")
+            package = upstream / "src/quant_platform_kit/strategy_lifecycle/watch"
+            package.mkdir(parents=True)
+            for directory in (package, package.parent, package.parent.parent):
+                (directory / "__init__.py").write_text("")
+            (package / "runner.py").write_text("def dispatch_strategy_watch_findings(): pass\n")
+            (package / "strategy_watch.py").write_text("def build_strategy_monitoring_finding(): pass\n")
+            (upstream / "pyproject.toml").write_text('[project]\nname="quant-platform-kit"\nversion="1.0.0"\n')
+            self._git(upstream, "add", ".")
             self._git(upstream, "commit", "-m", "base")
             pin = self._git(upstream, "rev-parse", "HEAD")
             (upstream / "module.py").write_text("VERSION = 2\n", encoding="utf-8")
@@ -1541,6 +1613,12 @@ sys.argv = ['offline-fixture', 'synthetic-checkout'] + ([{str(root)!r}, '12345']
                 ROOT / "requirements-linux-py312.lock",
                 monitor / "requirements-linux-py312.lock",
             )
+            sdk = aab / "src/ai_service"
+            sdk.mkdir(parents=True)
+            for name in ("__init__.py", "client.py", "transport.py"):
+                shutil.copyfile(ROOT.parents[1] / "src/ai_service" / name, sdk / name)
+            shutil.copyfile(ROOT.parents[1] / "pyproject.toml", aab / "pyproject.toml")
+            self._git(aab, "add", "src/ai_service", "pyproject.toml")
             self._git(
                 aab,
                 "add",
@@ -1579,79 +1657,8 @@ sys.argv = ['offline-fixture', 'synthetic-checkout'] + ([{str(root)!r}, '12345']
             )
             git_stub.chmod(0o755)
             pip_log = root / "pip.log"
-            pip_code = (
-                f"#!{sys.executable}\n"
-                "import os\n"
-                "import sys\n"
-                "from pathlib import Path\n"
-                f"log = Path({str(pip_log)!r})\n"
-                "prev = log.read_text() if log.exists() else ''\n"
-                "log.write_text(prev + ' '.join(sys.argv[1:]) + '\\n')\n"
-                "args = sys.argv[1:]\n"
-                "if os.environ.get('SETUP_FAIL_PIP') == '1' and 'install' in args:\n"
-                "    raise SystemExit(17)\n"
-                "if '-e' in args:\n"
-                "    raise SystemExit(9)\n"
-                "if 'install' in args and '-U' in args:\n"
-                "    raise SystemExit(8)\n"
-                "if args[:1] == ['check']:\n"
-                "    raise SystemExit(0)\n"
-                "if 'install' in args and '--require-hashes' in args and '-r' in args:\n"
-                "    raise SystemExit(0)\n"
-                "if 'install' in args and '--no-deps' in args and '--no-build-isolation' in args:\n"
-                "    source = Path(args[-1])\n"
-                "    if source.is_dir():\n"
-                "        (source / 'installed-from-archive').write_text('ok')\n"
-                "    raise SystemExit(0)\n"
-                "raise SystemExit(f'unexpected pip invocation: {args!r}')\n"
-            )
-            venv_python_code = (
-                f"#!{sys.executable}\n"
-                "import subprocess\n"
-                "import sys\n"
-                "from pathlib import Path\n"
-                "args = sys.argv[1:]\n"
-                "if args[:1] == ['-I']:\n"
-                "    import os\n"
-                "    assert 'PYTHONPATH' not in os.environ\n"
-                "    args = args[1:]\n"
-                "if args[:2] == ['-m', 'pip']:\n"
-                "    raise SystemExit(subprocess.call([str(Path(__file__).with_name('pip')), *args[2:]]))\n"
-                "raise SystemExit(f'unexpected venv python: {args!r}')\n"
-            )
             python_stub = bin_dir / "python3"
-            python_stub.write_text(
-                f"#!{sys.executable}\n"
-                "from pathlib import Path\n"
-                "import sys\n"
-                "args = sys.argv[1:]\n"
-                "if args[:1] == ['-I']:\n"
-                "    import os\n"
-                "    assert 'PYTHONPATH' not in os.environ\n"
-                "    args = args[1:]\n"
-                "if args == ['-']:\n"
-                "    code = sys.stdin.read()\n"
-                "    if 'glibc' in code and 'need 3.12' in code:\n"
-                "        import os, platform\n"
-                "        sys.version_info = (3, 12, 0, 'final', 0)\n"
-                "        platform.system = lambda: 'Linux'\n"
-                "        platform.machine = lambda: 'x86_64'\n"
-                "        platform.python_implementation = lambda: 'CPython'\n"
-                "        os.confstr = lambda key: 'glibc 2.35'\n"
-                "        exec(compile(code, '<runtime-preflight>', 'exec'), {'__name__': '__main__'})\n"
-                "        raise SystemExit(0)\n"
-                "    raise SystemExit(f'unexpected python stdin: {code[:80]!r}')\n"
-                "if len(args) >= 3 and args[0] == '-m' and args[1] == 'venv':\n"
-                "    bindir = Path(args[-1]) / 'bin'\n"
-                "    bindir.mkdir(parents=True, exist_ok=True)\n"
-                f"    (bindir / 'pip').write_text({pip_code!r})\n"
-                "    (bindir / 'pip').chmod(0o755)\n"
-                f"    (bindir / 'python').write_text({venv_python_code!r})\n"
-                "    (bindir / 'python').chmod(0o755)\n"
-                "    raise SystemExit(0)\n"
-                "raise SystemExit(f'unexpected python3 invocation: {args!r}')\n",
-                encoding="utf-8",
-            )
+            python_stub.write_text(offline_setup_python(), encoding="utf-8")
             python_stub.chmod(0o755)
             for name in ("gh", "gcloud"):
                 stub = bin_dir / name
@@ -1661,6 +1668,9 @@ sys.argv = ['offline-fixture', 'synthetic-checkout'] + ([{str(root)!r}, '12345']
             env = {
                 **os.environ,
                 "PATH": f"{bin_dir}:{os.environ['PATH']}",
+                "QUANT_MONITOR_V2_RUNTIME_READY": "true",
+                "FIXTURE_LOG": str(pip_log),
+                "FIXTURE_FAULT": "",
                 "TMPDIR": str(root),
                 "QUANT_MONITOR_ROOT": str(monitor),
                 "QUANT_PLATFORM_KIT_ROOT": str(qpk),
@@ -1769,7 +1779,7 @@ sys.argv = ['offline-fixture', 'synthetic-checkout'] + ([{str(root)!r}, '12345']
                 env={
                     **env,
                     "QUANT_MONITOR_VENV": str(failed_stage),
-                    "SETUP_FAIL_PIP": "1",
+                    "FIXTURE_FAULT": "dependencies",
                 },
             )
             self.assertNotEqual(failed.returncode, 0)
@@ -1921,6 +1931,8 @@ sys.argv = ['offline-fixture', 'synthetic-checkout'] + ([{str(root)!r}, '12345']
                 **os.environ,
                 "PATH": f"{bin_dir}:{os.environ['PATH']}",
                 "TMPDIR": str(root),
+                # Qualify only this isolated, stubbed setup fixture.
+                "QUANT_MONITOR_V2_RUNTIME_READY": "true",
                 "QUANT_MONITOR_ROOT": str(monitor),
                 "QUANT_PLATFORM_KIT_ROOT": str(qpk),
                 "AIAUDIT_BRIDGE_ROOT": str(aab),
@@ -2026,6 +2038,8 @@ sys.argv = ['offline-fixture', 'synthetic-checkout'] + ([{str(root)!r}, '12345']
                 "import subprocess, sys\n"
                 "from pathlib import Path\n"
                 "args = sys.argv[1:]\n"
+                "if args[:1] == ['-I']:\n"
+                "    args = args[1:]\n"
                 "if args[:2] == ['-m', 'pip']:\n"
                 "    raise SystemExit(subprocess.call([str(Path(__file__).with_name('pip')), *args[2:]]))\n"
                 "raise SystemExit(0)\n"
@@ -2036,6 +2050,8 @@ sys.argv = ['offline-fixture', 'synthetic-checkout'] + ([{str(root)!r}, '12345']
                 "from pathlib import Path\n"
                 "import sys\n"
                 "args = sys.argv[1:]\n"
+                "if args[:1] == ['-I']:\n"
+                "    args = args[1:]\n"
                 "if args == ['-']:\n"
                 "    code = sys.stdin.read()\n"
                 "    if 'glibc' in code and 'need 3.12' in code:\n"
@@ -2067,6 +2083,8 @@ sys.argv = ['offline-fixture', 'synthetic-checkout'] + ([{str(root)!r}, '12345']
                     **os.environ,
                     "PATH": f"{bin_dir}:{os.environ['PATH']}",
                     "TMPDIR": str(root),
+                    # Qualify only this isolated, stubbed setup fixture.
+                    "QUANT_MONITOR_V2_RUNTIME_READY": "true",
                     "QUANT_MONITOR_ROOT": str(monitor),
                     "QUANT_PLATFORM_KIT_ROOT": str(qpk),
                     "AIAUDIT_BRIDGE_ROOT": str(aab),
@@ -2125,67 +2143,7 @@ class SDKDependencySetupTests(unittest.TestCase):
         self.bin = self.base / "bin"
         self.bin.mkdir()
         python = self.bin / "python3"
-        python.write_text(f"#!{sys.executable}\n" + textwrap.dedent('''\
-            import json, os, pathlib, platform, shutil, sys
-            path = pathlib.Path
-            args = sys.argv[1:]
-            with open(os.environ['FIXTURE_LOG'], 'a') as out:
-                out.write(json.dumps({'command': 'python', 'args': args, 'pythonpath': 'PYTHONPATH' in os.environ}) + '\\n')
-            if args[:1] == ['-I']:
-                assert 'PYTHONPATH' not in os.environ
-                args = args[1:]
-            fault = os.environ.get('FIXTURE_FAULT', '')
-            venv = path(__file__).resolve().parent.parent
-            site = venv / 'fixture-site'
-            if args[:2] == ['-m', 'venv']:
-                target = path(args[-1]) / 'bin/python'
-                target.parent.mkdir(parents=True)
-                shutil.copyfile(__file__, target)
-                target.chmod(0o755)
-            elif args[:2] == ['-m', 'pip']:
-                args = args[2:]
-                if args[:1] == ['--isolated']:
-                    args = args[1:]
-                if args == ['check']:
-                    raise SystemExit(0)
-                assert args[:1] == ['install']
-                if '--require-hashes' in args:
-                    raise SystemExit(17 if fault == 'dependencies' else 0)
-                assert '--no-deps' in args and '--no-build-isolation' in args
-                source = path(args[-1])
-                qas = 'quant-ai-service' in (source / 'pyproject.toml').read_text()
-                if qas and fault == 'qas_install':
-                    raise SystemExit(18)
-                for package in (source / 'src').iterdir():
-                    shutil.copytree(package, site / package.name, dirs_exist_ok=True)
-                if qas:
-                    import tomllib
-                    sdk_version = tomllib.loads((source / 'pyproject.toml').read_text())['project']['version']
-                    metadata = site / ('quant_ai_service-' + sdk_version + '.dist-info/METADATA')
-                    metadata.parent.mkdir()
-                    metadata.write_text('Name: quant-ai-service\\nVersion: ' + ('0.0.0' if fault == 'version' else sdk_version) + '\\n')
-                    if fault == 'digest':
-                        with (site / 'ai_service/client.py').open('a') as out:
-                            out.write('\\n# changed fixture bytes\\n')
-            elif args[:1] == ['-']:
-                code = sys.stdin.read()
-                if 'glibc' in code and 'need 3.12' in code:
-                    from collections import namedtuple
-                    sys.version_info = namedtuple('Version', 'major minor micro releaselevel serial')(3, 11 if fault == 'platform' else 12, 0, 'final', 0)
-                    platform.system = lambda: 'Linux'
-                    platform.machine = lambda: 'x86_64'
-                    platform.python_implementation = lambda: 'CPython'
-                    os.confstr = lambda key: 'glibc 2.35'
-                else:
-                    sys.prefix = str(venv)
-                    sys.path[:] = [str(site), *[p for p in sys.path if 'site-packages' not in p]]
-                    if fault == 'origin':
-                        sys.path.insert(0, str(path(os.environ['AIAUDIT_BRIDGE_ROOT']) / 'src'))
-                sys.argv = ['-', *args[1:]]
-                exec(compile(code, '<setup-offline-fixture>', 'exec'), {'__name__': '__main__'})
-            else:
-                raise SystemExit('unexpected Python call: ' + repr(args))
-            '''))
+        python.write_text(offline_setup_python())
         python.chmod(0o755)
         real_git = shutil.which("git")
         git = self.bin / "git"
