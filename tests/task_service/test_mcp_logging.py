@@ -126,6 +126,7 @@ class MCPLoggingTests(unittest.TestCase):
     def test_events_provider_mismatch_and_absence_explain_three_tools(self):
         for events in [None, SimpleNamespace(provider_name=self.private[2])]:
             self.app.events = events
+            self.app.event_buses = {} if events is None else {events.provider_name: events}
             _, _, records = self.request(authorization=self.token(scope='tasks:work events:subscribe'))
             self.assertFalse(records[0]['events_provider_matched'])
             self.assertIn('events:subscribe', records[0]['effective_scopes'])

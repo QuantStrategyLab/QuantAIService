@@ -131,6 +131,7 @@ def build_application(config, *, github_key_loader=None, github_transport=None):
     from . import server as srv
     auth, policies = srv.validate_configuration(config)
     providers = {}
+    events_holder = {'buses': {}}
     runtime = srv.TaskRuntime(Path(config['state_path']), providers, policies)
     events = None
     for name, item in config['providers'].items():
@@ -146,12 +147,16 @@ def build_application(config, *, github_key_loader=None, github_transport=None):
         elif item['type'] == 'muse':
             if item.get('enabled') is not True:
                 continue
+            if name in events_holder['buses']:
+                raise ValueError('one Muse event provider per service deployment')
             muse_events = EventSubscriptions(runtime, provider_name=name, can_access=auth.can_access_events)
+            events_holder['buses'][name] = muse_events
             providers[name] = DotEventProvider(muse_events)
         elif item['type'] == 'dot_events':
-            if events is not None:
+            if name in events_holder['buses'] or events is not None:
                 raise ValueError('one Dot event provider per service deployment')
             events = EventSubscriptions(runtime, provider_name=name, can_access=auth.can_access_events)
+            events_holder['buses'][name] = events
             providers[name] = DotEventProvider(events)
         elif item['type'] == 'chatgpt_plan_oauth':
             if item.get('plan_usage_authorized') is not True:
@@ -171,4 +176,4 @@ def build_application(config, *, github_key_loader=None, github_transport=None):
             raise ValueError('unsupported native provider')
     if config.get('github_apps') is not None:
         GitHubComments(runtime, GitHubApps(config, key_loader=github_key_loader, transport=github_transport))
-    return Application(runtime, auth, events)
+    return Application(runtime, auth, events, event_buses=events_holder['buses'])
