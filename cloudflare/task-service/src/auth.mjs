@@ -125,8 +125,9 @@ export function createAuthApplication(config, { taskHandler } = {}) {
       ctx.auth.scope.every((scope) => item.scopes.includes(scope)));
     if (!admission) return deny('admission_required');
     // Obtain the stable grant identity from the provider, never tool arguments.
+    // Dot and Muse both wake through event subscriptions and need a durable grant id.
     let grantId;
-    if (provider === 'dot') {
+    if (provider === 'dot' || provider === 'muse') {
       let token;
       try { token = await authorizationServer.getOAuthApi(env).unwrapToken(ctx.auth.token); }
       catch { return deny('grant_unavailable'); }

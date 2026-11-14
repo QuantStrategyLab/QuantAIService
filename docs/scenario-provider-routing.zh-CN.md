@@ -53,7 +53,7 @@ Quant 场景与 PersonalAIService **不是同一套目录**，只共用 `task.ro
 
 Agent 与 API 模式分离：
 
-- **Agent** 场景用有序偏好（`muse → grokbot → dot`），未就绪则跳过；Muse 接上后打头。列表不放 `claudeduet`。**两边付费 agent 都停之前必须先让 Muse 就绪**。
+- **Agent** 场景用有序偏好（`muse → grokbot → dot`），未就绪则跳过。Muse 在出现与 Cloudflare 兼容的 Muse Wonder 触发协议之前恒为 `unavailable`（禁止 Cursor Cloud Agents）；其间由 Grokbot / Dot 承担线上 agent 工作。列表不放 `claudeduet`。
 - **API** 场景只绑定**一个** provider。`quick_notification` 对应 `chatgpt-plan`（OpenAI plan OAuth / Responses）；模型与推理档位由复杂度分层智能填充。API **没有**后备链——Gemini 走遗留 `api:gemini`（或另开场景），不挂第二偏好。Quant 另外还有 **OpenAI API**、**Anthropic Claude API** 以及 **双 AI 审计**（Codex 主审 + 独立 GPT/Claude 复审）走 AiGateway / 审计路径；那不是 PersonalAIService 的场景目录，也不写成这里的 API 有序列表。
 
 ## 复杂度档位表
@@ -99,11 +99,7 @@ provider 在各档位的完整配置以及项目 provider/model 白名单。兼�
 `api_usage_authorized: false`，直至另行授权。`chatgpt-plan` 在
 `plan_usage_authorized` 且 token 环境已绑定时对路由就绪；**Python** 执行
 Responses，而 task-service Worker 目前仍只跑 `gemini_api`
-（见 `cloudflare/task-service/README.zh-CN.md`）。`muse` 在已启用、
-`AI_SERVICE_MUSE_READY` 已设且 `AI_SERVICE_MUSE_API_KEY` 已绑定时就绪；触发为
-Cursor Cloud Agents `POST https://api.cursor.com/v1/agents`，经 muse worker MCP
-claim 完成（与 PersonalAIService 同合同）。线上 agent 偏好须为
-`muse → grokbot → dot`；Muse 就绪前保留付费 agent。不要为迁就适配器缺口，
+（见 `cloudflare/task-service/README.zh-CN.md`）。`muse` 永不就绪（脚手架）：禁止 Cursor Cloud Agents 拉起，仅保留 Cloudflare claim 身份。示例偏好仍为 `muse → grokbot → dot`；路由对 muse 记 `unavailable` 并落到 grokbot/dot，直到实现非 Cursor 的 Muse 触发。不要为迁就适配器缺口，
 把 Quant API 场景改写成 Gemini。合入本运行时不等于部署服务、轮换密钥或启用
 provider。
 

@@ -40,9 +40,7 @@
     },
     "muse": {
       "type": "muse",
-      "enabled": false,
-      "url": "https://api.cursor.com/v1/agents",
-      "key_env": "AI_SERVICE_MUSE_API_KEY"
+      "enabled": false
     },
     "gemini": {
       "type": "gemini_api",
@@ -342,7 +340,8 @@
       "provider": "muse",
       "scopes": [
         "tasks:read",
-        "tasks:work"
+        "tasks:work",
+        "events:subscribe"
       ],
       "owner": "example-org",
       "claims": {

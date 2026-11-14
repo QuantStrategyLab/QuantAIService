@@ -7,7 +7,7 @@ import {apiConfiguration,executeAPI} from './api.mjs';
 import {nativeConfiguration,triggerNative} from './native.mjs';
 import {outputValid} from './validation.mjs';
 import {serialize,valueOf,objectNode,nodeFrom,parseJson,replaceFields} from './canonical.mjs';
-import {admittedProviders,decideRoute,providerReadiness,validateRoutingConfig} from './routing.mjs';
+import {admittedProviders,decideRoute,EVENT_AGENTS,providerReadiness,validateRoutingConfig} from './routing.mjs';
 import { DurableObject } from "cloudflare:workers";
 
 // M1 is a storage capability, not an HTTP API or an authentication layer.
@@ -137,7 +137,7 @@ export class TaskStore extends DurableObject {
     return policy;
   }
 
-  #providerReady(name, owner, hasDotSubscription) {
+  #providerReady(name, owner, hasDotSubscription, hasMuseSubscription) {
     const configured = {...(this.env.AGENT_PROVIDERS ?? {}), ...(this.env.API_PROVIDERS ?? {})};
     if (this.env.DOT_PROVIDER_NAME || Object.values(this.#policy(owner).providers).includes('dot')) {
       configured.dot = configured.dot ?? {type: 'dot_events'};
@@ -146,6 +146,7 @@ export class TaskStore extends DurableObject {
       env: this.env,
       configuredProviders: configured,
       hasDotSubscription: name === 'dot' ? hasDotSubscription : false,
+      hasMuseSubscription: name === 'muse' ? hasMuseSubscription : false,
     });
   }
 
@@ -207,12 +208,13 @@ export class TaskStore extends DurableObject {
     let provider;
     let body = canonicalRequest;
     if (usesRouting) {
-      const hasDotSubscription = await this.#liveSubscription(owner);
+      const hasDotSubscription = await this.#liveSubscription(owner, 'dot');
+      const hasMuseSubscription = await this.#liveSubscription(owner, 'muse');
       let decision;
       try {
         decision = decideRoute(policy.routing, request, {
           project: owner,
-          providerReady: (name) => this.#providerReady(name, owner, hasDotSubscription),
+          providerReady: (name) => this.#providerReady(name, owner, hasDotSubscription, hasMuseSubscription),
           entryReady: (name, entry) => {
             if (request.mode === 'api') {
               try {
@@ -222,7 +224,7 @@ export class TaskStore extends DurableObject {
                 return [false, 'api_model_mismatch'];
               }
             }
-            if (request.mode === 'agent' && name !== 'dot') {
+            if (request.mode === 'agent' && !EVENT_AGENTS.has(name)) {
               try {
                 nativeConfiguration(this.env, name);
                 return [true, 'ready'];
@@ -259,7 +261,11 @@ export class TaskStore extends DurableObject {
     if (request.mode === "api") {
       try { apiConfiguration(this.env,provider,request); } catch { denied("execution mode is unavailable"); }
     }
-    if (request.mode === 'agent' && provider !== 'dot') {
+    if (request.mode === 'agent' && EVENT_AGENTS.has(provider) && provider !== 'dot') {
+      const item = this.env.AGENT_PROVIDERS?.[provider];
+      if (!item || item.type !== 'muse' || item.enabled !== true) denied('execution mode is unavailable');
+    }
+    if (request.mode === 'agent' && !EVENT_AGENTS.has(provider)) {
       try { nativeConfiguration(this.env,provider); } catch { denied('execution mode is unavailable'); }
     }
     if (!policy.models[provider]?.includes(request.model)) denied("model is not admitted");
@@ -442,7 +448,7 @@ export class TaskStore extends DurableObject {
   }
 
   async #eventAccess(owner,identity) {
-    if(identity.provider!=='dot'||typeof identity.grantId!=='string'||!identity.grantId||!identity.scopes?.includes('events:subscribe'))return false;
+    if(!EVENT_AGENTS.has(identity.provider)||typeof identity.grantId!=='string'||!identity.grantId||!identity.scopes?.includes('events:subscribe'))return false;
     // Provider 1.2.4 persists grants under this key. No bearer token is stored.
     // Do not cache authority across admissions, sends, retries or restarts.
     let grant;
@@ -453,14 +459,16 @@ export class TaskStore extends DurableObject {
       (grant.expiresAt!==undefined&&(!Number.isFinite(grant.expiresAt)||grant.expiresAt<=now())))return false;
     let project;try{project=workerContext(this.env,identity,owner);}catch{return false;}
     const client=this.env.AUTH_CLIENTS?.[identity.clientId];
-    if(!project||project.project!==owner||client?.provider!=='dot'||!client.scopes?.includes('events:subscribe'))return false;
+    if(!project||project.project!==owner||client?.provider!==identity.provider||!client.scopes?.includes('events:subscribe'))return false;
     let admissions;try{admissions=JSON.parse(this.env.ADMISSIONS_JSON??'[]');}catch{return false;}
-    return admissions.some(a=>a.githubUserId===identity.githubUserId&&a.ownerId===project.ownerId&&a.clientIds.includes(identity.clientId)&&a.providers.includes('dot')&&a.scopes.includes('events:subscribe'));
+    return admissions.some(a=>a.githubUserId===identity.githubUserId&&a.ownerId===project.ownerId&&a.clientIds.includes(identity.clientId)&&a.providers.includes(identity.provider)&&a.scopes.includes('events:subscribe'));
   }
 
-  async #liveSubscription(owner) {
+  async #liveSubscription(owner, provider='dot') {
     for(const sub of this.sql.exec('SELECT * FROM subscriptions WHERE owner=? AND deleted IS NULL AND (non_expiring=1 OR expires>?)',owner,now()).toArray()){
-      if(await this.#eventAccess(owner,JSON.parse(sub.identity_json))&&this.#subscriptionLive(sub))return true;
+      const identity=JSON.parse(sub.identity_json);
+      if(identity.provider!==provider)continue;
+      if(await this.#eventAccess(owner,identity)&&this.#subscriptionLive(sub))return true;
     }
     return false;
   }
@@ -579,7 +587,10 @@ export class TaskStore extends DurableObject {
   async cancel(owner,taskId) {
     const record=this.ctx.storage.transactionSync(()=>{
       const row=this.#row(owner,taskId);
-      if(row.status==='queued'||(['running','cancel_requested'].includes(row.status)&&row.provider==='dot'&&JSON.parse(row.request).mode==='agent'&&!row.worker&&!row.attempt))this.#state(taskId,'cancelled');
+      const unclaimedEvent=EVENT_AGENTS.has(row.provider)&&JSON.parse(row.request).mode==='agent'&&!row.worker&&!row.attempt;
+      let acceptance=null;try{acceptance=row.handle?JSON.parse(row.handle).acceptance:null;}catch{}
+      // Event-pending rows cancel locally; leftover Cloud Agent handles need a stop report.
+      if(row.status==='queued'||(unclaimedEvent&&['running','cancel_requested'].includes(row.status)&&acceptance!=='agent_started'))this.#state(taskId,'cancelled');
       else if(!TERMINAL.has(row.status)&&!['outcome_unknown','cancel_requested'].includes(row.status))this.#state(taskId,'cancel_requested');
       return this.get(owner,taskId);
     });
@@ -590,23 +601,24 @@ export class TaskStore extends DurableObject {
     const apiJobs=[],nativeJobs=[];
     await this.ctx.blockConcurrencyWhile(async()=>{
       const timestamp=now();
-      for(const candidate of this.sql.exec("SELECT * FROM tasks WHERE status IN ('queued','submitting','running') OR (status='cancel_requested' AND ((json_extract(request,'$.mode')='api' AND handle IS NULL) OR (provider='dot' AND json_extract(request,'$.mode')='agent' AND worker IS NULL AND attempt IS NULL)))").toArray()){
-        const active=candidate.provider==='dot'&&candidate.status==='queued'?await this.#liveSubscription(candidate.owner):false;
+      for(const candidate of this.sql.exec("SELECT * FROM tasks WHERE status IN ('queued','submitting','running') OR (status='cancel_requested' AND ((json_extract(request,'$.mode')='api' AND handle IS NULL) OR (provider IN ('dot','muse') AND json_extract(request,'$.mode')='agent' AND worker IS NULL AND attempt IS NULL)))").toArray()){
+        const active=EVENT_AGENTS.has(candidate.provider)&&candidate.status==='queued'
+          ?await this.#liveSubscription(candidate.owner,candidate.provider):false;
         this.ctx.storage.transactionSync(()=>{
           const task=this.#row(candidate.owner,candidate.id),timestamp=now();
-          const unclaimedDot=task.provider==='dot'&&JSON.parse(task.request).mode==='agent'&&!task.worker&&!task.attempt;
-          if(task.status==='cancel_requested'&&unclaimedDot){this.#state(task.id,'cancelled',{error:task.error});return;}
+          const unclaimedEvent=EVENT_AGENTS.has(task.provider)&&JSON.parse(task.request).mode==='agent'&&!task.worker&&!task.attempt;
+          if(task.status==='cancel_requested'&&unclaimedEvent){this.#state(task.id,'cancelled',{error:task.error});return;}
           if(task.status==='submitting'||task.status==='cancel_requested'){
             if(this.apiInFlight.has(task.id)||this.nativeInFlight.has(task.id))return;
             // Crash before acceptance is unknown, never an instruction to submit a new task.
             this.#state(task.id,'outcome_unknown',{error:'acceptance_unknown'});return;
           }
-          if(task.deadline<=timestamp){this.#state(task.id,task.status==='queued'||unclaimedDot?'cancelled':'cancel_requested',{error:task.status==='queued'?'deadline_before_submission':'deadline_exceeded'});return;}
+          if(task.deadline<=timestamp){this.#state(task.id,task.status==='queued'||unclaimedEvent?'cancelled':'cancel_requested',{error:task.status==='queued'?'deadline_before_submission':'deadline_exceeded'});return;}
           if(task.status!=='queued')return;
           this.#state(task.id,'submitting');
           if(JSON.parse(task.request).mode==='api'){this.apiInFlight.add(task.id);apiJobs.push(task);return;}
-          if(task.provider!=='dot'){this.nativeInFlight.add(task.id);nativeJobs.push({...task,change:'requested'});return;}
-          if(task.provider!=='dot'||!active){this.#state(task.id,'failed',{error:'submission_rejected'});return;}
+          if(!EVENT_AGENTS.has(task.provider)){this.nativeInFlight.add(task.id);nativeJobs.push({...task,change:'requested'});return;}
+          if(!active){this.#state(task.id,'failed',{error:'submission_rejected'});return;}
           // Pure durable event acceptance has no remote side effect between these writes.
           this.#state(task.id,'running',{handle:JSON.stringify({task_id:task.id,acceptance:'event_pending',model_verification:'unavailable'})});
         });
@@ -628,17 +640,20 @@ export class TaskStore extends DurableObject {
           if(!accessible){this.sql.exec('DELETE FROM event_deliveries WHERE subscription=?',sub.id);return;}
           matchedOwners.add(sub.owner);
           matchedCounts.set(sub.owner,(matchedCounts.get(sub.owner)??0)+1);
+          const identity=JSON.parse(sub.identity_json);
+          const provider=identity.provider;
+          if(!EVENT_AGENTS.has(provider))return;
           const pending=this.sql.exec("SELECT COUNT(*) AS n FROM event_deliveries WHERE subscription=? AND status='pending'",sub.id).one().n;
           const rows=this.sql.exec(`SELECT e.seq,e.status,e.created,t.id,t.owner,t.revision FROM events e JOIN tasks t ON t.id=e.task_id
-            WHERE t.owner=? AND t.provider='dot' AND e.seq>? AND e.status IN ('queued','message','cancel_requested')
-            AND t.status IN ('running','cancel_requested','outcome_unknown') ORDER BY e.seq LIMIT ?`,sub.owner,sub.start_seq,Math.max(0,128-pending)).toArray();
+            WHERE t.owner=? AND t.provider=? AND e.seq>? AND e.status IN ('queued','message','cancel_requested')
+            AND t.status IN ('running','cancel_requested','outcome_unknown') ORDER BY e.seq LIMIT ?`,sub.owner,provider,sub.start_seq,Math.max(0,128-pending)).toArray();
           for(const e of rows){const body=JSON.stringify({eventId:'evt_'+e.seq,name:'task.requested',timestamp:new Date(e.created*1000).toISOString(),cursor:null,data:{task_id:e.id,project:e.owner,revision:e.revision,change:e.status}});this.sql.exec('INSERT OR IGNORE INTO event_deliveries(subscription,seq,body) VALUES(?,?,?)',sub.id,e.seq,body);}
           if(rows.length)this.sql.exec('UPDATE subscriptions SET start_seq=? WHERE id=?',rows.at(-1).seq,sub.id);
         });
       }
       this.ctx.storage.transactionSync(()=>{
         const fresh=this.sql.exec(`SELECT e.seq,t.id AS task_id,t.owner FROM events e JOIN tasks t ON t.id=e.task_id
-          WHERE t.provider='dot' AND e.status IN ('queued','message','cancel_requested') AND COALESCE(e.fanout_noted,0)=0 AND e.created>=? LIMIT 32`,timestamp-3600).toArray();
+          WHERE t.provider IN ('dot','muse') AND e.status IN ('queued','message','cancel_requested') AND COALESCE(e.fanout_noted,0)=0 AND e.created>=? LIMIT 32`,timestamp-3600).toArray();
         for(const event of fresh){
           const matches=matchedCounts.get(event.owner)??0;
           if(!matchedOwners.has(event.owner))this.#log({message:'event_unmatched',event:'task.requested',task_id:event.task_id,matching_subscriptions:0});
@@ -655,7 +670,7 @@ export class TaskStore extends DurableObject {
       this.sql.exec("UPDATE native_notifications SET status='outcome_unknown' WHERE status='sending'");
       const notifications=this.sql.exec(`SELECT e.seq,e.status AS change,t.* FROM events e JOIN tasks t ON t.id=e.task_id
         LEFT JOIN native_notifications n ON n.seq=e.seq WHERE e.status IN ('message','cancel_requested')
-        AND n.seq IS NULL AND t.provider!='dot' AND json_extract(t.request,'$.mode')='agent'
+        AND n.seq IS NULL AND t.provider NOT IN ('dot','muse') AND json_extract(t.request,'$.mode')='agent'
         AND t.status IN ('running','cancel_requested') ORDER BY e.seq LIMIT 100`).toArray();
       for(const event of notifications){
         this.sql.exec("INSERT INTO native_notifications(seq,status) VALUES(?,'sending')",event.seq);
@@ -685,7 +700,7 @@ export class TaskStore extends DurableObject {
       // An expired live API call can only finish or become unknown; inspect its
       // recovery state at most once per second instead of rearming every 10ms.
       const scheduledAt=now();
-      const taskDeadlines=this.sql.exec("SELECT id,deadline FROM tasks WHERE status IN ('queued','submitting','running') OR (status='cancel_requested' AND ((json_extract(request,'$.mode')='api' AND handle IS NULL) OR (provider='dot' AND json_extract(request,'$.mode')='agent' AND worker IS NULL AND attempt IS NULL)))").toArray()
+      const taskDeadlines=this.sql.exec("SELECT id,deadline FROM tasks WHERE status IN ('queued','submitting','running') OR (status='cancel_requested' AND ((json_extract(request,'$.mode')='api' AND handle IS NULL) OR (provider IN ('dot','muse') AND json_extract(request,'$.mode')='agent' AND worker IS NULL AND attempt IS NULL)))").toArray()
         .map(task=>(this.apiInFlight.has(task.id)||this.nativeInFlight.has(task.id))&&task.deadline<=scheduledAt?scheduledAt+1:task.deadline);
       const next=[delivery,...taskDeadlines].filter(v=>v!==null);
       if(next.length)await this.ctx.storage.setAlarm(Math.max(Date.now()+10,Math.min(...next)*1000));

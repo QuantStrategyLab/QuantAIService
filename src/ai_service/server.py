@@ -139,7 +139,7 @@ def make_server(application, port, *, max_request_bytes=2_000_000, mcp_log_level
             except Exception:
                 reason = 'internal_error'
                 status, payload = 500, {'error': 'internal_error'}
-            provider_matched = None if principal is None else bool(application.events and principal.provider == application.events.provider_name)
+            provider_matched = None if principal is None else bool(application.event_bus(principal.provider))
             try:
                 encoded = b'' if status == 202 and payload is None else json_body(payload)
                 self.send_response(status)
@@ -248,7 +248,9 @@ def main(configuration_guard=None):
                 application.notifications.flush()
                 if application.runtime.github_comments:
                     application.runtime.github_comments.flush()
-                if application.events:
+                for bus in application.event_buses.values():
+                    bus.flush()
+                if application.events and application.events not in application.event_buses.values():
                     application.events.flush()
             except Exception:
                 # Stop admitting requests if the durable dispatcher cannot advance them.

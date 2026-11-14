@@ -7,7 +7,8 @@ import unittest
 from unittest.mock import patch
 
 from ai_service.auth import Principal
-from ai_service.providers import GrokWebhookProvider, MuseCloudAgentProvider
+from ai_service.providers import GrokWebhookProvider
+from ai_service.events import DotEventProvider
 from ai_service.runtime import Policy
 from ai_service.server import build_application, validate_configuration
 from ai_service.transport import HttpReply
@@ -49,8 +50,11 @@ class NamedAgentTests(unittest.TestCase):
         self.assertEqual(app.runtime.policies[self.project].providers['agent:second-opinion'], 'grok')
         for name in ('grokbot', 'claudeduet', 'muse'):
             grant = next(g for g in self.config['grants'] if g.get('provider') == name)
-            self.assertEqual(set(grant['scopes']), {'tasks:read', 'tasks:work'})
+            self.assertEqual(set(grant['scopes']) & {'tasks:read', 'tasks:work'},
+                             {'tasks:read', 'tasks:work'})
             self.assertIn(name.upper(), grant['claims']['azp'])
+        muse_grant = next(g for g in self.config['grants'] if g.get('provider') == 'muse')
+        self.assertIn('events:subscribe', muse_grant['scopes'])
 
     def test_duet_cannot_be_enabled_as_a_claude_code_routine(self):
         self.config['providers']['claudeduet']['enabled'] = True
@@ -60,78 +64,33 @@ class NamedAgentTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 build_application(self.config)
 
-    def test_muse_rejects_repository_launch_binding(self):
-        with self.assertRaisesRegex(ValueError, 'repository launch is not supported'):
-            MuseCloudAgentProvider(
-                'https://api.cursor.com/v1/agents', 'synthetic-test-only',
-                'https://tasks.example/mcp', repository='https://github.com/example/repo')
-
-    def test_muse_requires_explicit_enablement_and_credential(self):
-        for enabled in (None, False):
-            c = copy.deepcopy(self.config)
-            c['providers']['muse']['enabled'] = enabled
-            c['providers']['grokbot']['enabled'] = False
-            with patch('ai_service.server.os.environ.get', side_effect=AssertionError('credential read')):
-                app = build_application(c)
-            self.assertNotIn('muse', app.runtime.providers)
-        disabled = copy.deepcopy(self.config)
-        disabled['providers']['muse'] = {'type': 'muse', 'enabled': False}
-        disabled['providers']['grokbot']['enabled'] = False
-        validate_configuration(disabled)
+    def test_muse_event_provider_needs_no_cursor_credential(self):
         self.config['providers']['muse']['enabled'] = True
         self.config['providers']['grokbot']['enabled'] = False
-        with patch('ai_service.server.os.environ.get', return_value=None):
-            with self.assertRaises(ValueError):
-                build_application(self.config)
-
-    def test_routed_muse_claim_report_uses_cloud_agent_launch(self):
-        self.config['providers']['muse']['enabled'] = True
-        with patch('ai_service.server.os.environ.get', return_value='synthetic-test-only') as env:
+        with patch('ai_service.server.os.environ.get', side_effect=AssertionError('credential read')):
             app = build_application(self.config)
-        self.assertEqual(env.call_args_list[-1].args[0], 'AI_SERVICE_MUSE_API_KEY')
-        self.assertIsInstance(app.runtime.providers['muse'], MuseCloudAgentProvider)
-        calls = []
-        class Transport:
-            def request(self, url, **kwargs):
-                body = kwargs.get('body') or b''
-                calls.append({'url': url, 'headers': kwargs['headers'],
-                              'body': json.loads(body) if body else None})
-                if url.endswith('/v1/agents'):
-                    return HttpReply(201, json.dumps({
-                        'agent': {'id': 'bc-synthetic', 'latestRunId': 'run-1'},
-                        'run': {'id': 'run-1'},
-                    }).encode())
-                if url.endswith('/cancel'):
-                    return HttpReply(200, b'{}')
-                return HttpReply(202, json.dumps({
-                    'delivery': 'steered', 'runId': 'run-2'}).encode())
-        app.runtime.providers['muse']._transport = Transport()
+        self.assertIsInstance(app.runtime.providers['muse'], DotEventProvider)
+        self.assertEqual(app.event_bus('muse').provider_name, 'muse')
+
+    def test_routed_muse_claim_report_uses_event_subscription(self):
+        self.config['providers']['muse']['enabled'] = True
+        self.config['providers']['grokbot']['enabled'] = False
+        with patch('ai_service.server.os.environ.get', side_effect=AssertionError('credential read')):
+            app = build_application(self.config)
+        bus = app.event_bus('muse')
+        bus.has_active = lambda owner: owner == self.project
         request = {**self.request, 'profile': 'muse', 'model': 'configured-muse'}
         task = app.runtime.submit(self.project, 'muse-task', request)
         app.runtime.tick()
-        self.assertEqual(len(calls), 1)
-        self.assertEqual(calls[0]['url'], 'https://api.cursor.com/v1/agents')
-        self.assertTrue(calls[0]['headers']['Authorization'].startswith('Basic '))
-        self.assertIn('prompt', calls[0]['body'])
-        self.assertNotIn('materials', calls[0]['body']['prompt']['text'])
         record = app.runtime.get(self.project, task['id'])
         self.assertEqual(record['status'], 'running')
-        self.assertEqual(record['handle']['agent_id'], 'bc-synthetic')
-        self.assertEqual(record['handle']['run_id'], 'run-1')
-        scopes = frozenset({'tasks:read', 'tasks:work'})
+        self.assertEqual(record['handle']['acceptance'], 'event_pending')
+        scopes = frozenset({'tasks:read', 'tasks:work', 'events:subscribe'})
         worker = Principal('muse-worker', self.project, scopes, 'muse')
         claimed = app.runtime.claim(self.project, task['id'], worker.provider, worker.identity, 'attempt')
-        app.runtime.cancel(self.project, task['id'])
-        app.runtime.tick()
-        app.notifications.flush()
-        self.assertEqual(calls[1]['url'],
-                         'https://api.cursor.com/v1/agents/bc-synthetic/runs/run-1/cancel')
-        self.assertEqual(calls[2]['url'],
-                         'https://api.cursor.com/v1/agents/bc-synthetic/runs')
-        self.assertEqual(calls[2]['body']['delivery'], 'steer')
         app.runtime.report(self.project, task['id'], worker.provider, worker.identity, 'attempt',
-                           claimed['revision'], 'cancelled', {})
-        self.assertEqual(app.read_task(worker, task['id'])['status'], 'cancelled')
+                           claimed['revision'], 'completed', {})
+        self.assertEqual(app.worker(worker, task['id'])['status'], 'completed')
 
     def test_grokbot_requires_explicit_enablement_and_credential(self):
         for enabled in (None, False):
@@ -161,7 +120,7 @@ class NamedAgentTests(unittest.TestCase):
         worker = Principal('grokbot-worker', self.project, scopes, 'grokbot')
         for wrong in ('dot', 'grok', 'claude', 'claudeduet', 'muse'):
             with self.subTest(provider=wrong), self.assertRaises(PermissionError):
-                app.read_task(Principal('other-worker', self.project, scopes, wrong), task['id'])
+                app.worker(Principal('other-worker', self.project, scopes, wrong), task['id'])
         with self.assertRaises(PermissionError):
             app.project_context(worker, 'other-org/OtherProject')
         with self.assertRaises(PermissionError):
@@ -174,4 +133,4 @@ class NamedAgentTests(unittest.TestCase):
         claimed = app.runtime.claim(self.project, task['id'], worker.provider, worker.identity, 'attempt')
         app.runtime.report(self.project, task['id'], worker.provider, worker.identity, 'attempt',
                            claimed['revision'], 'completed', {})
-        self.assertEqual(app.read_task(worker, task['id'])['status'], 'completed')
+        self.assertEqual(app.worker(worker, task['id'])['status'], 'completed')

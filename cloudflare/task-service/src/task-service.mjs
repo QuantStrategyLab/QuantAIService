@@ -6,6 +6,7 @@ import {WorkerEntrypoint} from 'cloudflare:workers';
 import {insufficientScope} from '@cloudflare/workers-oauth-provider';
 import {parseJson, serialize, valueOf, field, nodeFrom, objectNode, replaceFields} from './canonical.mjs';
 import {check, checkOutputSchema, outputValid} from './validation.mjs';
+import {EVENT_AGENTS} from './routing.mjs';
 import {REQUEST} from './request-contract.mjs';
 const fail=(name)=>{throw Object.assign(new Error(name),{name});};
 const bad=()=>fail('ValueError'), denied=()=>fail('PermissionError');
@@ -104,7 +105,8 @@ export class TaskService extends WorkerEntrypoint {
   tools(c){
     const projects=workerProjects(this.env,c.identity);
     const scoped=tool=>projects.length<2?tool:{...tool,inputSchema:{...tool.inputSchema,properties:{...tool.inputSchema.properties,project:{type:'string',enum:projects}}}};
-    if(c.provider!=='dot')return TOOLS.map(scoped);
+    // Advertise event tools for Dot/Muse; token scope is enforced on use.
+    if(!EVENT_AGENTS.has(c.provider))return TOOLS.map(scoped);
     const subscriptionId=schema({subscription_id:{type:'string',minLength:1,maxLength:200}});
     const eventTools=[['get_event_subscription','Read an owned subscription, including callback host and last delivery.',subscriptionId],['delete_event_subscription','Delete an owned subscription and stop delivery.',subscriptionId],['list_event_subscriptions','List the caller subscriptions for the selected project. Callback host and last delivery only.',schema({})]];
     return [...TOOLS,...eventTools.map(([name,description,inputSchema])=>({name,description,inputSchema,securitySchemes:securitySchemes(EVENT_SCOPES)}))].map(scoped);
@@ -124,10 +126,10 @@ export class TaskService extends WorkerEntrypoint {
       switch(message.method){
         case 'initialize':if(typeof params.protocolVersion!=='string'||!obj(params.capabilities)||!obj(params.clientInfo))bad();result=nodeFrom({protocolVersion:['2025-03-26','2025-06-18','2025-11-25'].includes(params.protocolVersion)?params.protocolVersion:'2025-11-25',capabilities:{tools:{}},serverInfo:{name:c.organization==='pigbibi'?'personal-ai-service':'quant-ai-service',version:'2.0.14-cloudflare.2'}});break;
         case 'ping':result=nodeFrom({});break;
-        case 'server/discover':result=nodeFrom({resultType:'complete',supportedVersions:['2026-07-28'],capabilities:{tools:{},...(c.provider==='dot'?{events:{}}:{})}});break;
-        // Discovery describes the Dot capability; the token must still authorize its use.
+        case 'server/discover':result=nodeFrom({resultType:'complete',supportedVersions:['2026-07-28'],capabilities:{tools:{},...(EVENT_AGENTS.has(c.provider)?{events:{}}:{})}});break;
+        // Discovery describes event capability; the token must still authorize its use.
         case 'events/list':case 'events/subscribe':case 'events/unsubscribe':{
-          if(c.provider!=='dot')denied();
+          if(!EVENT_AGENTS.has(c.provider))denied();
           if(!c.scopes.includes('events:subscribe'))return eventScopeChallenge(c);
           if(message.method!=='events/list')c=this.context(c.identity,request,params.arguments?.project);
           result=nodeFrom(message.method==='events/list'?eventCatalog():message.method==='events/subscribe'?await this.store().subscribe(c.project,c.worker,c.identity,params):await this.store().unsubscribeRequest(c.project,c.worker,params));break;

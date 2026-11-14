@@ -60,8 +60,9 @@ Claude API plus dual-AI audit outside this registry.
 Agent and API modes stay separate:
 
 - **Agent** scenarios use an ordered preference (`muse → grokbot → dot`). Unready
-  entries are skipped; Muse leads once ready. `claudeduet` is never listed. Do
-  not cancel both paid agents until Muse readiness is live.
+  entries are skipped. Muse stays `unavailable` until a Cloudflare-compatible
+  Muse Wonder trigger exists (never Cursor Cloud Agents); Grokbot/Dot cover
+  live agent work meanwhile. `claudeduet` is never listed.
 - **API** scenarios bind **one** provider. `quick_notification` maps to
   `chatgpt-plan` (OpenAI plan OAuth / Responses); complexity tiers choose
   model and reasoning effort. There is no API fallback chain — Gemini stays
@@ -114,18 +115,7 @@ No Python scenario table update is required.
 ## Readiness and operations
 
 Unready providers are skipped at submit; if none remain, submit is denied.
-Dot readiness still requires a live event subscription. `muse` is ready when
-enabled, `AI_SERVICE_MUSE_READY` is set, and `AI_SERVICE_MUSE_API_KEY` is bound;
-launch is Cursor Cloud Agents `POST https://api.cursor.com/v1/agents`, completion
-via muse worker MCP claim (same contract as PersonalAIService). In the example,
-`gemini` stays `enabled: false` / `api_usage_authorized: false` until
-separately authorized. `chatgpt-plan` is ready in routing when
-`plan_usage_authorized` and its token env are set; **Python** executes
-Responses, while the task-service Worker still only runs `gemini_api`
-(`cloudflare/task-service/README.zh-CN.md`). Do not rewrite Quant API scenarios
-onto Gemini to paper over that adapter gap. Shipping this runtime does not
-deploy services, rotate secrets or enable providers. Live agent prefs must be
-`muse → grokbot → dot`; keep paid agents until Muse is ready.
+Dot readiness still requires a live event subscription. `muse` is never ready (scaffold): no Cursor Cloud Agents launch; Cloudflare claim identity only. Example agent prefs stay `muse → grokbot → dot`; routing skips muse as `unavailable` and falls through to grokbot/dot until a non-Cursor Muse trigger is implemented.
 
 Worker routing unit tests under `cloudflare/task-service/test/routing.mjs` use
 Quant scenario ids (`quick_notification`, `pr_code_review`, …), not Personal’s

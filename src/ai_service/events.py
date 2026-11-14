@@ -82,6 +82,8 @@ class EventSubscriptions:
                 CREATE TABLE IF NOT EXISTS subscription_lifecycle (
                     id TEXT PRIMARY KEY, principal TEXT NOT NULL, owner TEXT NOT NULL,
                     created REAL, expires REAL NOT NULL, deleted REAL);
+                CREATE TABLE IF NOT EXISTS subscription_providers (
+                    subscription TEXT PRIMARY KEY, provider TEXT NOT NULL);
             ''')
             self._prune(db, time.time())
 
@@ -109,6 +111,7 @@ class EventSubscriptions:
                    'ON CONFLICT(id) DO UPDATE SET expires=excluded.expires')
         db.execute("DELETE FROM event_deliveries WHERE subscription IN (SELECT id FROM subscriptions WHERE active=0 OR expires<=?)", (now,))
         db.execute("DELETE FROM subscriptions WHERE active=0 OR expires<=?", (now,))
+        db.execute('DELETE FROM subscription_providers WHERE subscription NOT IN (SELECT id FROM subscriptions)')
         db.execute('DELETE FROM subscription_previous_keys WHERE expires<=? '
                    'OR subscription NOT IN (SELECT id FROM subscriptions)', (now,))
 
@@ -139,12 +142,25 @@ class EventSubscriptions:
         if type(ttl) is not int or ttl < 1000:
             raise ValueError('ttlMs must be an integer of at least 1000')
         expiry = time.time() + min(ttl / 1000, self.ttl_seconds)
-        identity = _json([principal, url, self.name, args]).encode()
+        # Non-Dot buses (Muse, including custom keys) include provider_name so
+        # IDs never collide with Dot. Dot keeps the legacy hash.
+        identity_fields = ([principal, url, self.name, self.provider_name, args]
+                           if self.provider_name != 'dot'
+                           else [principal, url, self.name, args])
+        identity = _json(identity_fields).encode()
         subscription_id = 'sub_' + hashlib.sha256(identity).hexdigest()
         with self.runtime.connection() as db:
             self._prune(db, time.time())
-            old = db.execute('SELECT id FROM subscriptions WHERE id=?', (subscription_id,)).fetchone()
-            count = db.execute('SELECT COUNT(*) FROM subscriptions WHERE principal=? AND owner=?', (principal, owner)).fetchone()[0]
+            old = db.execute(
+                'SELECT s.id FROM subscriptions s '
+                'LEFT JOIN subscription_providers p ON p.subscription=s.id '
+                'WHERE s.id=? AND COALESCE(p.provider, ?)=?',
+                (subscription_id, 'dot', self.provider_name)).fetchone()
+            count = db.execute(
+                'SELECT COUNT(*) FROM subscriptions s '
+                'LEFT JOIN subscription_providers p ON p.subscription=s.id '
+                'WHERE s.principal=? AND s.owner=? AND COALESCE(p.provider, ?)=?',
+                (principal, owner, 'dot', self.provider_name)).fetchone()[0]
             if not old and count >= self.max_subscriptions:
                 raise ValueError('subscription limit reached')
         challenge = secrets.token_urlsafe(32)
@@ -173,7 +189,11 @@ class EventSubscriptions:
             db.execute('BEGIN IMMEDIATE')
             now = time.time()
             self._prune(db, now)
-            old = db.execute('SELECT active,start_seq,secret,expires FROM subscriptions WHERE id=?', (subscription_id,)).fetchone()
+            old = db.execute(
+                'SELECT s.active,s.start_seq,s.secret,s.expires FROM subscriptions s '
+                'LEFT JOIN subscription_providers p ON p.subscription=s.id '
+                'WHERE s.id=? AND COALESCE(p.provider, ?)=?',
+                (subscription_id, 'dot', self.provider_name)).fetchone()
             start = db.execute('SELECT COALESCE(MAX(seq),0) FROM events').fetchone()[0]
             if old and old['active'] and old['expires'] > now:
                 start = old['start_seq']
@@ -197,6 +217,9 @@ class EventSubscriptions:
                        'ON CONFLICT(id) DO UPDATE SET secret=excluded.secret,expires=excluded.expires,'
                        'active=1,start_seq=excluded.start_seq',
                        (subscription_id, principal, owner, url, secret, expiry, start))
+            db.execute('INSERT INTO subscription_providers(subscription, provider) VALUES(?,?) '
+                       'ON CONFLICT(subscription) DO UPDATE SET provider=excluded.provider',
+                       (subscription_id, self.provider_name))
             db.execute('INSERT INTO subscription_lifecycle VALUES(?,?,?,?,?,NULL) '
                        'ON CONFLICT(id) DO UPDATE SET created=CASE WHEN ? THEN subscription_lifecycle.created '
                        'ELSE excluded.created END,expires=excluded.expires,deleted=NULL',
@@ -215,7 +238,10 @@ class EventSubscriptions:
         if (not isinstance(delivery, dict) or set(delivery) != {'mode', 'url'}
                 or delivery['mode'] != 'webhook' or not isinstance(delivery['url'], str)):
             raise ValueError('webhook destination is required')
-        identity = _json([principal, delivery['url'], self.name, args]).encode()
+        identity_fields = ([principal, delivery['url'], self.name, self.provider_name, args]
+                           if self.provider_name != 'dot'
+                           else [principal, delivery['url'], self.name, args])
+        identity = _json(identity_fields).encode()
         subscription_id = 'sub_' + hashlib.sha256(identity).hexdigest()
         self.unsubscribe(principal, subscription_id, owner=owner)
         # Native MCP Events requires an empty, idempotent unsubscribe result.
@@ -225,9 +251,16 @@ class EventSubscriptions:
     def _status(self, db, principal, subscription_id, owner):
         if not isinstance(subscription_id, str) or not 1 <= len(subscription_id) <= 200:
             raise ValueError('subscription ID is required (1..200 characters)')
-        row = db.execute('SELECT l.*,s.active FROM subscription_lifecycle l '
-                         'LEFT JOIN subscriptions s ON s.id=l.id WHERE l.id=?', (subscription_id,)).fetchone()
+        row = db.execute(
+            'SELECT l.*,s.active,COALESCE(p.provider, ?) AS provider FROM subscription_lifecycle l '
+            'LEFT JOIN subscriptions s ON s.id=l.id '
+            'LEFT JOIN subscription_providers p ON p.subscription=l.id WHERE l.id=?',
+            ('dot', subscription_id)).fetchone()
         if row and (row['principal'] != principal or (owner is not None and row['owner'] != owner)):
+            raise PermissionError('subscription access denied')
+        # Provider ownership applies while the subscription still exists. After
+        # delete, the side-table row is gone and lifecycle alone reports gone.
+        if row and row['deleted'] is None and row['provider'] != self.provider_name:
             raise PermissionError('subscription access denied')
         state = 'gone'
         if row and row['deleted'] is None:
@@ -254,14 +287,18 @@ class EventSubscriptions:
             if deleted:
                 db.execute('UPDATE subscription_lifecycle SET deleted=? WHERE id=?', (time.time(), subscription_id))
                 db.execute('DELETE FROM subscriptions WHERE id=?', (subscription_id,))
+                db.execute('DELETE FROM subscription_providers WHERE subscription=?', (subscription_id,))
                 db.execute('DELETE FROM event_deliveries WHERE subscription=?', (subscription_id,))
                 db.execute('DELETE FROM subscription_previous_keys WHERE subscription=?', (subscription_id,))
             return {**self._status(db, principal, subscription_id, owner), 'deleted': deleted}
 
     def has_active(self, owner):
         with self.runtime.connection() as db:
-            rows = db.execute('SELECT * FROM subscriptions WHERE owner=? AND active=1 AND expires>?',
-                              (owner, time.time())).fetchall()
+            rows = db.execute(
+                'SELECT s.* FROM subscriptions s '
+                'LEFT JOIN subscription_providers p ON p.subscription=s.id '
+                'WHERE s.owner=? AND COALESCE(p.provider, ?)=? AND s.active=1 AND s.expires>?',
+                (owner, 'dot', self.provider_name, time.time())).fetchall()
         return any(self.can_access(row['principal'], owner, self.provider_name) for row in rows)
 
     def flush(self):
@@ -271,8 +308,13 @@ class EventSubscriptions:
         with self.runtime.connection() as db:
             self._prune(db, now)
             db.execute("DELETE FROM event_deliveries WHERE status!='pending'")
-            # Only events tied to this provider; no other project/provider notifications.
-            subscriptions = db.execute('SELECT * FROM subscriptions WHERE active=1 AND expires>?', (now,)).fetchall()
+            # Only this provider's subscriptions; legacy rows without a side-table
+            # entry belong to Dot so a Muse bus never deactivates them.
+            subscriptions = db.execute(
+                'SELECT s.* FROM subscriptions s '
+                'LEFT JOIN subscription_providers p ON p.subscription=s.id '
+                'WHERE COALESCE(p.provider, ?)=? AND s.active=1 AND s.expires>?',
+                ('dot', self.provider_name, now)).fetchall()
             for sub in subscriptions:
                 if not self.can_access(sub['principal'], sub['owner'], self.provider_name):
                     db.execute('UPDATE subscriptions SET active=0 WHERE id=?', (sub['id'],))
@@ -296,9 +338,13 @@ class EventSubscriptions:
                                (sub['id'], event['seq'], body))
                 if events:
                     db.execute('UPDATE subscriptions SET start_seq=? WHERE id=?', (events[-1]['seq'], sub['id']))
-            pending = db.execute("SELECT d.*,s.principal,s.owner,s.url,s.secret,s.expires,s.active "
+            pending = db.execute(
+                "SELECT d.*,s.principal,s.owner,s.url,s.secret,s.expires,s.active "
                 "FROM event_deliveries d JOIN subscriptions s ON s.id=d.subscription "
-                "WHERE d.status='pending' AND d.next_attempt<=? ORDER BY d.next_attempt,d.seq LIMIT ?", (now, self.max_callbacks_per_flush)).fetchall()
+                "LEFT JOIN subscription_providers p ON p.subscription=s.id "
+                "WHERE COALESCE(p.provider, ?)=? AND d.status='pending' AND d.next_attempt<=? "
+                "ORDER BY d.next_attempt,d.seq LIMIT ?",
+                ('dot', self.provider_name, now, self.max_callbacks_per_flush)).fetchall()
         for row in pending:
             remaining = deadline - time.monotonic()
             if remaining <= 0:

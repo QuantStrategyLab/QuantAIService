@@ -58,7 +58,7 @@ class McpOperationsMixin:
                 result = {}
             elif method == 'server/discover':
                 caps = {'tools': {}}
-                if self.events and 'events:subscribe' in principal.scopes and principal.provider == self.events.provider_name:
+                if self.event_bus(principal.provider) and 'events:subscribe' in principal.scopes:
                     caps['events'] = {}
                 result = {'resultType': 'complete', 'supportedVersions': ['2026-07-28'], 'capabilities': caps}
             elif method == 'tools/list':
@@ -69,18 +69,19 @@ class McpOperationsMixin:
                 result = self.call_tool(principal, params)
             elif method in {'events/list', 'events/subscribe', 'events/unsubscribe'}:
                 self.event_worker(principal)
+                bus = self.event_bus(principal.provider)
                 if method == 'events/list':
-                    result = self.events.catalog()
+                    result = bus.catalog()
                 elif method == 'events/subscribe':
                     if not isinstance(params.get('arguments'), dict):
                         raise ValueError('project filter is required')
                     self.project_context(principal, params['arguments'].get('project'))
-                    result = self.events.subscribe(principal.identity, params)
+                    result = bus.subscribe(principal.identity, params)
                 else:
                     if not isinstance(params.get('arguments'), dict):
                         raise ValueError('project filter is required')
                     self.project_context(principal, params['arguments'].get('project'))
-                    result = self.events.unsubscribe_request(principal.identity, params)
+                    result = bus.unsubscribe_request(principal.identity, params)
             else:
                 return {'jsonrpc': '2.0', 'id': identifier, 'error': {'code': -32601, 'message': 'method not found'}}
             return {'jsonrpc': '2.0', 'id': identifier, 'result': result}
@@ -94,8 +95,9 @@ class McpOperationsMixin:
             return {'jsonrpc': '2.0', 'id': identifier, 'error': {'code': code, 'message': description}}
 
     def tools(self, principal):
+        bus = self.event_bus(principal.provider)
         return worker_tools(principal, self.runtime.policies,
-                            self.events.provider_name if self.events else None)
+                            bus.provider_name if bus else None)
 
     def call_tool(self, principal, params):
         if set(params) != {'name', 'arguments'} or not isinstance(params['arguments'], dict):
@@ -111,7 +113,8 @@ class McpOperationsMixin:
         Draft202012Validator(definitions[name]['inputSchema']).validate(args)
         principal = self.project_context(principal, args.get('project'))
         if name in {'get_event_subscription', 'delete_event_subscription'}:
-            operation = self.events.status if name == 'get_event_subscription' else self.events.unsubscribe
+            bus = self.event_bus(principal.provider)
+            operation = bus.status if name == 'get_event_subscription' else bus.unsubscribe
             record = operation(principal.identity, args['subscription_id'], owner=principal.project)
         elif name == 'get_task':
             record = self.worker(principal, args['task_id'])

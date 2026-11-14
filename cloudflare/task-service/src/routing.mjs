@@ -210,7 +210,10 @@ export function decideRoute(routing,request,{project,providerReady,entryReady,lo
   fail('no ready provider for scenario');
 }
 
-export function providerReadiness(name,{env={},configuredProviders={},hasDotSubscription=false}={}){
+// Dot and Muse wake through Cloudflare event subscriptions; never Cursor Cloud Agents.
+export const EVENT_AGENTS=new Set(['dot','muse']);
+
+export function providerReadiness(name,{env={},configuredProviders={},hasDotSubscription=false,hasMuseSubscription=false}={}){
   const item=configuredProviders[name];
   if(!item)return [false,'not_configured'];
   const kind=item.type;
@@ -233,9 +236,7 @@ export function providerReadiness(name,{env={},configuredProviders={},hasDotSubs
   }
   if(kind==='muse'){
     if(item.enabled!==true)return [false,'disabled'];
-    if(!env.AI_SERVICE_MUSE_READY)return [false,'muse_not_ready'];
-    if(typeof item.key_env!=='string'||!env[item.key_env])return [false,'missing_credential'];
-    return [true,'ready'];
+    return hasMuseSubscription?[true,'ready']:[false,'no_subscription'];
   }
   if(kind==='claudeduet')return [false,'unavailable'];
   return [false,'unsupported'];
