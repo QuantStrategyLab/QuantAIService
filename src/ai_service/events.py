@@ -251,9 +251,13 @@ class EventSubscriptions:
     def _status(self, db, principal, subscription_id, owner):
         if not isinstance(subscription_id, str) or not 1 <= len(subscription_id) <= 200:
             raise ValueError('subscription ID is required (1..200 characters)')
-        row = db.execute('SELECT l.*,s.active FROM subscription_lifecycle l '
-                         'LEFT JOIN subscriptions s ON s.id=l.id WHERE l.id=?', (subscription_id,)).fetchone()
-        if row and (row['principal'] != principal or (owner is not None and row['owner'] != owner)):
+        row = db.execute(
+            'SELECT l.*,s.active,COALESCE(p.provider, ?) AS provider FROM subscription_lifecycle l '
+            'LEFT JOIN subscriptions s ON s.id=l.id '
+            'LEFT JOIN subscription_providers p ON p.subscription=l.id WHERE l.id=?',
+            ('dot', subscription_id)).fetchone()
+        if row and (row['principal'] != principal or (owner is not None and row['owner'] != owner)
+                    or row['provider'] != self.provider_name):
             raise PermissionError('subscription access denied')
         state = 'gone'
         if row and row['deleted'] is None:
