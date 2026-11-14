@@ -156,6 +156,15 @@ def build_application(config, *, github_key_loader=None, github_transport=None):
             if name in events_holder['buses'] or events is not None:
                 raise ValueError('one Dot event provider per service deployment')
             events = EventSubscriptions(runtime, provider_name=name, can_access=auth.can_access_events)
+            if name != 'dot':
+                # Legacy rows without a side-table entry are Dot; claim them once
+                # under the configured Dot provider key (never from Muse).
+                with runtime.connection() as db:
+                    db.execute(
+                        'INSERT OR IGNORE INTO subscription_providers(subscription, provider) '
+                        'SELECT id, ? FROM subscriptions '
+                        'WHERE id NOT IN (SELECT subscription FROM subscription_providers)',
+                        (name,))
             events_holder['buses'][name] = events
             providers[name] = DotEventProvider(events)
         elif item['type'] == 'chatgpt_plan_oauth':
