@@ -142,10 +142,10 @@ class EventSubscriptions:
         if type(ttl) is not int or ttl < 1000:
             raise ValueError('ttlMs must be an integer of at least 1000')
         expiry = time.time() + min(ttl / 1000, self.ttl_seconds)
-        # Muse includes provider_name so IDs never collide with Dot; Dot keeps
-        # the legacy hash so active subscriptions survive this release.
+        # Non-Dot buses (Muse, including custom keys) include provider_name so
+        # IDs never collide with Dot. Dot keeps the legacy hash.
         identity_fields = ([principal, url, self.name, self.provider_name, args]
-                           if self.provider_name == 'muse'
+                           if self.provider_name != 'dot'
                            else [principal, url, self.name, args])
         identity = _json(identity_fields).encode()
         subscription_id = 'sub_' + hashlib.sha256(identity).hexdigest()
@@ -239,7 +239,7 @@ class EventSubscriptions:
                 or delivery['mode'] != 'webhook' or not isinstance(delivery['url'], str)):
             raise ValueError('webhook destination is required')
         identity_fields = ([principal, delivery['url'], self.name, self.provider_name, args]
-                           if self.provider_name == 'muse'
+                           if self.provider_name != 'dot'
                            else [principal, delivery['url'], self.name, args])
         identity = _json(identity_fields).encode()
         subscription_id = 'sub_' + hashlib.sha256(identity).hexdigest()

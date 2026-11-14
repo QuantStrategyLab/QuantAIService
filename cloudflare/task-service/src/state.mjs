@@ -587,7 +587,10 @@ export class TaskStore extends DurableObject {
   async cancel(owner,taskId) {
     const record=this.ctx.storage.transactionSync(()=>{
       const row=this.#row(owner,taskId);
-      if(row.status==='queued'||(['running','cancel_requested'].includes(row.status)&&EVENT_AGENTS.has(row.provider)&&JSON.parse(row.request).mode==='agent'&&!row.worker&&!row.attempt))this.#state(taskId,'cancelled');
+      const unclaimedEvent=EVENT_AGENTS.has(row.provider)&&JSON.parse(row.request).mode==='agent'&&!row.worker&&!row.attempt;
+      let acceptance=null;try{acceptance=row.handle?JSON.parse(row.handle).acceptance:null;}catch{}
+      // Event-pending rows cancel locally; leftover Cloud Agent handles need a stop report.
+      if(row.status==='queued'||(unclaimedEvent&&['running','cancel_requested'].includes(row.status)&&acceptance!=='agent_started'))this.#state(taskId,'cancelled');
       else if(!TERMINAL.has(row.status)&&!['outcome_unknown','cancel_requested'].includes(row.status))this.#state(taskId,'cancel_requested');
       return this.get(owner,taskId);
     });
