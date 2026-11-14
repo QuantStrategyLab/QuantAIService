@@ -261,6 +261,10 @@ export class TaskStore extends DurableObject {
     if (request.mode === "api") {
       try { apiConfiguration(this.env,provider,request); } catch { denied("execution mode is unavailable"); }
     }
+    if (request.mode === 'agent' && EVENT_AGENTS.has(provider) && provider !== 'dot') {
+      const item = this.env.AGENT_PROVIDERS?.[provider];
+      if (!item || item.type !== 'muse' || item.enabled !== true) denied('execution mode is unavailable');
+    }
     if (request.mode === 'agent' && !EVENT_AGENTS.has(provider)) {
       try { nativeConfiguration(this.env,provider); } catch { denied('execution mode is unavailable'); }
     }
