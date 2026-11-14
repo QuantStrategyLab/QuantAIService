@@ -41,8 +41,9 @@ only in `prompt.text`; persist agent/run ids from the create response. Later
 `POST /v1/agents/{id}/runs` with `delivery: "steer"` (not another create);
 cancellation also calls `POST /v1/agents/{id}/runs/{runId}/cancel` when a run id
 is known. The Cloud Agent uses a preconfigured Muse Wonder + muse worker MCP
-connection to claim/report. Example stays `enabled: false`; disabled entries do
-not require `url` / `key_env` at startup. Enablement needs `url` and
+connection to claim/report. `repository` / `repos` are not accepted (advisory
+claim/report only). Example stays `enabled: false`; disabled entries do not
+require `url` / `key_env` at startup. Enablement needs `url` and
 `key_env: AI_SERVICE_MUSE_API_KEY`. Readiness also requires
 `AI_SERVICE_MUSE_READY`.
 

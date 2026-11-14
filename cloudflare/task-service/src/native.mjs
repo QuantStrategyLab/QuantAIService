@@ -39,13 +39,11 @@ export function nativeConfiguration(env,name){
      !/^\/v1\/claude_code\/routines\/trig_[A-Za-z0-9]+\/fire$/.test(url.pathname)||url.search))rejected();
   if(c.type==='muse'&&(url.href!==MUSE_LAUNCH))rejected();
   if(c.model!=null&&(typeof c.model!=='string'||!c.model||/[\r\n]/.test(c.model)))rejected();
-  if(c.repository!=null){
-    let repo;try{repo=new URL(callbackURL(c.repository));}catch{rejected();}
-    if(repo.search||repo.hash)rejected();
-  }
+  // Advisory claim/report only: refuse a writable Cloud Agent repository binding.
+  if(c.repository!=null)rejected();
   const key=env[c.key_env];
   if(typeof key!=='string'||!key||/[\r\n]/.test(key))rejected();
-  return {type:c.type,url:url.href,key,model:c.model??null,repository:c.repository??null};
+  return {type:c.type,url:url.href,key,model:c.model??null,repository:null};
 }
 export async function triggerNative(env,name,event,remainingSeconds=30,existingHandle=null){
   const c=nativeConfiguration(env,name);
@@ -71,7 +69,6 @@ export async function triggerNative(env,name,event,remainingSeconds=30,existingH
     }
     const payload={prompt:musePrompt(body)};
     if(c.model)payload.model={id:c.model};
-    if(c.repository)payload.repos=[{url:c.repository}];
     const created=await museReply(c.url,headers,payload,remainingSeconds);
     if(created.reply.status>=500)throw Error('routine acceptance unknown');
     if(created.reply.status!==200&&created.reply.status!==201)rejected();

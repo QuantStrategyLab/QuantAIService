@@ -60,6 +60,12 @@ class NamedAgentTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 build_application(self.config)
 
+    def test_muse_rejects_repository_launch_binding(self):
+        with self.assertRaisesRegex(ValueError, 'repository launch is not supported'):
+            MuseCloudAgentProvider(
+                'https://api.cursor.com/v1/agents', 'synthetic-test-only',
+                'https://tasks.example/mcp', repository='https://github.com/example/repo')
+
     def test_muse_requires_explicit_enablement_and_credential(self):
         for enabled in (None, False):
             c = copy.deepcopy(self.config)

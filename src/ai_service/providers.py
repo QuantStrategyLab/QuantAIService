@@ -95,14 +95,13 @@ class MuseCloudAgentProvider:
             raise ValueError('Muse Cloud Agent API key is required')
         if model is not None and (not isinstance(model, str) or not model or '\r' in model or '\n' in model):
             raise ValueError('Muse model id is invalid')
+        # Advisory claim/report only: do not attach a writable Cloud Agent repo.
         if repository is not None:
-            repo = urlsplit(repository)
-            if repo.scheme != 'https' or not repo.hostname or repo.username or repo.password or repo.fragment:
-                raise ValueError('Muse repository must be a configured HTTPS URL')
+            raise ValueError('Muse repository launch is not supported')
         self._url, self._key = launch_url, key
         self._resource = task_resource
         self._model = model
-        self._repository = repository
+        self._repository = None
         self._transport = transport or PublicHTTPS()
         self._authorization = 'Basic ' + base64.b64encode((key + ':').encode('ascii')).decode('ascii')
 
@@ -176,8 +175,6 @@ class MuseCloudAgentProvider:
         launch = {'prompt': self._prompt(event)}
         if self._model:
             launch['model'] = {'id': self._model}
-        if self._repository:
-            launch['repos'] = [{'url': self._repository}]
         reply = self._post(self._url, launch)
         if reply.status >= 500:
             raise RuntimeError('routine acceptance unknown')
