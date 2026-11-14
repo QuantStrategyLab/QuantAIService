@@ -88,6 +88,11 @@ class EventSubscriptions:
             columns = {row[1] for row in db.execute('PRAGMA table_info(subscriptions)')}
             if 'provider' not in columns:
                 db.execute("ALTER TABLE subscriptions ADD COLUMN provider TEXT NOT NULL DEFAULT 'dot'")
+            # Pre-partition rows were Dot-only. A custom-named Dot bus claims them;
+            # Muse never rewrites those legacy rows.
+            if self.provider_name not in {'dot', 'muse'}:
+                db.execute("UPDATE subscriptions SET provider=? WHERE provider='dot'",
+                           (self.provider_name,))
             self._prune(db, time.time())
 
     def catalog(self):
@@ -144,11 +149,11 @@ class EventSubscriptions:
         if type(ttl) is not int or ttl < 1000:
             raise ValueError('ttlMs must be an integer of at least 1000')
         expiry = time.time() + min(ttl / 1000, self.ttl_seconds)
-        # Keep Dot identity hashes stable across the provider-column migration;
-        # Muse (and any later bus) includes provider_name so IDs never collide.
-        identity_fields = [principal, url, self.name, args]
-        if self.provider_name != 'dot':
-            identity_fields = [principal, url, self.name, self.provider_name, args]
+        # Keep Dot identity hashes stable across the provider-column migration
+        # (including custom Dot provider keys). Muse includes provider_name.
+        identity_fields = ([principal, url, self.name, self.provider_name, args]
+                           if self.provider_name == 'muse'
+                           else [principal, url, self.name, args])
         identity = _json(identity_fields).encode()
         subscription_id = 'sub_' + hashlib.sha256(identity).hexdigest()
         with self.runtime.connection() as db:
@@ -229,9 +234,9 @@ class EventSubscriptions:
         if (not isinstance(delivery, dict) or set(delivery) != {'mode', 'url'}
                 or delivery['mode'] != 'webhook' or not isinstance(delivery['url'], str)):
             raise ValueError('webhook destination is required')
-        identity_fields = [principal, delivery['url'], self.name, args]
-        if self.provider_name != 'dot':
-            identity_fields = [principal, delivery['url'], self.name, self.provider_name, args]
+        identity_fields = ([principal, delivery['url'], self.name, self.provider_name, args]
+                           if self.provider_name == 'muse'
+                           else [principal, delivery['url'], self.name, args])
         identity = _json(identity_fields).encode()
         subscription_id = 'sub_' + hashlib.sha256(identity).hexdigest()
         self.unsubscribe(principal, subscription_id, owner=owner)
