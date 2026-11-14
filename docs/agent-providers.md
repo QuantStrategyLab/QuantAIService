@@ -9,7 +9,7 @@ attestations. Agent mode stays separate from API mode (`gemini_api` and similar)
 | --- | --- | --- | --- |
 | `grokbot` | `grok_webhook` | `true` | Existing Grok Bot Routine webhook |
 | `claudeduet` | `claudeduet` | `false` | Scaffold only; no verified trigger protocol |
-| `muse` | `muse` | `false` | Cursor Cloud Agents `POST /v1/agents` + muse worker MCP claim |
+| `muse` | `muse` | `false` | Scaffold only; Cloudflare MCP claim identity reserved; no outbound launch host |
 
 The enclosing Python example service remains `enabled: false`. Grok Bot is
 explicitly enabled at the provider level as requested, but this does not deploy
@@ -35,17 +35,15 @@ available for its original Claude Code purpose.
 
 `muse` is the reserved long-conversation agent identity for Muse Wonder. It is
 not an API-mode model slot and must not share Gemini or ChatGPT plan routes.
-Live shape: launch via `POST https://api.cursor.com/v1/agents` with identifiers
-only in `prompt.text`; persist agent/run ids from the create response. Later
-`message` / `cancel_requested` notifications use
-`POST /v1/agents/{id}/runs` with `delivery: "steer"` (not another create);
-cancellation also calls `POST /v1/agents/{id}/runs/{runId}/cancel` when a run id
-is known. The Cloud Agent uses a preconfigured Muse Wonder + muse worker MCP
-connection to claim/report. `repository` / `repos` are not accepted (advisory
-claim/report only). Example stays `enabled: false`; disabled entries do not
-require `url` / `key_env` at startup. Enablement needs `url` and
-`key_env: AI_SERVICE_MUSE_API_KEY`. Readiness also requires
-`AI_SERVICE_MUSE_READY`.
+Shared surface with Dot / GrokBot / ClaudeDuet is the **Cloudflare Worker** task
+service (OAuth, queue, MCP claim/report). Each named agent keeps its own outbound
+wake channel; they must not share a Cursor Cloud Agents launch path.
+
+Muse currently has **no verified Cloudflare-compatible outbound trigger**. Its
+reserved type accepts disabled registration only. Setting `enabled: true` fails
+closed in both runtimes. Do not bind `url`, `key_env`, Cursor API keys, or
+`AI_SERVICE_MUSE_READY` for Muse. Scenario routing always reports muse as
+`unavailable` until a non-Cursor, service-compatible trigger exists.
 
 ## Routing and admission
 
@@ -75,7 +73,7 @@ existing protected configuration process:
   owner, client and provider. Caller identities remain submit/read only.
 
 No worker gains `events:subscribe` for these names: event delivery stays with
-Dot; Grok Bot uses Routine webhooks; Muse uses Cloud Agent launch + MCP claim.
+Dot; Grok Bot uses Routine webhooks; Muse stays claim-identity scaffold only.
 Existing project/provider checks reject
 legacy `grok` or `claude` workers claiming a new provider's task. Registering an
 OAuth public client alone does not grant task access. This change runs no
@@ -109,5 +107,6 @@ The native three-role briefing consumer also accepts the new provider names
 in its protected role binding. Distinct worker identities and current readback
 remain required; a name alone never yields approval, and Duet / Muse remain
 unavailable in the production runtime until an adapter is verified.
-Keep `muse` disabled until the Cloud Agent launch/notify path, MCP worker
-identity and cancel/receipt checks are verified the same way.
+Keep `muse` disabled until a Cloudflare-compatible Muse Wonder trigger exists
+and MCP worker identity plus cancel/receipt checks are verified. Never wire Muse
+through Cursor Cloud Agents.

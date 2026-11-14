@@ -15,7 +15,7 @@ from .gemini import GeminiProvider
 from .github_apps import GitHubApps, GitHubComments, validate_apps
 from .inference import ChatGPTPlanProvider
 from .mcp_logging import log_level
-from .providers import ClaudeRoutineProvider, GrokWebhookProvider, MuseCloudAgentProvider
+from .providers import ClaudeRoutineProvider, GrokWebhookProvider
 from .runtime import Policy
 from .worker_tools import tools_schema_sha256, worker_tools
 from .application import Application
@@ -63,14 +63,9 @@ def validate_configuration(config):
             if item.get('enabled') is True:
                 raise ValueError('Claude Duet invocation is not configured')
         elif kind == 'muse':
-            # Cursor Cloud Agents launch + muse worker MCP claim/report.
-            if item.get('enabled') is not True:
-                continue
-            item['key_env']
-            MuseCloudAgentProvider(
-                item['url'], 'configuration-check', config['resource'],
-                model=item.get('model'), repository=item.get('repository'),
-            )
+            # Muse Wonder wakes through Cloudflare event subscriptions; never
+            # Cursor Cloud Agents.
+            continue
         elif kind == 'chatgpt_plan_oauth':
             # Unauthorized entries stay as routing placeholders (same as disabled gemini).
             item['token_env']
@@ -151,11 +146,8 @@ def build_application(config, *, github_key_loader=None, github_transport=None):
         elif item['type'] == 'muse':
             if item.get('enabled') is not True:
                 continue
-            key = srv.os.environ.get(item['key_env'])
-            providers[name] = MuseCloudAgentProvider(
-                item['url'], key, config['resource'],
-                model=item.get('model'), repository=item.get('repository'),
-            )
+            muse_events = EventSubscriptions(runtime, provider_name=name, can_access=auth.can_access_events)
+            providers[name] = DotEventProvider(muse_events)
         elif item['type'] == 'dot_events':
             if events is not None:
                 raise ValueError('one Dot event provider per service deployment')

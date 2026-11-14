@@ -85,13 +85,13 @@ test('decideRoute skips API providers whose fixed model mismatches the tier',()=
 test('decideRoute skips unready providers and accepts config-only scenario additions',()=>{
   const decision=decideRoute(ROUTING,{mode:'agent',scenario:'reconciliation_anomaly',objective:'explain the recon diff',materials:[],output_schema:{}},{
     project:'example-org/ExampleResearch',
-    providerReady:name=>name==='dot'?[true,'ready']:[false,name==='muse'?'muse_not_ready':'grok_not_ready'],
+    providerReady:name=>name==='dot'?[true,'ready']:[false,name==='muse'?'unavailable':'grok_not_ready'],
     log:{info(){}},
   });
   assert.equal(decision.provider,'dot');
   assert.equal(decision.category,'quant_ops');
   assert.equal(decision.model,'dot-strong');
-  assert.match(decision.reason,/skip:muse:muse_not_ready/);
+  assert.match(decision.reason,/skip:muse:unavailable/);
   assert.match(decision.reason,/skip:grokbot:grok_not_ready/);
   const extended=validateRoutingConfig({
     ...ROUTING,
@@ -117,9 +117,8 @@ test('maskProject and readiness gates',()=>{
     env:{},configuredProviders:{'chatgpt-plan':{type:'chatgpt_plan_oauth',plan_usage_authorized:true,token_env:'AI_SERVICE_CHATGPT_PLAN_TOKEN'}},
   }),[false,'missing_credential']);
   assert.deepEqual(providerReadiness('muse',{configuredProviders:{muse:{type:'muse',enabled:false}}}),[false,'disabled']);
-  assert.deepEqual(providerReadiness('muse',{env:{},configuredProviders:{muse:{type:'muse',enabled:true,key_env:'AI_SERVICE_MUSE_API_KEY'}}}),[false,'muse_not_ready']);
-  assert.deepEqual(providerReadiness('muse',{env:{AI_SERVICE_MUSE_READY:'1'},configuredProviders:{muse:{type:'muse',enabled:true,key_env:'AI_SERVICE_MUSE_API_KEY'}}}),[false,'missing_credential']);
-  assert.deepEqual(providerReadiness('muse',{env:{AI_SERVICE_MUSE_READY:'1',AI_SERVICE_MUSE_API_KEY:'k'},configuredProviders:{muse:{type:'muse',enabled:true,key_env:'AI_SERVICE_MUSE_API_KEY'}}}),[true,'ready']);
+  assert.deepEqual(providerReadiness('muse',{configuredProviders:{muse:{type:'muse',enabled:true}}}),[false,'no_subscription']);
+  assert.deepEqual(providerReadiness('muse',{hasMuseSubscription:true,configuredProviders:{muse:{type:'muse',enabled:true}}}),[true,'ready']);
 });
 
 test('null schema version rejects and null complexity behaves as omitted',()=>{

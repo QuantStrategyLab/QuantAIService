@@ -113,4 +113,4 @@ Dot agent 在 worker 领取前仅有持久化事件，没有正在执行的工�
 
 ### Grok Bot 与 Claude Duet
 
-新增名称、配置和准入步骤见 [agent providers](../../docs/agent-providers.md)。`grokbot` 在 provider 示例中为 `enabled: true`，仍需有效 endpoint、Secret 绑定和完整项目/worker 准入；`claudeduet` 与 `muse` 默认关闭，尚无已核验的触发协议，误设启用也会拒绝。Claude Duet 不复用 Claude Code Routine token；Muse 不走 API 模式，拟用 Cloud Agent + MCP claim。
+新增名称、配置和准入步骤见 [agent providers](../../docs/agent-providers.md)。`grokbot` 在 provider 示例中为 `enabled: true`，仍需有效 endpoint、Secret 绑定和完整项目/worker 准入；`claudeduet` 与 `muse` 默认关闭，尚无已核验的触发协议，误设启用也会拒绝。Claude Duet 不复用 Claude Code Routine token；Muse 不走 API 模式，仅保留 MCP claim 身份脚手架，禁止 Cursor Cloud Agents 拉起。
