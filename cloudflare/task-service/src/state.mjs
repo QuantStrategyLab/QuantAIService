@@ -711,8 +711,15 @@ export class TaskStore extends DurableObject {
           }
           return;
         }
+        const latest=this.#row(task.owner,task.id);
         // A fast worker may have already claimed, cancelled or completed the task.
-        if(this.#row(task.owner,task.id).status!=='submitting')return;
+        // Still persist Muse agent/run ids so later message/cancel can steer.
+        if(latest.status!=='submitting'){
+          if(status==='accepted'&&handle){
+            this.sql.exec('UPDATE tasks SET handle=? WHERE id=?',JSON.stringify(handle),task.id);
+          }
+          return;
+        }
         this.#state(task.id,status==='accepted'?'running':status==='rejected'?'failed':'outcome_unknown',
           {handle:handle?JSON.stringify(handle):null,error:status==='accepted'?null:status==='rejected'?'submission_rejected':'acceptance_unknown'});
       });
