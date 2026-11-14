@@ -256,8 +256,11 @@ class EventSubscriptions:
             'LEFT JOIN subscriptions s ON s.id=l.id '
             'LEFT JOIN subscription_providers p ON p.subscription=l.id WHERE l.id=?',
             ('dot', subscription_id)).fetchone()
-        if row and (row['principal'] != principal or (owner is not None and row['owner'] != owner)
-                    or row['provider'] != self.provider_name):
+        if row and (row['principal'] != principal or (owner is not None and row['owner'] != owner)):
+            raise PermissionError('subscription access denied')
+        # Provider ownership applies while the subscription still exists. After
+        # delete, the side-table row is gone and lifecycle alone reports gone.
+        if row and row['deleted'] is None and row['provider'] != self.provider_name:
             raise PermissionError('subscription access denied')
         state = 'gone'
         if row and row['deleted'] is None:
