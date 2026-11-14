@@ -88,8 +88,15 @@ def execute(prompt, images, schema, *, state_path, timeout, env, client=None,
         state['id'] = client.submit(request, key)['id']
         save(state_path, state)
     record = client.wait(state['id'], timeout_seconds=timeout)
+    stored = record.get('request')
+    if scenario:
+        # Server may add routed model / reasoning fields; client fields must still match.
+        bound = (isinstance(stored, dict)
+                 and all(stored.get(key) == value for key, value in request.items()))
+    else:
+        bound = stored == request
     if (record.get('id') != state['id'] or record.get('owner') != owner
-            or record.get('request') != request or record.get('status') != 'completed'
+            or not bound or record.get('status') != 'completed'
             or record.get('result_kind') != 'advisory'):
         raise ValueError('image task is incomplete or result binding changed')
     return record['output']

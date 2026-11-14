@@ -5,7 +5,7 @@ import {createHash,createHmac,randomBytes} from 'node:crypto';
 import {resolve} from 'node:path';
 import {mkdir,readFile,writeFile} from 'node:fs/promises';
 import {createInterface} from 'node:readline';
-import {nativeConfiguration} from '../src/native.mjs';
+import {nativeConfiguration,triggerNative} from '../src/native.mjs';
 const production=(await build({entryPoints:['src/worker.mjs'],bundle:true,format:'esm',platform:'browser',write:false,external:['cloudflare:*'],plugins:[{name:'browser',setup(b){b.onResolve({filter:/^@hyperjump\/browser$/},()=>({path:resolve('node_modules/@hyperjump/browser/lib/index.browser.js')}));}}]})).outputFiles[0].text;
 const fixture=(await build({entryPoints:['test/fixture.mjs'],bundle:true,format:'esm',platform:'browser',write:false,external:['cloudflare:*'],plugins:[{name:'browser',setup(b){b.onResolve({filter:/^@hyperjump\/browser$/},()=>({path:resolve('node_modules/@hyperjump/browser/lib/index.browser.js')}));}}]})).outputFiles[0].text;
 const organization=process.argv.includes('--pigbibi')?'pigbibi':'quant',organizationId=organization==='quant'?'Quant':'Pigbibi';
@@ -105,6 +105,31 @@ try{
   const enabled={AGENT_PROVIDERS:{claudeduet:{type:'claudeduet',enabled:true},muse:{type:'muse',enabled:true,url:'https://api.cursor.com/v1/agents',key_env:'AI_SERVICE_MUSE_API_KEY'}},AI_SERVICE_MUSE_API_KEY:'synthetic-muse-key'};
   assert.throws(()=>nativeConfiguration(enabled,'claudeduet'));
   assert.deepEqual(nativeConfiguration(enabled,'muse'),{type:'muse',url:'https://api.cursor.com/v1/agents',key:'synthetic-muse-key',model:null,repository:null});
+ });
+ await test('muse create persists agent ids; follow-up steers and cancel hits run cancel',async()=>{
+  const env={PUBLIC_ORIGIN:origin,AGENT_PROVIDERS:{muse:{type:'muse',enabled:true,url:'https://api.cursor.com/v1/agents',key_env:'AI_SERVICE_MUSE_API_KEY'}},AI_SERVICE_MUSE_API_KEY:'synthetic-muse-key'};
+  const seen=[];
+  const original=globalThis.fetch;
+  globalThis.fetch=async(url,init)=>{
+    seen.push({url:String(url),body:init.body?JSON.parse(init.body):null});
+    if(String(url).endsWith('/v1/agents')){
+      return new Response(JSON.stringify({agent:{id:'bc-1',latestRunId:'run-1'},run:{id:'run-1'}}),{status:201});
+    }
+    if(String(url).endsWith('/cancel'))return new Response('{}',{status:200});
+    return new Response(JSON.stringify({delivery:'steered',runId:'run-2'}),{status:202});
+  };
+  try{
+    const created=await triggerNative(env,'muse',{task_id:'t1',project,change:'requested',revision:1},5);
+    assert.equal(created.agent_id,'bc-1');assert.equal(created.run_id,'run-1');
+    assert.equal(seen[0].url,'https://api.cursor.com/v1/agents');
+    const follow=await triggerNative(env,'muse',{task_id:'t1',project,change:'message',revision:2},5,created);
+    assert.equal(seen[1].url,'https://api.cursor.com/v1/agents/bc-1/runs');
+    assert.equal(seen[1].body.delivery,'steer');
+    assert.equal(follow.agent_id,'bc-1');
+    await triggerNative(env,'muse',{task_id:'t1',project,change:'cancel_requested',revision:3},5,created);
+    assert.equal(seen[2].url,'https://api.cursor.com/v1/agents/bc-1/runs/run-1/cancel');
+    assert.equal(seen[3].url,'https://api.cursor.com/v1/agents/bc-1/runs');
+  }finally{globalThis.fetch=original;}
  });
  await test('production bundle has no test issuance or out imports',async()=>{assert.ok(!production.includes('synthetic-github-token'));assert.ok(!production.includes('/__fixture__/'));assert.ok(!production.includes('abandonAPI'));assert.ok(!production.includes('/out/'));});
  ids={grokbot:(await worker.client('http://localhost:8989/callback')).clientId,dot:(await worker.client('http://localhost:8989/callback')).clientId,caller:(await worker.client('http://localhost:8989/callback')).clientId};

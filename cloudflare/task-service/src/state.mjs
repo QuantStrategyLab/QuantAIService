@@ -698,11 +698,19 @@ export class TaskStore extends DurableObject {
         if(task.change==='requested'&&(current.status==='cancel_requested'||task.deadline<=now())){
           this.#state(task.id,'cancelled');continue;
         }
-        handle=await triggerNative(this.env,task.provider,{task_id:task.id,project:task.owner,change:task.change,revision:task.revision},task.change==='requested'?task.deadline-now():30);
+        let prior=null;
+        try{prior=current.handle?JSON.parse(current.handle):null;}catch{prior=null;}
+        handle=await triggerNative(this.env,task.provider,{task_id:task.id,project:task.owner,change:task.change,revision:task.revision},task.change==='requested'?task.deadline-now():30,prior);
       }catch(e){status=e.name==='SubmissionRejected'?'rejected':'outcome_unknown';}
       finally{this.nativeInFlight.delete(task.id);}
       this.ctx.storage.transactionSync(()=>{
-        if(task.seq!==undefined){this.sql.exec('UPDATE native_notifications SET status=? WHERE seq=?',status,task.seq);return;}
+        if(task.seq!==undefined){
+          this.sql.exec('UPDATE native_notifications SET status=? WHERE seq=?',status,task.seq);
+          if(status==='accepted'&&handle?.agent_id){
+            this.sql.exec('UPDATE tasks SET handle=? WHERE id=?',JSON.stringify(handle),task.id);
+          }
+          return;
+        }
         // A fast worker may have already claimed, cancelled or completed the task.
         if(this.#row(task.owner,task.id).status!=='submitting')return;
         this.#state(task.id,status==='accepted'?'running':status==='rejected'?'failed':'outcome_unknown',

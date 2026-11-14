@@ -36,9 +36,14 @@ available for its original Claude Code purpose.
 `muse` is the reserved long-conversation agent identity for Muse Wonder. It is
 not an API-mode model slot and must not share Gemini or ChatGPT plan routes.
 Live shape: launch via `POST https://api.cursor.com/v1/agents` with identifiers
-only in `prompt.text`; the Cloud Agent uses a preconfigured Muse Wonder + muse
-worker MCP connection to claim/report. Example stays `enabled: false` with
-`url` and `key_env: AI_SERVICE_MUSE_API_KEY`. Readiness also requires
+only in `prompt.text`; persist agent/run ids from the create response. Later
+`message` / `cancel_requested` notifications use
+`POST /v1/agents/{id}/runs` with `delivery: "steer"` (not another create);
+cancellation also calls `POST /v1/agents/{id}/runs/{runId}/cancel` when a run id
+is known. The Cloud Agent uses a preconfigured Muse Wonder + muse worker MCP
+connection to claim/report. Example stays `enabled: false`; disabled entries do
+not require `url` / `key_env` at startup. Enablement needs `url` and
+`key_env: AI_SERVICE_MUSE_API_KEY`. Readiness also requires
 `AI_SERVICE_MUSE_READY`.
 
 ## Routing and admission

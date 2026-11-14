@@ -68,6 +68,10 @@ class NamedAgentTests(unittest.TestCase):
             with patch('ai_service.server.os.environ.get', side_effect=AssertionError('credential read')):
                 app = build_application(c)
             self.assertNotIn('muse', app.runtime.providers)
+        disabled = copy.deepcopy(self.config)
+        disabled['providers']['muse'] = {'type': 'muse', 'enabled': False}
+        disabled['providers']['grokbot']['enabled'] = False
+        validate_configuration(disabled)
         self.config['providers']['muse']['enabled'] = True
         self.config['providers']['grokbot']['enabled'] = False
         with patch('ai_service.server.os.environ.get', return_value=None):
@@ -83,9 +87,18 @@ class NamedAgentTests(unittest.TestCase):
         calls = []
         class Transport:
             def request(self, url, **kwargs):
+                body = kwargs.get('body') or b''
                 calls.append({'url': url, 'headers': kwargs['headers'],
-                              'body': json.loads(kwargs['body'])})
-                return HttpReply(201, b'{}')
+                              'body': json.loads(body) if body else None})
+                if url.endswith('/v1/agents'):
+                    return HttpReply(201, json.dumps({
+                        'agent': {'id': 'bc-synthetic', 'latestRunId': 'run-1'},
+                        'run': {'id': 'run-1'},
+                    }).encode())
+                if url.endswith('/cancel'):
+                    return HttpReply(200, b'{}')
+                return HttpReply(202, json.dumps({
+                    'delivery': 'steered', 'runId': 'run-2'}).encode())
         app.runtime.providers['muse']._transport = Transport()
         request = {**self.request, 'profile': 'muse', 'model': 'configured-muse'}
         task = app.runtime.submit(self.project, 'muse-task', request)
@@ -95,13 +108,24 @@ class NamedAgentTests(unittest.TestCase):
         self.assertTrue(calls[0]['headers']['Authorization'].startswith('Basic '))
         self.assertIn('prompt', calls[0]['body'])
         self.assertNotIn('materials', calls[0]['body']['prompt']['text'])
-        self.assertEqual(app.runtime.get(self.project, task['id'])['status'], 'running')
+        record = app.runtime.get(self.project, task['id'])
+        self.assertEqual(record['status'], 'running')
+        self.assertEqual(record['handle']['agent_id'], 'bc-synthetic')
+        self.assertEqual(record['handle']['run_id'], 'run-1')
         scopes = frozenset({'tasks:read', 'tasks:work'})
         worker = Principal('muse-worker', self.project, scopes, 'muse')
         claimed = app.runtime.claim(self.project, task['id'], worker.provider, worker.identity, 'attempt')
+        app.runtime.cancel(self.project, task['id'])
+        app.runtime.tick()
+        app.notifications.flush()
+        self.assertEqual(calls[1]['url'],
+                         'https://api.cursor.com/v1/agents/bc-synthetic/runs/run-1/cancel')
+        self.assertEqual(calls[2]['url'],
+                         'https://api.cursor.com/v1/agents/bc-synthetic/runs')
+        self.assertEqual(calls[2]['body']['delivery'], 'steer')
         app.runtime.report(self.project, task['id'], worker.provider, worker.identity, 'attempt',
-                           claimed['revision'], 'completed', {})
-        self.assertEqual(app.read_task(worker, task['id'])['status'], 'completed')
+                           claimed['revision'], 'cancelled', {})
+        self.assertEqual(app.read_task(worker, task['id'])['status'], 'cancelled')
 
     def test_grokbot_requires_explicit_enablement_and_credential(self):
         for enabled in (None, False):

@@ -77,3 +77,24 @@ class ImageCommandTests(unittest.TestCase):
             self.assertEqual(client.request['scenario'], 'compliance_scan')
             self.assertNotIn('profile', client.request)
             self.assertNotIn('model', client.request)
+
+    def test_scenario_binding_allows_server_normalized_fields(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            client = Client()
+            original_wait = client.wait
+
+            def wait(task_id, timeout_seconds):
+                record = original_wait(task_id, timeout_seconds)
+                record['request'] = {**client.request, 'model': 'routed-model',
+                                     'reasoning_effort': 'medium'}
+                return record
+
+            client.wait = wait
+            env = {'AI_SERVICE_SCENARIO': 'compliance_scan',
+                   'GITHUB_REPOSITORY': 'Synthetic/Project', 'GITHUB_RUN_ID': '789'}
+            output = execute('audit rewrite', [], {'type': 'object'},
+                             state_path=root / 'state', timeout=60, env=env, client=client)
+            self.assertEqual(output, {'answer': '样例'})
+            self.assertEqual(client.request['scenario'], 'compliance_scan')
+            self.assertNotIn('model', client.request)

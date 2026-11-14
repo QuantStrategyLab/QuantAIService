@@ -64,6 +64,8 @@ def validate_configuration(config):
                 raise ValueError('Claude Duet invocation is not configured')
         elif kind == 'muse':
             # Cursor Cloud Agents launch + muse worker MCP claim/report.
+            if item.get('enabled') is not True:
+                continue
             item['key_env']
             MuseCloudAgentProvider(
                 item['url'], 'configuration-check', config['resource'],
