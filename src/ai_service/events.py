@@ -144,7 +144,12 @@ class EventSubscriptions:
         if type(ttl) is not int or ttl < 1000:
             raise ValueError('ttlMs must be an integer of at least 1000')
         expiry = time.time() + min(ttl / 1000, self.ttl_seconds)
-        identity = _json([principal, url, self.name, self.provider_name, args]).encode()
+        # Keep Dot identity hashes stable across the provider-column migration;
+        # Muse (and any later bus) includes provider_name so IDs never collide.
+        identity_fields = [principal, url, self.name, args]
+        if self.provider_name != 'dot':
+            identity_fields = [principal, url, self.name, self.provider_name, args]
+        identity = _json(identity_fields).encode()
         subscription_id = 'sub_' + hashlib.sha256(identity).hexdigest()
         with self.runtime.connection() as db:
             self._prune(db, time.time())
@@ -224,7 +229,10 @@ class EventSubscriptions:
         if (not isinstance(delivery, dict) or set(delivery) != {'mode', 'url'}
                 or delivery['mode'] != 'webhook' or not isinstance(delivery['url'], str)):
             raise ValueError('webhook destination is required')
-        identity = _json([principal, delivery['url'], self.name, self.provider_name, args]).encode()
+        identity_fields = [principal, delivery['url'], self.name, args]
+        if self.provider_name != 'dot':
+            identity_fields = [principal, delivery['url'], self.name, self.provider_name, args]
+        identity = _json(identity_fields).encode()
         subscription_id = 'sub_' + hashlib.sha256(identity).hexdigest()
         self.unsubscribe(principal, subscription_id, owner=owner)
         # Native MCP Events requires an empty, idempotent unsubscribe result.
