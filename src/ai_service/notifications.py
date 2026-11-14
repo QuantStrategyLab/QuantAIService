@@ -1,5 +1,8 @@
 """At-most-once Grok follow-up triggers; unknown receipt is never retried."""
+import json
+
 from .runtime import SubmissionRejected
+from .transport import json_body
 
 
 class NativeNotifications:
@@ -14,7 +17,7 @@ class NativeNotifications:
         # after a crash, unknown delivery remains visible and cannot trigger a second run.
         with self.runtime.connection() as db:
             db.execute("UPDATE native_notifications SET status='outcome_unknown' WHERE status='sending'")
-            events = db.execute("SELECT e.seq,e.status,t.id,t.owner,t.provider,t.revision "
+            events = db.execute("SELECT e.seq,e.status,t.id,t.owner,t.provider,t.revision,t.handle "
                 "FROM events e JOIN tasks t ON t.id=e.task_id "
                 "LEFT JOIN native_notifications n ON n.seq=e.seq "
                 "WHERE e.status IN ('message','cancel_requested') AND n.seq IS NULL "
@@ -26,11 +29,18 @@ class NativeNotifications:
             with self.runtime.connection() as db:
                 db.execute('INSERT OR IGNORE INTO native_notifications(seq,status) VALUES(?,?)', (event['seq'], 'sending'))
             status = 'accepted'
+            updated = None
             try:
-                provider.notify(task_id=event['id'], owner=event['owner'], change=event['status'], revision=event['revision'])
+                handle = json.loads(event['handle']) if event['handle'] else None
+                updated = provider.notify(
+                    task_id=event['id'], owner=event['owner'], change=event['status'],
+                    revision=event['revision'], handle=handle)
             except SubmissionRejected:
                 status = 'rejected'
             except Exception:
                 status = 'outcome_unknown'
             with self.runtime.connection() as db:
                 db.execute('UPDATE native_notifications SET status=? WHERE seq=?', (status, event['seq']))
+                if status == 'accepted' and isinstance(updated, dict) and updated.get('agent_id'):
+                    db.execute('UPDATE tasks SET handle=? WHERE id=?',
+                               (json_body(updated).decode('utf-8'), event['id']))

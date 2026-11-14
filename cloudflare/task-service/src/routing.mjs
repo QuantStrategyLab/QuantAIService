@@ -231,7 +231,13 @@ export function providerReadiness(name,{env={},configuredProviders={},hasDotSubs
     if(typeof item.token_env!=='string'||!env[item.token_env])return [false,'missing_credential'];
     return [true,'ready'];
   }
-  if(kind==='claudeduet'||kind==='muse')return [false,'unavailable'];
+  if(kind==='muse'){
+    if(item.enabled!==true)return [false,'disabled'];
+    if(!env.AI_SERVICE_MUSE_READY)return [false,'muse_not_ready'];
+    if(typeof item.key_env!=='string'||!env[item.key_env])return [false,'missing_credential'];
+    return [true,'ready'];
+  }
+  if(kind==='claudeduet')return [false,'unavailable'];
   return [false,'unsupported'];
 }
 

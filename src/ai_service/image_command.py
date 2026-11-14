@@ -31,11 +31,19 @@ def save(path, value):
             os.unlink(temporary)
 
 
-def execute(prompt, images, schema, *, state_path, timeout, env, client=None):
+def execute(prompt, images, schema, *, state_path, timeout, env, client=None,
+            scenario=None, complexity=None):
     model, profile = env.get('AI_SERVICE_MODEL', ''), env.get('AI_SERVICE_PROFILE', '')
     owner = env.get('AI_SERVICE_PROJECT') or env.get('GITHUB_REPOSITORY')
     operation = env.get('AI_SERVICE_OPERATION_ID') or env.get('GITHUB_RUN_ID')
-    if not all(isinstance(v, str) and v.strip() for v in [model, profile, owner, operation]):
+    scenario = (scenario or env.get('AI_SERVICE_SCENARIO') or '').strip() or None
+    complexity = (complexity or env.get('AI_SERVICE_COMPLEXITY') or '').strip() or None
+    if not all(isinstance(v, str) and v.strip() for v in [owner, operation]):
+        raise ValueError('explicit project and operation identity required')
+    if scenario:
+        if complexity is not None and complexity not in {'simple', 'standard', 'complex'}:
+            raise ValueError('invalid complexity')
+    elif not all(isinstance(v, str) and v.strip() for v in [model, profile]):
         raise ValueError('explicit model, profile, project and operation identity required')
     if not isinstance(timeout, int) or not 1 <= timeout <= 900:
         raise ValueError('invalid timeout')
@@ -53,8 +61,17 @@ def execute(prompt, images, schema, *, state_path, timeout, env, client=None):
                           'base64': base64.b64encode(data).decode('ascii')})
     if len(materials) > 3:
         raise ValueError('too many images')
-    request = {'mode': 'agent', 'model': model, 'profile': profile, 'objective': prompt,
-               'materials': materials, 'output_schema': schema, 'timeout_seconds': timeout}
+    if scenario:
+        request = {'mode': 'agent', 'objective': prompt, 'materials': materials,
+                   'output_schema': schema, 'timeout_seconds': timeout,
+                   'scenario': scenario}
+        if complexity:
+            request['complexity'] = complexity
+    else:
+        # Keep historical key order so frozen non-scenario hashes stay stable.
+        request = {'mode': 'agent', 'model': model, 'profile': profile,
+                   'objective': prompt, 'materials': materials,
+                   'output_schema': schema, 'timeout_seconds': timeout}
     request_hash = hashlib.sha256(json_body(request)).hexdigest()
     key = 'image-task:' + digest({'operation': operation, 'request': request_hash})
     client = client or client_from_env()
@@ -73,8 +90,15 @@ def execute(prompt, images, schema, *, state_path, timeout, env, client=None):
         state['id'] = client.submit(request, key)['id']
         save(state_path, state)
     record = client.wait(state['id'], timeout_seconds=timeout)
+    stored = record.get('request')
+    if scenario:
+        # Server may add routed model / reasoning fields; client fields must still match.
+        bound = (isinstance(stored, dict)
+                 and all(stored.get(key) == value for key, value in request.items()))
+    else:
+        bound = stored == request
     if (record.get('id') != state['id'] or record.get('owner') != owner
-            or record.get('request') != request or record.get('status') != 'completed'
+            or not bound or record.get('status') != 'completed'
             or record.get('result_kind') != 'advisory'):
         raise ValueError('image task is incomplete or result binding changed')
     return record['output']
@@ -111,7 +135,8 @@ def main():
                            str(Path(tempfile.gettempdir()) / ('ai-service-command-' + str(os.getuid()))))
                       / (digest(identity) + '.json'))
         output = execute(prompt, args.image, schema, state_path=state_path,
-                         timeout=args.timeout_seconds, env=os.environ)
+                         timeout=args.timeout_seconds, env=os.environ,
+                         scenario=args.task, complexity=args.complexity)
         if args.out:
             save(args.out, output)
         else:
