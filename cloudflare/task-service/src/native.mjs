@@ -6,11 +6,16 @@ const musePrompt=(body)=>({text:'AI Service task notification. Identifiers only.
 function museHandle(taskId,payload,fallback=null){
   const agent=payload?.agent&&typeof payload.agent==='object'?payload.agent:{};
   const run=payload?.run&&typeof payload.run==='object'?payload.run:{};
+  const delivery=typeof payload?.delivery==='string'?payload.delivery:null;
   const agentId=typeof agent.id==='string'?agent.id
     :(typeof payload?.agentId==='string'?payload.agentId:fallback?.agent_id);
-  const runId=typeof run.id==='string'?run.id
-    :(typeof payload?.runId==='string'?payload.runId
-      :(typeof agent.latestRunId==='string'?agent.latestRunId:fallback?.run_id));
+  // A queued steer has no runId; do not keep a prior terminal run as the cancel target.
+  let runId=null;
+  if(delivery!=='queued'){
+    runId=typeof run.id==='string'?run.id
+      :(typeof payload?.runId==='string'?payload.runId
+        :(typeof agent.latestRunId==='string'?agent.latestRunId:fallback?.run_id));
+  }
   const handle={task_id:taskId,acceptance:'agent_started',model_verification:'unavailable'};
   if(typeof agentId==='string'&&agentId)handle.agent_id=agentId;
   if(typeof runId==='string'&&runId)handle.run_id=runId;

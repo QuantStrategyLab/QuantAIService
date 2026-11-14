@@ -129,6 +129,13 @@ try{
     await triggerNative(env,'muse',{task_id:'t1',project,change:'cancel_requested',revision:3},5,created);
     assert.equal(seen[2].url,'https://api.cursor.com/v1/agents/bc-1/runs/run-1/cancel');
     assert.equal(seen[3].url,'https://api.cursor.com/v1/agents/bc-1/runs');
+    globalThis.fetch=async(url,init)=>{
+      seen.push({url:String(url),body:init.body?JSON.parse(init.body):null});
+      return new Response(JSON.stringify({delivery:'queued'}),{status:202});
+    };
+    const queued=await triggerNative(env,'muse',{task_id:'t1',project,change:'message',revision:4},5,created);
+    assert.equal(queued.agent_id,'bc-1');
+    assert.equal(queued.run_id,undefined);
   }finally{globalThis.fetch=original;}
  });
  await test('production bundle has no test issuance or out imports',async()=>{assert.ok(!production.includes('synthetic-github-token'));assert.ok(!production.includes('/__fixture__/'));assert.ok(!production.includes('abandonAPI'));assert.ok(!production.includes('/out/'));});

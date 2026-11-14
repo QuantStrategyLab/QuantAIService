@@ -126,9 +126,14 @@ class MuseCloudAgentProvider:
             payload = {}
         agent = payload.get('agent') if isinstance(payload.get('agent'), dict) else {}
         run = payload.get('run') if isinstance(payload.get('run'), dict) else {}
+        delivery = payload.get('delivery') if isinstance(payload.get('delivery'), str) else None
         agent_id = agent.get('id') or payload.get('agentId') or fallback.get('agent_id')
-        run_id = (run.get('id') or payload.get('runId')
-                  or agent.get('latestRunId') or fallback.get('run_id'))
+        # A queued steer has no runId; do not keep a prior terminal run as the cancel target.
+        if delivery == 'queued':
+            run_id = None
+        else:
+            run_id = (run.get('id') or payload.get('runId')
+                      or agent.get('latestRunId') or fallback.get('run_id'))
         handle = {'task_id': task_id, 'acceptance': 'agent_started',
                   'model_verification': 'unavailable'}
         if isinstance(agent_id, str) and agent_id:
