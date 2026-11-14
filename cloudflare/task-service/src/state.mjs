@@ -224,7 +224,7 @@ export class TaskStore extends DurableObject {
                 return [false, 'api_model_mismatch'];
               }
             }
-            if (request.mode === 'agent' && name !== 'dot') {
+            if (request.mode === 'agent' && !EVENT_AGENTS.has(name)) {
               try {
                 nativeConfiguration(this.env, name);
                 return [true, 'ready'];

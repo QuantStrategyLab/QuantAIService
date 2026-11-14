@@ -214,9 +214,11 @@ class DotEventsTests(unittest.TestCase):
             self.assert_delivery_keys(b'y', b'x')
             self.assertEqual(self.transport.calls[-1][2]['body'], body)
             with self.runtime.connection() as db:
-                db.execute('INSERT INTO subscriptions VALUES(?,?,?,?,?,?,?,1)',
-                           ('legacy-case', 'worker', 'owner/repo', 'https://callback.example/legacy', self.secret, 4000, 0))
-                self.assertEqual(len(db.execute('PRAGMA table_info(subscriptions)').fetchall()), 8)
+                db.execute('INSERT INTO subscriptions(id,principal,owner,url,secret,expires,start_seq,active,provider) '
+                           'VALUES(?,?,?,?,?,?,?,1,?)',
+                           ('legacy-case', 'worker', 'owner/repo', 'https://callback.example/legacy',
+                            self.secret, 4000, 0, 'dot'))
+                self.assertEqual(len(db.execute('PRAGMA table_info(subscriptions)').fetchall()), 9)
         with patch('ai_service.events.time.time', return_value=1060):
             self.retry_delivery(restarted)
             # Inspect the original pending subscription, not the extra legacy fixture.
@@ -560,7 +562,7 @@ class DotEventsTests(unittest.TestCase):
         self.assertEqual(record['status'], 'active')
         self.assertIsNone(record['created_at'])
         with self.runtime.connection() as db:
-            self.assertEqual(len(db.execute('PRAGMA table_info(subscriptions)').fetchall()), 8)
+            self.assertEqual(len(db.execute('PRAGMA table_info(subscriptions)').fetchall()), 9)
         migrated.subscribe('worker', self.params)
         self.assertIsNone(migrated.status('worker', sub['id'])['created_at'])
         self.assertTrue(migrated.unsubscribe('worker', sub['id'])['deleted'])

@@ -83,6 +83,11 @@ class EventSubscriptions:
                     id TEXT PRIMARY KEY, principal TEXT NOT NULL, owner TEXT NOT NULL,
                     created REAL, expires REAL NOT NULL, deleted REAL);
             ''')
+            # Dot and Muse share the runtime DB; partition rows by provider so one
+            # bus cannot deactivate or deliver for the other.
+            columns = {row[1] for row in db.execute('PRAGMA table_info(subscriptions)')}
+            if 'provider' not in columns:
+                db.execute("ALTER TABLE subscriptions ADD COLUMN provider TEXT NOT NULL DEFAULT 'dot'")
             self._prune(db, time.time())
 
     def catalog(self):
@@ -139,12 +144,14 @@ class EventSubscriptions:
         if type(ttl) is not int or ttl < 1000:
             raise ValueError('ttlMs must be an integer of at least 1000')
         expiry = time.time() + min(ttl / 1000, self.ttl_seconds)
-        identity = _json([principal, url, self.name, args]).encode()
+        identity = _json([principal, url, self.name, self.provider_name, args]).encode()
         subscription_id = 'sub_' + hashlib.sha256(identity).hexdigest()
         with self.runtime.connection() as db:
             self._prune(db, time.time())
-            old = db.execute('SELECT id FROM subscriptions WHERE id=?', (subscription_id,)).fetchone()
-            count = db.execute('SELECT COUNT(*) FROM subscriptions WHERE principal=? AND owner=?', (principal, owner)).fetchone()[0]
+            old = db.execute('SELECT id FROM subscriptions WHERE id=? AND provider=?',
+                             (subscription_id, self.provider_name)).fetchone()
+            count = db.execute('SELECT COUNT(*) FROM subscriptions WHERE principal=? AND owner=? AND provider=?',
+                               (principal, owner, self.provider_name)).fetchone()[0]
             if not old and count >= self.max_subscriptions:
                 raise ValueError('subscription limit reached')
         challenge = secrets.token_urlsafe(32)
@@ -173,7 +180,8 @@ class EventSubscriptions:
             db.execute('BEGIN IMMEDIATE')
             now = time.time()
             self._prune(db, now)
-            old = db.execute('SELECT active,start_seq,secret,expires FROM subscriptions WHERE id=?', (subscription_id,)).fetchone()
+            old = db.execute('SELECT active,start_seq,secret,expires FROM subscriptions WHERE id=? AND provider=?',
+                             (subscription_id, self.provider_name)).fetchone()
             start = db.execute('SELECT COALESCE(MAX(seq),0) FROM events').fetchone()[0]
             if old and old['active'] and old['expires'] > now:
                 start = old['start_seq']
@@ -193,10 +201,11 @@ class EventSubscriptions:
             # Refresh preserves queued deliveries; resubscribe after unsubscribe has no replay.
             if old and (not old['active'] or old['expires'] <= time.time()):
                 db.execute('DELETE FROM event_deliveries WHERE subscription=?', (subscription_id,))
-            db.execute('INSERT INTO subscriptions VALUES(?,?,?,?,?,?,?,1) '
+            db.execute('INSERT INTO subscriptions(id,principal,owner,url,secret,expires,start_seq,active,provider) '
+                       'VALUES(?,?,?,?,?,?,?,1,?) '
                        'ON CONFLICT(id) DO UPDATE SET secret=excluded.secret,expires=excluded.expires,'
-                       'active=1,start_seq=excluded.start_seq',
-                       (subscription_id, principal, owner, url, secret, expiry, start))
+                       'active=1,start_seq=excluded.start_seq,provider=excluded.provider',
+                       (subscription_id, principal, owner, url, secret, expiry, start, self.provider_name))
             db.execute('INSERT INTO subscription_lifecycle VALUES(?,?,?,?,?,NULL) '
                        'ON CONFLICT(id) DO UPDATE SET created=CASE WHEN ? THEN subscription_lifecycle.created '
                        'ELSE excluded.created END,expires=excluded.expires,deleted=NULL',
@@ -215,7 +224,7 @@ class EventSubscriptions:
         if (not isinstance(delivery, dict) or set(delivery) != {'mode', 'url'}
                 or delivery['mode'] != 'webhook' or not isinstance(delivery['url'], str)):
             raise ValueError('webhook destination is required')
-        identity = _json([principal, delivery['url'], self.name, args]).encode()
+        identity = _json([principal, delivery['url'], self.name, self.provider_name, args]).encode()
         subscription_id = 'sub_' + hashlib.sha256(identity).hexdigest()
         self.unsubscribe(principal, subscription_id, owner=owner)
         # Native MCP Events requires an empty, idempotent unsubscribe result.
@@ -260,8 +269,8 @@ class EventSubscriptions:
 
     def has_active(self, owner):
         with self.runtime.connection() as db:
-            rows = db.execute('SELECT * FROM subscriptions WHERE owner=? AND active=1 AND expires>?',
-                              (owner, time.time())).fetchall()
+            rows = db.execute('SELECT * FROM subscriptions WHERE owner=? AND provider=? AND active=1 AND expires>?',
+                              (owner, self.provider_name, time.time())).fetchall()
         return any(self.can_access(row['principal'], owner, self.provider_name) for row in rows)
 
     def flush(self):
@@ -271,11 +280,14 @@ class EventSubscriptions:
         with self.runtime.connection() as db:
             self._prune(db, now)
             db.execute("DELETE FROM event_deliveries WHERE status!='pending'")
-            # Only events tied to this provider; no other project/provider notifications.
-            subscriptions = db.execute('SELECT * FROM subscriptions WHERE active=1 AND expires>?', (now,)).fetchall()
+            # Only this provider's subscriptions and events; never touch another bus.
+            subscriptions = db.execute(
+                'SELECT * FROM subscriptions WHERE provider=? AND active=1 AND expires>?',
+                (self.provider_name, now)).fetchall()
             for sub in subscriptions:
                 if not self.can_access(sub['principal'], sub['owner'], self.provider_name):
-                    db.execute('UPDATE subscriptions SET active=0 WHERE id=?', (sub['id'],))
+                    db.execute('UPDATE subscriptions SET active=0 WHERE id=? AND provider=?',
+                               (sub['id'], self.provider_name))
                     db.execute('DELETE FROM subscription_previous_keys WHERE subscription=?', (sub['id'],))
                     continue
                 queued = db.execute("SELECT COUNT(*) FROM event_deliveries WHERE subscription=?", (sub['id'],)).fetchone()[0]
@@ -295,10 +307,13 @@ class EventSubscriptions:
                     db.execute('INSERT OR IGNORE INTO event_deliveries(subscription,seq,body) VALUES(?,?,?)',
                                (sub['id'], event['seq'], body))
                 if events:
-                    db.execute('UPDATE subscriptions SET start_seq=? WHERE id=?', (events[-1]['seq'], sub['id']))
+                    db.execute('UPDATE subscriptions SET start_seq=? WHERE id=? AND provider=?',
+                               (events[-1]['seq'], sub['id'], self.provider_name))
             pending = db.execute("SELECT d.*,s.principal,s.owner,s.url,s.secret,s.expires,s.active "
                 "FROM event_deliveries d JOIN subscriptions s ON s.id=d.subscription "
-                "WHERE d.status='pending' AND d.next_attempt<=? ORDER BY d.next_attempt,d.seq LIMIT ?", (now, self.max_callbacks_per_flush)).fetchall()
+                "WHERE s.provider=? AND d.status='pending' AND d.next_attempt<=? "
+                "ORDER BY d.next_attempt,d.seq LIMIT ?",
+                (self.provider_name, now, self.max_callbacks_per_flush)).fetchall()
         for row in pending:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
