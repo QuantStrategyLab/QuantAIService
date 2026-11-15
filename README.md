@@ -77,25 +77,25 @@ See [CONTRIBUTING.md](CONTRIBUTING.md). AI assistants and maintainers also follo
 See [SECURITY.md](SECURITY.md). Do not open a public issue for a vulnerability.
 Keep credentials, private data, and external service tokens out of Git and logs.
 
-## License
-
-MIT. See [LICENSE](LICENSE). The task-service component carries its own MIT
-license in [`LICENSE.task-service`](LICENSE.task-service).
-
 ## Native diagnostic caller verification
 
 The existing operational-diagnosis workflow accepts `verify_native_only` for a
 manual synthetic connection test. It uses the production caller's OIDC,
 submission, polling and response binding with an explicitly synthetic input.
 It does not authenticate to cloud storage, read real observations, or change the
-production daily-attempt ledger. Normal scheduled diagnosis remains unchanged.
+production daily-attempt ledger. Normal scheduled diagnosis keeps its existing schedule.
 The test is single-attempt; an uncertain submission is inspected through its
 saved task state rather than automatically submitted again.
 
 Inline bitmap materials use `type=image`, `mime_type` and Base64 data. Native
 workers receive standard MCP image blocks in `get_task`; the original request
-and result binding remain unchanged. `python -m ai_service.image_command` adapts
+and result binding keep their existing format. `python -m ai_service.image_command` adapts
 existing read-only prompt/image/schema commands to explicitly configured task
 routes. Unknown submissions retain their state and use read-only lookup.
 
 Provider names `grokbot`, `claudeduet` and `muse`, enablement and admission requirements are documented in [agent providers](docs/agent-providers.md).
+
+## License
+
+MIT. See [LICENSE](LICENSE). The task-service component carries its own MIT
+license in [`LICENSE.task-service`](LICENSE.task-service).
