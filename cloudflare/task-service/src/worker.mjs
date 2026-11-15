@@ -7,7 +7,7 @@ export {QuantTaskStore as PersonalTaskStore} from './state.mjs';
 let application;
 export default {
   fetch(request,env,ctx){
-    const key=`${env.ORGANIZATION}\u0000${env.PUBLIC_ORIGIN}\u0000${env.PROJECT_ID}`;
+    const key=`${env.ORGANIZATION}\u0000${env.PUBLIC_ORIGIN}\u0000${env.PROJECT_ID}\u0000${env.OAUTH_ACCESS_TOKEN_TTL_SECONDS??''}`;
     if(!application||application.key!==key)application={key,app:createAuthApplication(configuration(env))};
     return application.app.fetch(request,env,ctx);
   }

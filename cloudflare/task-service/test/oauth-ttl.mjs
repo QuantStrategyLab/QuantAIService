@@ -14,7 +14,7 @@ try {
   const response = await mf.dispatchFetch('https://synthetic.example.test/');
   assert.equal(response.status, 200, 'local OAuth lifetime regression');
   assert.deepEqual(await response.json(), {passed: true});
-  console.log('PASS OAuth 3600s issuance, reuse without writes, pre-expiry refresh, expiry, audience and revocation');
+  console.log('PASS OAuth 3600s default issuance, reuse without writes, pre-expiry refresh, expiry, 21600s override, audience and revocation');
 } finally {
   await mf.dispose();
 }

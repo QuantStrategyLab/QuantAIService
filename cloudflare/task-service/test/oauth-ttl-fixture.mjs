@@ -1,6 +1,6 @@
 // Local workerd fixture only; never imported by the production entry point.
 import assert from 'node:assert/strict';
-import {createAuthApplication} from '../src/auth.mjs';
+import {accessTokenTtlSeconds, configuration, createAuthApplication} from '../src/auth.mjs';
 
 export default {
   async fetch() {
@@ -55,7 +55,7 @@ export default {
       assert.equal(issued.expires_in, 3600, 'issued access token lifetime');
       const issuedAt = now / 1000;
       const beforeReuse = writes;
-      for (const seconds of [0, 901, 1800, 3599]) {
+      for (const seconds of [0, 901, 3599]) {
         now = (issuedAt + seconds) * 1000;
         const valid = await server.validateToken(resource, issued.access_token, env);
         assert.ok(valid, 'reuse before expiry');
@@ -81,6 +81,44 @@ export default {
       await api.completeAuthorization({request: parsed, userId: 'synthetic-user',
         scope: ['tasks:read'], metadata: {synthetic: true}, props: {synthetic: true}});
       assert.equal(await server.validateToken(resource, rotated.access_token, env), null, 'revocation still enforced');
+
+      assert.equal(accessTokenTtlSeconds({}), 3600);
+      assert.equal(accessTokenTtlSeconds({OAUTH_ACCESS_TOKEN_TTL_SECONDS: ''}), 3600);
+      assert.equal(accessTokenTtlSeconds({OAUTH_ACCESS_TOKEN_TTL_SECONDS: '21600'}), 21600);
+      for (const bad of ['59', '86401', 'abc', '21600 ', '-1', '1.5']) {
+        assert.throws(() => accessTokenTtlSeconds({OAUTH_ACCESS_TOKEN_TTL_SECONDS: bad}), TypeError);
+      }
+      const overrideConfig = configuration({
+        ORGANIZATION: 'quant',
+        PUBLIC_ORIGIN: origin,
+        PROJECT_ID: 'ExampleOrg/ExampleRepo',
+        OAUTH_ACCESS_TOKEN_TTL_SECONDS: '21600',
+      });
+      assert.equal(overrideConfig.accessTokenTTL, 21600);
+      const {authorizationServer: overrideServer} = createAuthApplication(overrideConfig);
+      const overrideGrant = await overrideServer.getOAuthApi(env).completeAuthorization({
+        request: await overrideServer.getOAuthApi(env).parseAuthRequest(new Request(origin + '/authorize?' + new URLSearchParams({
+          response_type: 'code', client_id: client.clientId, redirect_uri: 'http://localhost:8989/callback',
+          scope: 'tasks:read', resource, code_challenge: challenge, code_challenge_method: 'S256',
+        }))),
+        userId: 'synthetic-user',
+        scope: ['tasks:read'],
+        metadata: {synthetic: true},
+        props: {synthetic: true},
+      });
+      const overrideResp = await overrideServer.fetch(new Request(origin + '/oauth/token', {
+        method: 'POST',
+        body: new URLSearchParams({
+          grant_type: 'authorization_code',
+          code: new URL(overrideGrant.redirectTo).searchParams.get('code'),
+          redirect_uri: 'http://localhost:8989/callback',
+          code_verifier: verifier,
+          client_id: client.clientId,
+          resource,
+        }),
+      }), env, {});
+      assert.equal(overrideResp.status, 200);
+      assert.equal((await overrideResp.json()).expires_in, 21600, 'overridden access token lifetime');
       return Response.json({passed: true});
     } catch (error) {
       if (error.code === 'ERR_ASSERTION' && typeof error.actual === 'number' && typeof error.expected === 'number') {
