@@ -26,6 +26,21 @@ const advertisedScopesFor = (resource, request, env) => {
   return SCOPES.filter((scope) => configured.some((client) => client.scopes.includes(scope)));
 };
 
+export const DEFAULT_ACCESS_TOKEN_TTL = 21600;
+
+export function accessTokenTtlSeconds(env = {}) {
+  const raw = env?.OAUTH_ACCESS_TOKEN_TTL_SECONDS;
+  if (raw === undefined || raw === null || raw === '') return DEFAULT_ACCESS_TOKEN_TTL;
+  let parsed;
+  if (typeof raw === 'number') parsed = raw;
+  else if (typeof raw === 'string' && /^(?:0|[1-9]\d*)$/.test(raw)) parsed = Number(raw);
+  else throw new TypeError('OAUTH_ACCESS_TOKEN_TTL_SECONDS must be an integer between 60 and 86400');
+  if (!Number.isSafeInteger(parsed) || parsed < 60 || parsed > 86400) {
+    throw new TypeError('OAUTH_ACCESS_TOKEN_TTL_SECONDS must be an integer between 60 and 86400');
+  }
+  return parsed;
+}
+
 /** Server-controlled configuration, never request headers or body. One instance per organization. */
 export function configuration(env) {
   const organization = env.ORGANIZATION;
@@ -33,7 +48,7 @@ export function configuration(env) {
   const origin = new URL(env.PUBLIC_ORIGIN);
   if (origin.origin !== env.PUBLIC_ORIGIN || origin.username || origin.password) throw new TypeError('PUBLIC_ORIGIN must be an origin');
   if (!env.PROJECT_ID || env.PROJECT_ID.startsWith('CONFIGURE_')) throw new TypeError('Exact existing PROJECT_ID required');
-  return { organization, projectId: env.PROJECT_ID, origin: origin.origin };
+  return { organization, projectId: env.PROJECT_ID, origin: origin.origin, accessTokenTTL: accessTokenTtlSeconds(env) };
 }
 
 /** Admission is provisioned explicitly. Empty or missing configuration authorizes nobody. */
@@ -79,11 +94,12 @@ ${description.scope.map((scope) => `<label><input type="checkbox" name="scope" v
  */
 export function createAuthApplication(config, { taskHandler } = {}) {
   const resources = [`${config.origin}/mcp`, `${config.origin}/v1/tasks`];
+  const accessTokenTTL = accessTokenTtlSeconds({ OAUTH_ACCESS_TOKEN_TTL_SECONDS: config.accessTokenTTL });
   const authorizationServer = new OAuthAuthorizationServer({
     issuer: config.origin,
     resources,
     scopesSupported: SCOPES,
-    accessTokenTTL: 3600,
+    accessTokenTTL,
     // Pre-registered clients only until exact native-host registrations are approved.
     clientIdMetadataDocumentEnabled: false,
     allowTokenExchangeGrant: false,
