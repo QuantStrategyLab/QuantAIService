@@ -26,7 +26,7 @@ const advertisedScopesFor = (resource, request, env) => {
   return SCOPES.filter((scope) => configured.some((client) => client.scopes.includes(scope)));
 };
 
-export const DEFAULT_ACCESS_TOKEN_TTL = 21600;
+export const DEFAULT_ACCESS_TOKEN_TTL = 3600;
 
 export function accessTokenTtlSeconds(env = {}) {
   const raw = env?.OAUTH_ACCESS_TOKEN_TTL_SECONDS;

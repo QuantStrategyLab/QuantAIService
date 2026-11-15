@@ -52,49 +52,49 @@ export default {
       const issued = await exchange({grant_type: 'authorization_code',
         code: new URL(grant.redirectTo).searchParams.get('code'),
         redirect_uri: 'http://localhost:8989/callback', code_verifier: verifier});
-      assert.equal(issued.expires_in, 21600, 'issued access token lifetime');
+      assert.equal(issued.expires_in, 3600, 'issued access token lifetime');
       const issuedAt = now / 1000;
       const beforeReuse = writes;
-      for (const seconds of [0, 901, 3600, 21599]) {
+      for (const seconds of [0, 901, 3599]) {
         now = (issuedAt + seconds) * 1000;
         const valid = await server.validateToken(resource, issued.access_token, env);
         assert.ok(valid, 'reuse before expiry');
-        assert.equal(valid.expiresAt, issuedAt + 21600, 'persisted access token expiry');
+        assert.equal(valid.expiresAt, issuedAt + 3600, 'persisted access token expiry');
       }
       assert.equal(writes, beforeReuse, 'reuse must not write or silently extend expiry');
-      assert.ok([...records.values()].some(record => record.ttl === 21600), 'KV access token TTL');
-      // A client may refresh shortly before expiry; the refreshed pair has a fresh six-hour lifetime.
+      assert.ok([...records.values()].some(record => record.ttl === 3600), 'KV access token TTL');
+      // A client may refresh shortly before expiry; the refreshed pair has a fresh one-hour lifetime.
       const refreshedAt = now / 1000;
       const rotated = await exchange({grant_type: 'refresh_token', refresh_token: issued.refresh_token});
-      assert.equal(rotated.expires_in, 21600, 'refreshed access token lifetime');
+      assert.equal(rotated.expires_in, 3600, 'refreshed access token lifetime');
       assert.ok(rotated.access_token !== issued.access_token, 'access token rotation');
       assert.ok(rotated.refresh_token !== issued.refresh_token, 'refresh token rotation');
       const beforeRotatedReuse = writes;
-      now = (issuedAt + 21601) * 1000;
+      now = (issuedAt + 3601) * 1000;
       assert.equal(await server.validateToken(resource, issued.access_token, env), null, 'expired token rejected');
-      now = (refreshedAt + 21599) * 1000;
+      now = (refreshedAt + 3599) * 1000;
       const valid = await server.validateToken(resource, rotated.access_token, env);
       assert.ok(valid, 'refreshed token reusable before expiry');
-      assert.equal(valid.expiresAt, refreshedAt + 21600);
+      assert.equal(valid.expiresAt, refreshedAt + 3600);
       assert.equal(await server.validateToken(origin + '/v1/tasks', rotated.access_token, env), null, 'wrong audience rejected');
       assert.equal(writes, beforeRotatedReuse, 'refreshed token reuse must not write');
       await api.completeAuthorization({request: parsed, userId: 'synthetic-user',
         scope: ['tasks:read'], metadata: {synthetic: true}, props: {synthetic: true}});
       assert.equal(await server.validateToken(resource, rotated.access_token, env), null, 'revocation still enforced');
 
-      assert.equal(accessTokenTtlSeconds({}), 21600);
-      assert.equal(accessTokenTtlSeconds({OAUTH_ACCESS_TOKEN_TTL_SECONDS: ''}), 21600);
-      assert.equal(accessTokenTtlSeconds({OAUTH_ACCESS_TOKEN_TTL_SECONDS: '3600'}), 3600);
-      for (const bad of ['59', '86401', 'abc', '3600 ', '-1', '1.5']) {
+      assert.equal(accessTokenTtlSeconds({}), 3600);
+      assert.equal(accessTokenTtlSeconds({OAUTH_ACCESS_TOKEN_TTL_SECONDS: ''}), 3600);
+      assert.equal(accessTokenTtlSeconds({OAUTH_ACCESS_TOKEN_TTL_SECONDS: '21600'}), 21600);
+      for (const bad of ['59', '86401', 'abc', '21600 ', '-1', '1.5']) {
         assert.throws(() => accessTokenTtlSeconds({OAUTH_ACCESS_TOKEN_TTL_SECONDS: bad}), TypeError);
       }
       const overrideConfig = configuration({
         ORGANIZATION: 'quant',
         PUBLIC_ORIGIN: origin,
         PROJECT_ID: 'ExampleOrg/ExampleRepo',
-        OAUTH_ACCESS_TOKEN_TTL_SECONDS: '3600',
+        OAUTH_ACCESS_TOKEN_TTL_SECONDS: '21600',
       });
-      assert.equal(overrideConfig.accessTokenTTL, 3600);
+      assert.equal(overrideConfig.accessTokenTTL, 21600);
       const {authorizationServer: overrideServer} = createAuthApplication(overrideConfig);
       const overrideGrant = await overrideServer.getOAuthApi(env).completeAuthorization({
         request: await overrideServer.getOAuthApi(env).parseAuthRequest(new Request(origin + '/authorize?' + new URLSearchParams({
@@ -118,7 +118,7 @@ export default {
         }),
       }), env, {});
       assert.equal(overrideResp.status, 200);
-      assert.equal((await overrideResp.json()).expires_in, 3600, 'overridden access token lifetime');
+      assert.equal((await overrideResp.json()).expires_in, 21600, 'overridden access token lifetime');
       return Response.json({passed: true});
     } catch (error) {
       if (error.code === 'ERR_ASSERTION' && typeof error.actual === 'number' && typeof error.expected === 'number') {
