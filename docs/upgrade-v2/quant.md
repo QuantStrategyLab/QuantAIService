@@ -12,11 +12,11 @@ AI 服务的 task/read/work scopes 只授权任务传输与 advisory 结果回�
 
 SOXL、Global ETF、CN index ETF 的 prompt、冻结输入、来源校验、codegen 路径与运行条件已在本地迁到对应策略仓库；LongBridge 特定修复规则迁到平台仓库；生命周期及通用审计由调用方构造任务。真实市场与研究数据继续只在批准云端处理，本机只有源码和 synthetic 测试。
 
-旧 `service/`、`adapters/`、`client/`、模型部署和固定业务 workflow 已从活动源码删除；旧源码见 Git 基线及 [退役说明](retired-v1.zh-CN.md)。两个服务 2.0.2 已通过正式 GitHub Release 发布并部署，采用时固定 release 的准确源码和 SHA256 清单；私有核心 wheel 只位于私有 release。生产调用方准入仍未开启，旧生产进程等待实际业务调用链验收后停用。历史审计、producer ID、来源 hash 和冻结记录保持原样。
+旧 `service/`、`adapters/`、`client/`、模型部署和固定业务 workflow 已从活动源码删除；旧源码见 Git 基线及 [退役说明](retired-v1.md)。两个服务 2.0.2 已通过正式 GitHub Release 发布并部署，采用时固定 release 的准确源码和 SHA256 清单；私有核心 wheel 只位于私有 release。生产调用方准入仍未开启，旧生产进程等待实际业务调用链验收后停用。历史审计、producer ID、来源 hash 和冻结记录保持原样。
 
 接口及产品文档依据见共享实现的 `docs/api-contract.zh-CN.md`。
 
-新服务使用独立 Keycloak realm、固定公开客户端与 PKCE S256，并已通过真实 GitHub OAuth；邮箱只用于云端登录，不进入 task JWT 或任务材料。旧看板配置的初次核对见 [登录配置核对](identity-inventory.zh-CN.md)。
+新服务使用独立 Keycloak realm、固定公开客户端与 PKCE S256，并已通过真实 GitHub OAuth；邮箱只用于云端登录，不进入 task JWT 或任务材料。旧看板配置的初次核对见 [登录配置核对](identity-inventory.md)。
 
 QuantPlatformKit 的生命周期客户端已在本次隔离工作区迁到 V2 任务接口，移除该模块的旧 VPS 路由和 provider fallback。研究中的 pending/outcome_unknown 保留原任务身份，恢复时只查询原任务；相关 226 项 synthetic 测试通过。QPK 与 CN/UES 的迁移已合并并发布，生产业务 workflow 不会因此自动启用。SOXL、Global ETF 等 runner 已迁入策略仓，冻结工程材料审查迁入 QPK。
 
@@ -32,7 +32,7 @@ CN 的本地研究入口已迁入 CnEquityStrategies，保留保护政策、来�
 
 ## 当前验收边界（2026-10-08）
 
-Quant v2.0.2 的准确源码为 `8e771462fd14e4552d6add55b2920f6bd20dc0ee`，共享核心来自私有路由服务。Dot 的 scopes 只有 tasks:read、tasks:work、events:subscribe，不包含 submit、仓库写入、交易或部署。
+Quant v2.0.2 的准确源码为 `<approved-v2-0-2-commit-sha>`，共享核心来自私有路由服务。Dot 的 scopes 只有 tasks:read、tasks:work、events:subscribe，不包含 submit、仓库写入、交易或部署。
 
 本轮两个公开合成任务回传 completed，revision=1、output={"sum":12}；由人工在 Dot 聊天中给定真实任务 ID 触发，不能代替自动事件验收。Webhook 获 2xx 时两个监控的 last_run_time 仍为空。自动调度、追加材料/取消的原生验收、Grok Routine 和真实业务资格仍待验证。原生模型不能从 webhook 接口确认，因此未声称使用指定 Astra 模型。
 

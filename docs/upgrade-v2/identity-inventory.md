@@ -6,7 +6,7 @@
 
 `cloudflare/ai-gateway-dash` 已有 GitHub OAuth 登录入口，源码通过 GitHub 用户及组织接口限制 QuantStrategyLab 组织成员访问。登录后使用 HMAC 签名的看板 Cookie；配置中存在 `DASHBOARD_SESSION_KV` 绑定，源码支持注销时撤销会话。
 
-线上 Worker `quantstrategylab-ai-gateway-dash` 的秘密配置名称包含 `GITHUB_OAUTH_CLIENT_ID`、`GITHUB_OAUTH_CLIENT_SECRET`、`DASHBOARD_SESSION_SECRET`、`AI_GATEWAY_ORIGIN_URL`、`DASHBOARD_API_TOKEN`。查到 10 条部署记录，最新时间为 2026-09-10T05:02:05.918113Z。
+线上 Worker `<ai-gateway-dashboard-worker>` 的秘密配置名称包含 `GITHUB_OAUTH_CLIENT_ID`、`GITHUB_OAUTH_CLIENT_SECRET`、`DASHBOARD_SESSION_SECRET`、`AI_GATEWAY_ORIGIN_URL`、`DASHBOARD_API_TOKEN`。查到 10 条部署记录，最新时间为 2026-09-10T05:02:05.918113Z。
 
 使用正常 TLS 校验、禁止跟随重定向的公开请求确认：
 

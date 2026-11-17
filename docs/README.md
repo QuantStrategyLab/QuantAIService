@@ -9,6 +9,7 @@
 - [Worker project and owner scope](worker-project-scoping.md): exact projects, explicit service owner, token scopes and connection boundaries. Read the version-specific owner-wide section together with the earlier project-list section.
 - [Scenario contracts](scenario-contracts.md): offline schemas, templates, defaults and producer binding.
 - [Quant task routing (`task.routing.v1`)](scenario-provider-routing.md) · [中文](scenario-provider-routing.zh-CN.md): config-only categories/scenarios under `PROJECT_POLICIES[project].routing`, compatible with the private routing service contract.
+- [Cloudflare task-service Worker](../cloudflare/task-service/README.md) · [简体中文](../cloudflare/task-service/README.zh-CN.md): Worker, OAuth KV, Durable Object, workload auth, and Routine provider boundaries.
 - [V2 guide index](upgrade-v2/README.md): current configuration references versus dated migration material.
 
 ## Development controls

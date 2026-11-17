@@ -19,7 +19,7 @@ and the three contexts above are required on the default branch.
 It re-evaluates on pull request events, on comment edits, on a push to the
 default branch, which dispatches one evaluation per open pull request, on a
 six-hour schedule and on manual dispatch. Local checks are the Python suites
-listed in `AGENTS.md`, `python scripts/check_style.py --phase 2`, and actionlint.
+listed in `AGENTS.md`, `python3 ../.github/scripts/check_style.py --root . --phase 2` (from a sibling `QuantStrategyLab/.github` checkout), and actionlint.
 
 ## First adoption
 

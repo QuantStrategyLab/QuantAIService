@@ -1,5 +1,7 @@
 # 组织 AI 任务服务
 
+[English](README.md) | 简体中文
+
 独立部署的 Cloudflare Worker、OAuth KV 和 SQLite Durable Object。此目录的生产入口使用 Quant 状态空间；Pigbibi 回归夹具使用单独的测试状态类。保留 DO 类名 PersonalTaskStore 仅为存储绑定兼容，组织身份由服务端配置限定。
 
 Dot 是当前 agent 执行方。API 模式保留同一任务提交、查询、事件和幂等合同，当前支持旧服务已有的 Gemini 文本 JSON 协议；默认关闭。Claude、Grok Routine 已有适配，默认关闭。
