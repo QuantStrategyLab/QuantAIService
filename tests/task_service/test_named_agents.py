@@ -20,12 +20,14 @@ class NamedAgentTests(unittest.TestCase):
     def test_default_configuration_uses_muse_only_for_agent_tasks(self):
         config = json.loads((ROOT / 'config/quant.example.json').read_text())
         validate_configuration({**config, 'enabled': True})
-        self.assertEqual(set(config['providers']), {'muse', 'gemini'})
+        self.assertEqual(set(config['providers']), {'muse', 'gemini', 'chatgpt-plan'})
         self.assertTrue(config['providers']['muse']['enabled'])
         for project in config['projects'].values():
-            self.assertEqual(project['providers'], {'agent': 'muse', 'agent:muse': 'muse', 'api': 'gemini'})
+            self.assertEqual(project['providers'], {
+                'agent': 'muse', 'agent:muse': 'muse', 'api': 'chatgpt-plan', 'api:gemini': 'gemini',
+            })
             for scenario in project['routing']['scenarios'].values():
-                self.assertEqual(scenario['providers'], ['muse' if scenario['mode'] == 'agent' else 'gemini'])
+                self.assertEqual(scenario['providers'], ['muse' if scenario['mode'] == 'agent' else 'chatgpt-plan'])
 
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()

@@ -39,10 +39,10 @@ policy, `scenario` / `complexity` / `reasoning_effort` remain rejected.
 
 | Scenario | Category | Mode | Providers | Matching hints (examples) |
 | --- | --- | --- | --- | --- |
-| `pr_code_review` | quant_review | agent | muse → grokbot → dot | pull-request, code-review, architecture-audit |
-| `strategy_research_summary` | quant_research | agent | muse → grokbot → dot | research-summary, strategy-brief, portfolio-note |
-| `reconciliation_anomaly` | quant_ops | agent | muse → grokbot → dot | recon-diff, ops-anomaly, ledger-mismatch |
-| `signal_context` | quant_signals | agent | muse → grokbot → dot | signal-context, feature-note |
+| `pr_code_review` | quant_review | agent | muse | pull-request, code-review, architecture-audit |
+| `strategy_research_summary` | quant_research | agent | muse | research-summary, strategy-brief, portfolio-note |
+| `reconciliation_anomaly` | quant_ops | agent | muse | recon-diff, ops-anomaly, ledger-mismatch |
+| `signal_context` | quant_signals | agent | muse | signal-context, feature-note |
 | `quick_notification` | quant_notify | api | chatgpt-plan | short-alert, status-ping |
 
 The example explicitly sets `matching.default_complexity` to `complex` for
@@ -59,26 +59,22 @@ Claude API plus dual-AI audit outside this registry.
 
 Agent and API modes stay separate:
 
-- **Agent** scenarios use an ordered preference (`muse → grokbot → dot`). Unready
-  entries are skipped. Muse stays `unavailable` until a Cloudflare-compatible
-  Muse Wonder trigger exists (never Cursor Cloud Agents); Grokbot/Dot cover
-  live agent work meanwhile. `claudeduet` is never listed.
+- **Agent** scenarios route to Muse. A configured Muse worker claims tasks through the existing Agent interface. Other Agent adapters can be configured explicitly when needed.
 - **API** scenarios bind **one** provider. `quick_notification` maps to
   `chatgpt-plan` (OpenAI plan OAuth / Responses); complexity tiers choose
   model and reasoning effort. There is no API fallback chain — Gemini stays
   on legacy `api:gemini` (or another scenario), not a second preference.
   Quant’s broader surface also keeps **OpenAI API**, **Anthropic Claude API**,
   and **dual-AI audit** (Codex primary + independent GPT/Claude secondary) on
-  the AiGateway / audit path; those are not PersonalAIService scenarios and
-  are not expressed as ordered API providers here.
+  the AiGateway / audit path. On Cloudflare, configure a supported Worker API backend such as Gemini under `API_PROVIDERS`. The Python ChatGPT plan adapter needs its own authorized OAuth configuration.
 
 ## Complexity tier table
 
 | Tier | Provider | Model (example alias) | Reasoning effort |
 | --- | --- | --- | --- |
-| simple | dot / muse / grokbot / chatgpt-plan / gemini | `*-fast` / `configured-chatgpt-plan-fast` / `configured-api-fast` | low |
-| standard | dot / muse / grokbot / chatgpt-plan / gemini | `configured-*` / `configured-chatgpt-plan` / `configured-api` | medium |
-| complex | dot / muse / grokbot / chatgpt-plan / gemini | `*-strong` / `configured-chatgpt-plan-strong` / `configured-api` | high |
+| simple | muse / chatgpt-plan / gemini | `*-fast` / `configured-chatgpt-plan-fast` / `configured-api-fast` | low |
+| standard | muse / chatgpt-plan / gemini | `configured-*` / `configured-chatgpt-plan` / `configured-api` | medium |
+| complex | muse / chatgpt-plan / gemini | `*-strong` / `configured-chatgpt-plan-strong` / `configured-api` | high |
 
 `pr_code_review` sets `tier_overrides.complex` to the strong models explicitly
 (including `muse`). Aliases are synthetic; production names stay in private
@@ -115,7 +111,7 @@ No Python scenario table update is required.
 ## Readiness and operations
 
 Unready providers are skipped at submit; if none remain, submit is denied.
-Dot readiness still requires a live event subscription. `muse` is never ready (scaffold): no Cursor Cloud Agents launch; Cloudflare claim identity only. Example agent prefs stay `muse → grokbot → dot`; routing skips muse as `unavailable` and falls through to grokbot/dot until a non-Cursor Muse trigger is implemented.
+Muse requires a live subscription or an eligible polling worker. Set the API provider and approved model for the selected runtime.
 
 Worker routing unit tests under `cloudflare/task-service/test/routing.mjs` use
 Quant scenario ids (`quick_notification`, `pr_code_review`, …), not Personal’s

@@ -23,6 +23,11 @@
       "model": "configured-api",
       "key_env": "AI_SERVICE_GEMINI_API_KEY",
       "api_usage_authorized": false
+    },
+    "chatgpt-plan": {
+      "type": "chatgpt_plan_oauth",
+      "plan_usage_authorized": false,
+      "token_env": "AI_SERVICE_CHATGPT_PLAN_TOKEN"
     }
   },
   "projects": {
@@ -30,7 +35,8 @@
       "providers": {
         "agent": "muse",
         "agent:muse": "muse",
-        "api": "gemini"
+        "api": "chatgpt-plan",
+        "api:gemini": "gemini"
       },
       "models": {
         "muse": [
@@ -40,6 +46,11 @@
         ],
         "gemini": [
           "configured-api"
+        ],
+        "chatgpt-plan": [
+          "configured-chatgpt-plan",
+          "configured-chatgpt-plan-fast",
+          "configured-chatgpt-plan-strong"
         ]
       },
       "max_active": 2,
@@ -150,7 +161,7 @@
             "category": "quant_notify",
             "mode": "api",
             "providers": [
-              "gemini"
+              "chatgpt-plan"
             ],
             "matching": {
               "hints": [
@@ -170,6 +181,10 @@
             "gemini": {
               "model": "configured-api",
               "reasoning_effort": "low"
+            },
+            "chatgpt-plan": {
+              "model": "configured-chatgpt-plan-fast",
+              "reasoning_effort": "low"
             }
           },
           "standard": {
@@ -180,6 +195,10 @@
             "gemini": {
               "model": "configured-api",
               "reasoning_effort": "medium"
+            },
+            "chatgpt-plan": {
+              "model": "configured-chatgpt-plan",
+              "reasoning_effort": "medium"
             }
           },
           "complex": {
@@ -189,6 +208,10 @@
             },
             "gemini": {
               "model": "configured-api",
+              "reasoning_effort": "high"
+            },
+            "chatgpt-plan": {
+              "model": "configured-chatgpt-plan-strong",
               "reasoning_effort": "high"
             }
           }
