@@ -51,6 +51,7 @@ only after an explicit model-not-found response. Receipts record the tier,
 selection method and provider-reported model. Claude reviews prefer the lower-priced Sonnet 5 series and can fall back to Sonnet 4.6. Failed or incomplete reviews
 remain visible independently.
 
+Set the repository variables `OPENAI_PRICING_ORIGIN` and `ANTHROPIC_PRICING_ORIGIN` to the respective official HTTPS origins listed below.
 Every audit and probe refreshes stable GPT mini and Claude Sonnet releases
 from [OpenAI standard prices](https://developers.openai.com/api/docs/pricing)
 and [Claude base prices](https://platform.claude.com/docs/en/about-claude/pricing).

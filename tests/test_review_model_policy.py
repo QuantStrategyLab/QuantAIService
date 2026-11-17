@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 import unittest
+from unittest.mock import patch
 
 from scripts.review_model_policy import refresh_candidates
 
@@ -37,6 +38,8 @@ CLAUDE = '''## Model pricing
 '''
 
 
+@patch.dict('os.environ', {'OPENAI_PRICING_ORIGIN': 'https://example.org',
+                           'ANTHROPIC_PRICING_ORIGIN': 'https://example.org'})
 class ReviewModelPolicyTests(unittest.TestCase):
     def test_new_same_family_models_refresh_without_changing_approvals(self):
         self.assertEqual(refresh_candidates('openai', 'standard', POLICY, lambda _: OPENAI),

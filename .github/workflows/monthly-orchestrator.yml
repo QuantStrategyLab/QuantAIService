@@ -57,6 +57,8 @@ jobs:
       - name: Run independent GPT and Claude audits
         if: ${{ github.repository == 'QuantStrategyLab/QuantAIService' && github.ref == 'refs/heads/main' && github.run_attempt == 1 && (inputs.api_probe || (github.event_name == 'schedule' && vars.MONTHLY_API_AUDIT_READY == 'true')) }}
         env:
+          OPENAI_PRICING_ORIGIN: ${{ vars.OPENAI_PRICING_ORIGIN }}
+          ANTHROPIC_PRICING_ORIGIN: ${{ vars.ANTHROPIC_PRICING_ORIGIN }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           PROBE_PROVIDER: ${{ inputs.probe_provider }}

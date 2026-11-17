@@ -1,12 +1,14 @@
 """Refresh the audit roster from the providers' public standard token prices."""
 import http.client
+import os
 import re
 from decimal import Decimal
+from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
-PRICE_URL = {
-    'openai': 'https://developers.openai.com/api/docs/pricing.md',
-    'anthropic': 'https://platform.claude.com/docs/en/about-claude/pricing.md',
+PRICE_PATH = {
+    'openai': '/api/docs/pricing.md',
+    'anthropic': '/docs/en/about-claude/pricing.md',
 }
 FAMILY = {
     'openai': re.compile(r'gpt-(\d+(?:\.\d+)*)-mini'),
@@ -90,7 +92,13 @@ def refresh_candidates(provider, tier, policy, fetch=None):
     baseline = policy[tier][provider]
     caps = [Decimal(str(value)) for value in policy['rate_caps'][tier][provider]]
     try:
-        rates = standard_rates(provider, (fetch or fetch_pricing)(PRICE_URL[provider]))
+        origin = urlsplit(os.environ.get(provider.upper() + '_PRICING_ORIGIN', ''))
+        if (origin.scheme != 'https' or not origin.hostname or origin.username is not None or
+                origin.password is not None or origin.port not in (None, 443) or
+                origin.path not in ('', '/') or origin.query or origin.fragment):
+            raise ValueError('configure a trusted HTTPS pricing origin')
+        url = 'https://' + origin.netloc + PRICE_PATH[provider]
+        rates = standard_rates(provider, (fetch or fetch_pricing)(url))
     except (OSError, http.client.HTTPException, UnicodeError, ValueError):
         rates = {}
     if not rates:
