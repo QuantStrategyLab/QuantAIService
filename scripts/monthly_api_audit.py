@@ -5,6 +5,11 @@ import os
 from pathlib import Path
 import re
 
+if __package__:
+    from .review_model_policy import refresh_candidates, version
+else:
+    from review_model_policy import refresh_candidates, version
+
 from ai_service.transport import PublicHTTPS, TransportError, json_body
 
 
@@ -118,7 +123,7 @@ def infer(provider, model, evidence, tier, transport, headers, *, probe):
                 'type': 'object', 'properties': {field: {'type': 'integer'} for field in ('expected', 'observed')},
                 'required': ['expected', 'observed'], 'additionalProperties': False,
             }}}
-        if model in ('claude-sonnet-5', 'claude-sonnet-5-5'):
+        if version('anthropic', model) >= (5,):
             request.setdefault('output_config', {})['effort'] = 'low' if probe else {
                 'simple': 'low', 'standard': 'medium', 'complex': 'high',
             }[tier]
@@ -181,8 +186,14 @@ def main(argv=None):
     transport = PublicHTTPS(timeout=90)
     tier = evidence_tier(evidence)
     policy = json.loads(POLICY_PATH.read_text(encoding='utf-8'))
-    results = {name: review(name, evidence, os.environ, transport, candidates=policy[tier].get(name),
-                            tier=tier, probe=args.probe) for name in providers}
+    results = {}
+    for name in providers:
+        candidates, source = refresh_candidates(name, tier, policy)
+        if candidates:
+            results[name] = review(name, evidence, os.environ, transport, candidates=candidates, tier=tier, probe=args.probe)
+        else:
+            results[name] = {'status': 'no_available_candidate'}
+        results[name]['roster_source'] = source
     complete = all(result['status'] == 'completed' for result in results.values())
     args.output.write_text(json.dumps({'probe': args.probe, 'tier': tier, 'complete': complete, 'quality_accepted': False,
                                        'reviews': results}, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')

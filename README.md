@@ -51,12 +51,14 @@ only after an explicit model-not-found response. Receipts record the tier,
 selection method and provider-reported model. Claude reviews prefer the lower-priced Sonnet 5 series and can fall back to Sonnet 4.6. Failed or incomplete reviews
 remain visible independently.
 
-Update the lists through review when a stable model is introduced or retired.
-Verify its text API, family and published input/output rates against the
-approved tier before adding it. The current monthly policy admits GPT mini
-and Claude Sonnet. [OpenAI model pricing](https://developers.openai.com/api/docs/pricing)
-and [Claude model pricing](https://platform.claude.com/docs/en/about-claude/pricing)
-are the rate sources.
+Every audit and probe refreshes stable GPT mini and Claude Sonnet releases
+from [OpenAI standard prices](https://developers.openai.com/api/docs/pricing)
+and [Claude base prices](https://platform.claude.com/docs/en/about-claude/pricing).
+Newer family releases enter their tier only when both input and output prices
+fit its `rate_caps` in USD per million tokens. The account checks candidates
+in version order followed by the approved baseline. An unavailable pricing
+source permits only baseline models. Published prices above the cap exclude
+the model and its dated snapshots. Receipts record the pricing source.
 
 | Variable | Required | Default | Purpose |
 |---|---|---|---|
