@@ -12,7 +12,9 @@ MCP 的资源 metadata 和未登录 challenge 广告 `AUTH_CLIENTS` 中精确匹
 
 API 路由由受保护的服务端配置注入：项目 `PROJECT_POLICIES[project].providers` 的 `api` 或 `api:<profile>` 指向显式 provider 别名，`models[别名]` 限定模型。另在 Worker 的 `API_PROVIDERS[别名]` 配置 `type: "gemini_api"`、`enabled: true`、`api_usage_authorized: true`、准确 `model` 和 `key_env`（已有 Secret 的绑定名）；可设置 `max_output_tokens`（1..8192，默认1024）与 `timeout_seconds`（1..60，默认60）。缺少任一启用、授权、模型或凭据条件时拒绝 API 请求，不影响 Dot。这里的布尔配置记录既有批准，本身不授予付费授权；生产启用与真实调用仍需相应授权。
 
-API 只调用固定的 Google `generateContent` HTTPS 端点，不接收调用者提供的 URL，不跟随跳转、不发现模型、不重试推理、不回退其他收费通道。仅接收文本数据材料，不提供工具或更改安全设置。收到模型与配置不同、非正常终止或不符合输出 schema 的结果不会作为成功输出。HTTP拒绝记为失败；连接丢失、服务端错误或无法确认的回执保留 `outcome_unknown`，原冻结意图仍可查询，不重发新任务。执行前先持久化 submitting；网络在 SQLite 事务和阻塞整个 DO 的短临界区以外。同步 API 的取消仅表示已请求，未声称远端已停止；若随后收到已核验的完整回执，仍按该事实记录结果。
+场景路由可在 `API_PROVIDERS[别名].tier_models` 中按 `simple`、`standard`、`complex` 配置各档的有序模型数组。服务按当前档位与项目允许名单取交集，优先核对场景首选，再通过同一账号的 Gemini 模型元数据接口筛选支持 `generateContent` 的型号。已显式指定型号的请求保留该约束。未配置分档的现有提供方沿用固定型号。
+
+API 使用固定的 Google HTTPS 源，不接收调用者提供的 URL，不跟随跳转，不重试推理。仅接收文本数据材料，不提供工具或更改安全设置。收到模型与配置不同、非正常终止或不符合输出 schema 的结果不会作为成功输出。HTTP拒绝记为失败；连接丢失、服务端错误或无法确认的回执保留 `outcome_unknown`，原冻结意图仍可查询，不重发新任务。执行前先持久化 submitting；网络在 SQLite 事务和阻塞整个 DO 的短临界区以外。同步 API 的取消仅表示已请求，未声称远端已停止；若随后收到已核验的完整回执，仍按该事实记录结果。
 
 本实现只移植 Gemini API 纵切，旧 ChatGPT-plan OAuth Responses 提供者尚未迁入 Worker；不能据此认定所有旧 API 提供者或整个迁移已完成。
 
