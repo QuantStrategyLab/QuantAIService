@@ -33,8 +33,9 @@ export async function executeAPI(env,name,request,remainingSeconds){
     const level = request.reasoning_effort;
     const budget = level === 'low' && /^gemini-2\.5-pro(?:-|$)/.test(config.model)
       ? 128 : THINKING_BUDGET[level];
+    const namedLevel = level === 'medium' && /^gemini-3-pro(?:-|$)/.test(config.model) ? 'LOW' : level.toUpperCase();
     generationConfig.thinkingConfig = /^gemini-[34][.-]/.test(config.model)
-      ? {thinkingLevel: level.toUpperCase()}
+      ? {thinkingLevel: namedLevel}
       : {thinkingBudget: budget};
   }
   const response=await fetch('https://generativelanguage.googleapis.com/v1beta/models/'+config.model+':generateContent',{

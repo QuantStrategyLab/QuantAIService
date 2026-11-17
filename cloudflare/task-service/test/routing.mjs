@@ -204,6 +204,7 @@ for (const [model, effort, thinkingConfig] of [
   ['gemini-2.5-pro', 'low', {thinkingBudget: 128}],
   ['gemini-2.5-flash-lite', 'medium', {thinkingBudget: 1024}],
   ['gemini-3.5-flash-lite', 'medium', {thinkingLevel: 'MEDIUM'}],
+  ['gemini-3-pro-preview', 'medium', {thinkingLevel: 'LOW'}],
 ]) test(`routed API verifies the model and reasoning setting for ${model}`, async (t) => {
   const fetch = t.mock.method(globalThis, 'fetch', async (_url, options) => {
     assert.deepEqual(JSON.parse(options.body).generationConfig.thinkingConfig, thinkingConfig);
