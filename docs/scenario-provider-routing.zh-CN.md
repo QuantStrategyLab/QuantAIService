@@ -49,14 +49,14 @@ fail-closed provider 选择由 Cloudflare task-service Worker
 `matching.min_with_image`、`matching.size_thresholds` 与全局 `heuristics`，语义为
 共享契约中的只升不降。
 
-Quant 场景与 PersonalAIService **不是同一套目录**，只共用 `task.routing.v1` 合同。Personal 短 API 示例是 Gemini；Quant 短 API 示例是 `chatgpt-plan`，并且 Quant 还有 OpenAI / Claude API 与双 AI 审计走本注册表之外的路径。
+Quant 与 PersonalAIService 共用 `task.routing.v1` 合同，各自维护场景目录。Personal 短 API 示例为 Gemini，Quant 的 Python 短 API 示例为 `chatgpt-plan`。历史 GPT / Claude 双审计配置独立于该注册表。
 
 Agent 与 API 模式分离：
 
 - **Agent** 场景由 Muse 执行，继续沿用现有的领取与回报接口。其他 Agent 适配器按需显式配置。
 - **API** 场景只绑定**一个** provider。`quick_notification` 对应 `chatgpt-plan`（OpenAI plan OAuth / Responses）；模型与推理档位由复杂度分层智能填充。API **没有**后备链——Gemini 走遗留 `api:gemini`（或另开场景），不挂第二偏好。Quant 另外还有 **OpenAI API**、**Anthropic Claude API** 以及 **双 AI 审计**（Codex 主审 + 独立 GPT/Claude 复审）走 AiGateway / 审计路径；那不是 PersonalAIService 的场景目录，也不写成这里的 API 有序列表。
 
-Cloudflare Worker 在 `API_PROVIDERS` 配置其支持的 API 后端，例如 Gemini。Python 的 ChatGPT plan 适配器需要单独的 OAuth 授权。GPT / Claude 双审计沿用 Quant 的 AiGateway / 审计链路。
+Cloudflare Worker 在 `API_PROVIDERS` 配置其支持的 API 后端，例如 Gemini。Python 的 ChatGPT plan 适配器需要单独的 OAuth 授权。现行月报汇总来源证据。历史 GPT / Claude 双审计配置需要独立接入才可用于推理。
 
 ## 复杂度档位表
 

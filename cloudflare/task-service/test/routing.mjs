@@ -200,22 +200,25 @@ for (const sample of complexityCases) {
 }
 
 
-for (const [model, thinkingConfig] of [
-  ['gemini-2.5-flash-lite', {thinkingBudget: 1024}],
-  ['gemini-3.5-flash-lite', {thinkingLevel: 'MEDIUM'}],
+for (const [model, effort, thinkingConfig] of [
+  ['gemini-2.5-pro', 'low', {thinkingBudget: 128}],
+  ['gemini-2.5-flash-lite', 'medium', {thinkingBudget: 1024}],
+  ['gemini-3.5-flash-lite', 'medium', {thinkingLevel: 'MEDIUM'}],
 ]) test(`routed API verifies the model and reasoning setting for ${model}`, async (t) => {
   const fetch = t.mock.method(globalThis, 'fetch', async (_url, options) => {
     assert.deepEqual(JSON.parse(options.body).generationConfig.thinkingConfig, thinkingConfig);
     return Response.json({modelVersion: model, candidates: [
-      {finishReason: 'STOP', content: {parts: [{text: '{"ok":true}'}]}},
+      {finishReason: 'STOP', content: {parts: [{text: '{"ok":true}', thoughtSignature: 'c3ludGhldGlj'}]}},
     ]});
   });
   const env = {API_PROVIDERS: {api: {
     type: 'gemini_api', enabled: true, api_usage_authorized: true, model, key_env: 'TEST_KEY',
   }}, TEST_KEY: 'synthetic-only'};
   const receipt = await executeAPI(env, 'api', {
-    model, reasoning_effort: 'medium', objective: 'Synthetic test', output_schema: {type: 'object'},
+    model, reasoning_effort: effort, objective: 'Synthetic test', output_schema: {type: 'object'},
   }, 10);
   assert.equal(fetch.mock.callCount(), 1);
   assert.equal(receipt.model_verification, 'provider_reported');
+  assert.equal(receipt.status, 'completed');
+  assert.equal(JSON.stringify(receipt).includes('thoughtSignature'), false);
 });

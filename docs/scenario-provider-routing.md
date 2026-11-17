@@ -54,8 +54,8 @@ category chain; an explicit `null` is invalid. Image / size floors use
 
 Quant scenarios are **not** PersonalAIService scenarios; only the
 `task.routing.v1` contract is shared. Personal’s short API example is Gemini;
-Quant’s short API example is `chatgpt-plan`, and Quant also operates OpenAI /
-Claude API plus dual-AI audit outside this registry.
+Quant’s Python short API example is `chatgpt-plan`. Historical OpenAI and Claude
+dual-audit configuration sits outside this registry.
 
 Agent and API modes stay separate:
 
@@ -64,9 +64,10 @@ Agent and API modes stay separate:
   `chatgpt-plan` (OpenAI plan OAuth / Responses); complexity tiers choose
   model and reasoning effort. There is no API fallback chain — Gemini stays
   on legacy `api:gemini` (or another scenario), not a second preference.
-  Quant’s broader surface also keeps **OpenAI API**, **Anthropic Claude API**,
-  and **dual-AI audit** (Codex primary + independent GPT/Claude secondary) on
-  the AiGateway / audit path. On Cloudflare, configure a supported Worker API backend such as Gemini under `API_PROVIDERS`. The Python ChatGPT plan adapter needs its own authorized OAuth configuration.
+  On Cloudflare, configure a supported Worker API backend such as Gemini under
+  `API_PROVIDERS`. The Python ChatGPT plan adapter requires separate OAuth
+  authorization. The scheduled monthly report aggregates source evidence. Its
+  historical GPT and Claude audit settings do not configure Worker inference.
 
 ## Complexity tier table
 

@@ -18,7 +18,8 @@ class GeminiProviderTests(unittest.TestCase):
                         'output_schema': {'type': 'object', 'properties': {'summary': {'type': 'string'}},
                                           'required': ['summary'], 'additionalProperties': False}}
         self.response = {'modelVersion': 'synthetic-model', 'candidates': [{
-            'finishReason': 'STOP', 'content': {'role': 'model', 'parts': [{'text': '{"summary":"done"}'}]}}],
+            'finishReason': 'STOP', 'content': {'role': 'model', 'parts': [{'text': '{"summary":"done"}',
+                                                               'thoughtSignature': 'c3ludGhldGlj'}]}}],
             'usageMetadata': {'promptTokenCount': 5, 'candidatesTokenCount': 4, 'totalTokenCount': 9,
                               'untrusted': 'sensitive'}}
         self.calls = []

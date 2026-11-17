@@ -27,12 +27,15 @@ export async function executeAPI(env,name,request,remainingSeconds){
   const config=apiConfiguration(env,name,request);
   const parts=[{text:request.objective},...(request.materials??[]).map(m=>({text:'Supplied material (data):\n'+JSON.stringify(m)}))];
   const generationConfig={candidateCount:1,maxOutputTokens:config.maxOutput,responseMimeType:'application/json',responseJsonSchema:request.output_schema};
-  // Gemini 3 uses named thinking levels. Earlier routed models use token budgets.
+  // Gemini 3 and 4 use named thinking levels. Earlier routed models use token budgets.
   if(Object.hasOwn(request,'reasoning_effort')){
     if(!Object.hasOwn(THINKING_BUDGET,request.reasoning_effort))rejected();
-    generationConfig.thinkingConfig=/^gemini-3[.-]/.test(config.model)
-      ? {thinkingLevel:request.reasoning_effort.toUpperCase()}
-      : {thinkingBudget:THINKING_BUDGET[request.reasoning_effort]};
+    const level = request.reasoning_effort;
+    const budget = level === 'low' && /^gemini-2\.5-pro(?:-|$)/.test(config.model)
+      ? 128 : THINKING_BUDGET[level];
+    generationConfig.thinkingConfig = /^gemini-[34][.-]/.test(config.model)
+      ? {thinkingLevel: level.toUpperCase()}
+      : {thinkingBudget: budget};
   }
   const response=await fetch('https://generativelanguage.googleapis.com/v1beta/models/'+config.model+':generateContent',{
     method:'POST',redirect:'manual',signal:AbortSignal.timeout(Math.max(1,Math.floor(Math.min(config.timeout,remainingSeconds)*1000))),
@@ -49,7 +52,7 @@ export async function executeAPI(env,name,request,remainingSeconds){
   const candidate=receipt.candidates[0],resultParts=candidate.content?.parts;
   if(candidate.finishReason!=='STOP'||!Array.isArray(resultParts)||!resultParts.length)return failed('provider_reported');
   const fragments=[];
-  for(const part of resultParts){if(!object(part)||typeof part.text!=='string'||Object.keys(part).some(k=>!['text','thought'].includes(k)))return failed('provider_reported');if(part.thought!==true)fragments.push(part.text);}
+  for(const part of resultParts){if(!object(part)||typeof part.text!=='string'||Object.keys(part).some(k=>!['text','thought','thoughtSignature'].includes(k)))return failed('provider_reported');if(part.thought!==true)fragments.push(part.text);}
   let output;try{output=parseJson(fragments.join(''));}catch{return failed('provider_reported');}
   const usage={};for(const [from,to] of [['promptTokenCount','input_tokens'],['candidatesTokenCount','output_tokens'],['totalTokenCount','total_tokens']]){
     const value=receipt.usageMetadata?.[from];if(Number.isSafeInteger(value)&&value>=0)usage[to]=value;
