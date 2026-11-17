@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {readFileSync} from 'node:fs';
-import {executeAPI} from '../src/api.mjs';
+import {executeAPI,selectAPIModel} from '../src/api.mjs';
 import {decideRoute,maskProject,providerReadiness,resolveComplexity,validateRoutingConfig} from '../src/routing.mjs';
 
 // Quant-shaped fixtures (not Personal example_* / gemini-text catalogs).
@@ -222,4 +222,28 @@ for (const [model, effort, thinkingConfig] of [
   assert.equal(receipt.model_verification, 'provider_reported');
   assert.equal(receipt.status, 'completed');
   assert.equal(JSON.stringify(receipt).includes('thoughtSignature'), false);
+});
+
+test('available model selection stays inside the project, provider and complexity tier', async (t) => {
+  const item = {type: 'gemini_api', enabled: true, api_usage_authorized: true, model: 'old',
+    key_env: 'TEST_KEY', tier_models: {simple: ['unapproved', 'old', 'image', 'current'], complex: ['strong']}};
+  const env = {API_PROVIDERS: {api: item}, TEST_KEY: 'synthetic-only'};
+  const decision = {model: 'old', tier: 'simple'};
+  const models = ['old', 'image', 'current', 'strong'];
+  const visited = [];
+  const fetch = t.mock.method(globalThis, 'fetch', async (url, options) => {
+    assert.equal(options.redirect, 'manual');
+    assert.equal(options.headers['x-goog-api-key'], env.TEST_KEY);
+    const id = new URL(url).pathname.split('/').at(-1);
+    visited.push(id);
+    if (id === 'old') return new Response(null, {status: 404});
+    return Response.json({name: 'models/' + id, supportedGenerationMethods: id === 'image' ? [] : ['generateContent']});
+  });
+  assert.equal(await selectAPIModel(env, 'api', {}, decision, models), 'current');
+  assert.deepEqual(visited, ['old', 'image', 'current']);
+  await assert.rejects(selectAPIModel(env, 'api', {model: 'old'}, decision, models));
+  fetch.mock.mockImplementation(() => new Response(null, {status: 403}));
+  const count = fetch.mock.callCount();
+  await assert.rejects(selectAPIModel(env, 'api', {}, decision, models));
+  assert.equal(fetch.mock.callCount(), count + 1);
 });

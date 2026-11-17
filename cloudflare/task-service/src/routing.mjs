@@ -194,7 +194,7 @@ export function decideRoute(routing,request,{project,providerReady,entryReady,lo
     try{entry=tierEntry(routing,scenarioId,tier,provider);}
     catch(e){skips.push(`skip:${provider}:${e.message}`);continue;}
     if(typeof entryReady==='function'){
-      const [ok,why]=entryReady(provider,entry);
+      const [ok,why]=entryReady(provider,entry,tier);
       if(!ok){skips.push(`skip:${provider}:${why}`);continue;}
     }
     if(Object.hasOwn(request,'model')&&request.model!==entry.model)fail('model does not match complexity tier');
