@@ -190,15 +190,17 @@ on port 8797 by default. It is deployed behind nginx on a VPS with:
 ## Native operational diagnosis
 
 The Actions diagnostic caller submits through the shared AI Service `/v1/tasks`
-contract as `mode=agent` with an admitted Dot model from
-`AI_SERVICE_DIAGNOSIS_MODEL` (and optional `AI_SERVICE_DIAGNOSIS_PROFILE`).
-Set `AI_SERVICE_DIAGNOSIS_READY=true`, or provide `AI_SERVICE_URL` plus that
-model, together with the exact `/mcp` audience. The shared service may admit
-other agent or API providers for other callers; this diagnostic caller does not
-reconfigure mode or provider itself. It submits only the existing bounded
-incident classification and consumes advisory JSON; it cannot run the monitor,
-repair, publish or place orders. The result records
-`model_verification=unavailable` for Dot.
+contract as `mode=agent` with the admitted model from
+`AI_SERVICE_DIAGNOSIS_MODEL`. The `muse` profile expects Muse results. The
+default and existing custom profiles expect Dot results. Each accepted task
+keeps its original provider, model, profile and request digest during readback.
+
+Set `AI_SERVICE_DIAGNOSIS_READY=true`, or provide `AI_SERVICE_URL` plus the
+model, together with the exact `/mcp` audience. The caller submits the bounded
+incident classification and consumes advisory JSON. The result records
+`model_verification=unavailable`. A manual run with `verify_native_only=true`
+and `verify_muse=true` exercises the Muse route with synthetic input. It uses
+the same OIDC caller identity and skips the production diagnosis ledger.
 
 Codex CLI audit-bridge jobs are not the default path. Without a native
 configuration the caller returns `skipped` / `cli_diagnosis_retired`.

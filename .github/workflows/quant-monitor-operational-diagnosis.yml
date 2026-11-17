@@ -8,6 +8,10 @@ on:
         description: Verify the native caller with synthetic input and no production ledger access
         type: boolean
         default: false
+      verify_muse:
+        description: Use the Muse route for synthetic native verification
+        type: boolean
+        default: false
       verify_state_only:
         description: Check cloud state access without requesting a diagnosis
         type: boolean
@@ -19,7 +23,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   diagnose:
-    if: github.repository == 'QuantStrategyLab/QuantAIService' && github.ref == 'refs/heads/main' && !inputs.verify_native_only
+    if: github.repository == 'QuantStrategyLab/QuantAIService' && github.ref == 'refs/heads/main' && !inputs.verify_native_only && !inputs.verify_muse
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
@@ -163,8 +167,8 @@ jobs:
           AI_SERVICE_DIAGNOSIS_READY: ${{ vars.AI_SERVICE_DIAGNOSIS_READY || 'false' }}
           AI_SERVICE_URL: ${{ vars.AI_SERVICE_URL }}
           AI_SERVICE_AUDIENCE: ${{ vars.AI_SERVICE_AUDIENCE }}
-          AI_SERVICE_DIAGNOSIS_MODEL: ${{ vars.AI_SERVICE_DIAGNOSIS_MODEL }}
-          AI_SERVICE_DIAGNOSIS_PROFILE: ${{ vars.AI_SERVICE_DIAGNOSIS_PROFILE || 'default' }}
+          AI_SERVICE_DIAGNOSIS_MODEL: ${{ inputs.verify_muse && 'configured-muse' || vars.AI_SERVICE_DIAGNOSIS_MODEL }}
+          AI_SERVICE_DIAGNOSIS_PROFILE: ${{ inputs.verify_muse && 'muse' || vars.AI_SERVICE_DIAGNOSIS_PROFILE || 'default' }}
         run: python3 -B scripts/verify_native_diagnosis.py --workspace "$RUNNER_TEMP/native-verification"
       - name: Save synthetic verification state and sanitized receipt
         if: always()

@@ -3,10 +3,9 @@
 
 Consumes saved observations, never runs the monitor, publishes, or repairs.
 
-Default path: native ``/v1/tasks`` with ``mode=agent`` and an admitted Dot
-model from ``AI_SERVICE_DIAGNOSIS_MODEL`` (see ``native_diagnosis``). The shared
-service also admits other agent/API providers for other callers; this diagnostic
-caller does not switch modes or providers itself.
+The native ``/v1/tasks`` path uses ``mode=agent`` and the model from
+``AI_SERVICE_DIAGNOSIS_MODEL``. The ``muse`` profile expects a Muse receipt.
+Existing profiles expect Dot receipts. Pending attempts keep their saved route.
 
 Codex CLI audit-bridge jobs are retired as the default. Already-accepted legacy
 jobs are always recovered on their original route. Set
@@ -227,6 +226,10 @@ def native_diagnosis(root, state_dir, path, pending, *, env, opener, now, monoto
             raise Rejected('submit_outcome_unknown')
         if state.get('service_sha256') != digest(service):
             raise Rejected('pending_request_changed')
+        route = state.get('route')
+        if (not isinstance(route, dict) or set(route) != {'provider', 'model', 'profile'}
+                or route['provider'] not in ('dot', 'muse')):
+            raise Rejected('invalid_native_receipt')
     else:
         if path.exists():
             return {'status': 'skipped', 'reason': 'daily_attempt_limit'}
@@ -251,16 +254,17 @@ def native_diagnosis(root, state_dir, path, pending, *, env, opener, now, monoto
                    'materials': [{'source': 'saved-monitor-classification', 'observed_at': observed_at.isoformat()}],
                    'output_schema': {'type': 'object', 'properties': {'diagnosis': {'type': 'string', 'minLength': 1}},
                                      'required': ['diagnosis'], 'additionalProperties': False}}
+        route = {'provider': 'muse' if profile == 'muse' else 'dot',
+                 'model': model, 'profile': profile}
         state = {'protocol': 'native_tasks_v1', 'request_sha256': digest(payload),
                  'service_sha256': digest(service), 'observed_at': observed_at.isoformat(),
-                 'job_id': None, 'deadline': now.timestamp() + 660,
-                 'route': {'provider': 'dot', 'model': model, 'profile': profile}}
+                 'job_id': None, 'deadline': now.timestamp() + 660, 'route': route}
         token = oidc_token(env, opener, audience=audience)
         persist(path, state)
         task = json_request(opener, service + '/v1/tasks', token, payload,
                             idempotency_key='monitor-diagnosis:' + path.stem + ':' + state['request_sha256'])
         if (not re.fullmatch(r'[0-9a-f-]{36}', str(task.get('id', '')))
-                or task.get('owner') != REPOSITORY or task.get('provider') != 'dot'
+                or task.get('owner') != REPOSITORY or task.get('provider') != route['provider']
                 or task.get('result_kind') != 'advisory' or digest(task.get('request')) != state['request_sha256']):
             raise Rejected('invalid_native_receipt')
         state['job_id'] = task['id']
@@ -275,7 +279,7 @@ def native_diagnosis(root, state_dir, path, pending, *, env, opener, now, monoto
         first_poll = False
         task = json_request(opener, service + '/v1/tasks/' + state['job_id'], oidc_token(env, opener, audience=audience))
         if (task.get('id') != state['job_id'] or task.get('owner') != REPOSITORY
-                or task.get('provider') != 'dot' or task.get('result_kind') != 'advisory'
+                or task.get('provider') != route['provider'] or task.get('result_kind') != 'advisory'
                 or digest(task.get('request')) != state['request_sha256']):
             raise Rejected('native_task_identity_changed')
         if task.get('status') == 'completed':
@@ -288,7 +292,7 @@ def native_diagnosis(root, state_dir, path, pending, *, env, opener, now, monoto
                 raise Rejected('empty_diagnosis_output')
             text = output['diagnosis']
             receipt = {'status': 'succeeded', 'protocol': 'native_tasks_v1', 'job_id': state['job_id'],
-                       'task_id': state['job_id'], **state['route'], 'model_verification': 'unavailable',
+                       'task_id': state['job_id'], **route, 'model_verification': 'unavailable',
                        'task': TASK, 'mode': 'review_only', 'sandbox': 'read-only', 'source_repository': REPOSITORY,
                        'audience': audience, 'observed_at': state['observed_at'], 'request_sha256': state['request_sha256'],
                        'output_sha256': hashlib.sha256(text.encode()).hexdigest(), 'output_length': len(text),
