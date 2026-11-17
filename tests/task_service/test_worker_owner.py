@@ -44,7 +44,7 @@ class OwnerAuthTests(unittest.TestCase):
     def test_service_boundary_checks_both_grants_and_policies_without_state(self):
         config = {'enabled': True, 'owner': 'owner', 'resource': self.authorizer.resource,
                   'issuers': self.authorizer.issuers, 'grants': [copy.deepcopy(self.grant)],
-                  'state_path': '/unused/state.sqlite', 'providers': {'dot': {'type': 'dot_events'}},
+                  'state_path': '/unused/state.sqlite', 'providers': {'dot': {'type': 'dot_events', 'enabled': True}},
                   'projects': {'owner/repo': {'providers': {'agent': 'dot'}, 'models': {'dot': ['configured']}}}}
         validate_configuration(config)
         for change in [{'owner': 'other'}, {'owner': '*'},

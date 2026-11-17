@@ -16,8 +16,9 @@ def configuration(state_path):
     return {'enabled': True, 'resource': 'https://service.example/mcp', 'issuers': {}, 'grants': [],
             'state_path': str(state_path), 'projects': {'owner/project': {
                 'providers': {'agent': 'dot'}, 'models': {'dot': ['configured']}}},
-            'providers': {'dot': {'type': 'dot_events'},
-                          'grok': {'type': 'grok_webhook', 'url': 'https://callback.example/trigger', 'key_env': 'PRIVATE_KEY'},
+            'providers': {'dot': {'type': 'dot_events', 'enabled': True},
+                          'grok': {'type': 'grok_webhook', 'enabled': True,
+                                   'url': 'https://callback.example/trigger', 'key_env': 'PRIVATE_KEY'},
                           'plan': {'type': 'chatgpt_plan_oauth', 'token_env': 'PRIVATE_TOKEN', 'plan_usage_authorized': True},
                           'gemini': {'type': 'gemini_api', 'enabled': True, 'model': 'fixed-model',
                                      'key_env': 'PRIVATE_GEMINI_KEY', 'api_usage_authorized': True}}}
@@ -110,15 +111,18 @@ class ConfigurationCheckTests(unittest.TestCase):
     def test_native_providers_default_disabled_and_do_not_read_keys(self):
         self.config['providers'] = {
             'grok': {'type': 'grok_webhook', 'url': 'https://routine.example/fire', 'key_env': 'PRIVATE_KEY'},
-            'claude': {'type': 'claude_routine', 'enabled': False,
-                       'url': 'https://api.anthropic.com/v1/claude_code/routines/trig_TEST/fire',
-                       'key_env': 'PRIVATE_CLAUDE_KEY'}}
+            'grokbot': {'type': 'grok_webhook', 'enabled': False},
+            'claudeduet': {'type': 'claudeduet', 'enabled': False},
+            'dot': {'type': 'dot_events', 'enabled': False},
+            'openai': {'type': 'openai_api', 'enabled': False},
+            'claude': {'type': 'anthropic_api', 'enabled': False},
+            'claude_routine': {'type': 'claude_routine', 'enabled': False}}
         with patch('ai_service.server.os.environ.get', side_effect=AssertionError('credential read')):
             app = build_application(self.config)
         self.assertEqual(app.runtime.providers, {})
 
     def test_validation_returns_the_same_authorizer_and_policies_used_by_build(self):
-        self.config['providers'] = {'dot': {'type': 'dot_events'}}
+        self.config['providers'] = {'dot': {'type': 'dot_events', 'enabled': True}}
         auth, policies = validate_configuration(self.config)
         with patch('ai_service.server.validate_configuration', return_value=(auth, policies)) as validate:
             app = build_application(self.config)

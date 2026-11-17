@@ -13,12 +13,18 @@ from .auth import JWTAuthorizer, Principal, grant_projects, project_belongs_to, 
 from .events import DotEventProvider, EventSubscriptions
 from .gemini import GeminiProvider
 from .github_apps import GitHubApps, GitHubComments, validate_apps
-from .inference import ChatGPTPlanProvider
+from .inference import AnthropicAPIProvider, ChatGPTPlanProvider, OpenAIAPIProvider
 from .mcp_logging import log_level
 from .providers import ClaudeRoutineProvider, GrokWebhookProvider
 from .runtime import Policy
 from .worker_tools import tools_schema_sha256, worker_tools
 from .application import Application
+
+_API_PROVIDERS = {
+    'gemini_api': (GeminiProvider, 1024, 60),
+    'openai_api': (OpenAIAPIProvider, 4096, 90),
+    'anthropic_api': (AnthropicAPIProvider, 4096, 90),
+}
 
 
 def validate_configuration(config):
@@ -54,6 +60,8 @@ def validate_configuration(config):
         if kind == 'dot_events':
             dot_count += 1
         elif kind in {'grok_webhook', 'claude_routine'}:
+            if item.get('enabled') is not True:
+                continue
             item['key_env']
             # A synthetic key validates static constructor arguments only.
             provider_class = ClaudeRoutineProvider if kind == 'claude_routine' else GrokWebhookProvider
@@ -72,14 +80,15 @@ def validate_configuration(config):
             if item.get('plan_usage_authorized') is not True:
                 continue
             ChatGPTPlanProvider(lambda: None, plan_usage_authorized=True)
-        elif kind == 'gemini_api':
+        elif kind in _API_PROVIDERS:
             if item.get('enabled') is not True:
                 continue
             item['key_env']
-            GeminiProvider(lambda: None, model=item['model'],
+            provider_cls, default_max, default_timeout = _API_PROVIDERS[kind]
+            provider_cls(lambda: None, model=item['model'],
                 api_usage_authorized=item.get('api_usage_authorized', False),
-                max_output_tokens=item.get('max_output_tokens', 1024),
-                timeout_seconds=item.get('timeout_seconds', 60))
+                max_output_tokens=item.get('max_output_tokens', default_max),
+                timeout_seconds=item.get('timeout_seconds', default_timeout))
         else:
             raise ValueError('unsupported native provider')
     if dot_count > 1:
@@ -101,8 +110,10 @@ def check_worker_tools(config, identity, expected_projects):
     if not grant.get('owner') or grant['owner'] != config.get('owner'):
         raise ValueError('worker must match the configured service owner')
     provider = grant.get('provider')
-    if config['providers'].get(provider, {}).get('type') != 'dot_events':
-        raise ValueError('worker must use the configured event provider')
+    provider_cfg = config['providers'].get(provider, {})
+    if (provider_cfg.get('type') not in {'dot_events', 'muse'}
+            or provider_cfg.get('enabled') is not True):
+        raise ValueError('worker must use an enabled event provider')
     expected = sorted(set(expected_projects))
     if not expected or len(expected) != len(expected_projects):
         raise ValueError('expected projects must be nonempty and unique')
@@ -153,6 +164,8 @@ def build_application(config, *, github_key_loader=None, github_transport=None):
             events_holder['buses'][name] = muse_events
             providers[name] = DotEventProvider(muse_events)
         elif item['type'] == 'dot_events':
+            if item.get('enabled') is not True:
+                continue
             if name in events_holder['buses'] or events is not None:
                 raise ValueError('one Dot event provider per service deployment')
             events = EventSubscriptions(runtime, provider_name=name, can_access=auth.can_access_events)
@@ -173,14 +186,15 @@ def build_application(config, *, github_key_loader=None, github_transport=None):
             environment_name = item['token_env']
             providers[name] = ChatGPTPlanProvider(lambda name=environment_name: srv.os.environ.get(name),
                                                   plan_usage_authorized=True)
-        elif item['type'] == 'gemini_api':
+        elif item['type'] in _API_PROVIDERS:
             if item.get('enabled') is not True:
                 continue
             environment_name = item['key_env']
-            providers[name] = GeminiProvider(lambda name=environment_name: srv.os.environ.get(name),
+            provider_cls, default_max, default_timeout = _API_PROVIDERS[item['type']]
+            providers[name] = provider_cls(lambda name=environment_name: srv.os.environ.get(name),
                 model=item['model'], api_usage_authorized=item.get('api_usage_authorized', False),
-                max_output_tokens=item.get('max_output_tokens', 1024),
-                timeout_seconds=item.get('timeout_seconds', 60))
+                max_output_tokens=item.get('max_output_tokens', default_max),
+                timeout_seconds=item.get('timeout_seconds', default_timeout))
         else:
             raise ValueError('unsupported native provider')
     if config.get('github_apps') is not None:

@@ -27,15 +27,47 @@
       "muse": {
         "type": "muse",
         "enabled": true
+      },
+      "grokbot": {
+        "type": "grok_webhook",
+        "enabled": false
+      },
+      "claudeduet": {
+        "type": "claudeduet",
+        "enabled": false
+      },
+      "dot": {
+        "type": "dot_events",
+        "enabled": false
       }
     },
     "API_PROVIDERS": {
+      "openai": {
+        "type": "openai_api",
+        "enabled": false,
+        "api_usage_authorized": false,
+        "model": "CONFIGURE_APPROVED_OPENAI_MODEL",
+        "key_env": "AI_SERVICE_OPENAI_API_KEY",
+        "max_output_tokens": 4096,
+        "timeout_seconds": 90
+      },
+      "claude": {
+        "type": "anthropic_api",
+        "enabled": false,
+        "api_usage_authorized": false,
+        "model": "CONFIGURE_APPROVED_ANTHROPIC_MODEL",
+        "key_env": "AI_SERVICE_ANTHROPIC_API_KEY",
+        "max_output_tokens": 4096,
+        "timeout_seconds": 90
+      },
       "gemini": {
         "type": "gemini_api",
         "enabled": false,
         "model": "CONFIGURE_APPROVED_EXACT_MODEL",
         "key_env": "AI_SERVICE_GEMINI_API_KEY",
-        "api_usage_authorized": false
+        "api_usage_authorized": false,
+        "max_output_tokens": 1024,
+        "timeout_seconds": 60
       }
     }
   },

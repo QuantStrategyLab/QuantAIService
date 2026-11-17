@@ -20,14 +20,31 @@ class NamedAgentTests(unittest.TestCase):
     def test_default_configuration_uses_muse_only_for_agent_tasks(self):
         config = json.loads((ROOT / 'config/quant.example.json').read_text())
         validate_configuration({**config, 'enabled': True})
-        self.assertEqual(set(config['providers']), {'muse', 'gemini', 'chatgpt-plan'})
+        self.assertEqual(
+            set(config['providers']),
+            {'muse', 'grokbot', 'claudeduet', 'dot', 'openai', 'claude', 'gemini', 'chatgpt-plan'},
+        )
         self.assertTrue(config['providers']['muse']['enabled'])
+        for dormant in ('grokbot', 'claudeduet', 'dot'):
+            self.assertFalse(config['providers'][dormant]['enabled'])
+            self.assertNotIn('url', config['providers'][dormant])
+            self.assertNotIn('key_env', config['providers'][dormant])
+        for api_name in ('openai', 'claude', 'gemini'):
+            self.assertFalse(config['providers'][api_name]['enabled'])
+            self.assertFalse(config['providers'][api_name]['api_usage_authorized'])
+        self.assertFalse(config['providers']['chatgpt-plan']['plan_usage_authorized'])
         for project in config['projects'].values():
             self.assertEqual(project['providers'], {
-                'agent': 'muse', 'agent:muse': 'muse', 'api': 'chatgpt-plan', 'api:gemini': 'gemini',
+                'agent': 'muse', 'agent:muse': 'muse',
+                'api': 'chatgpt-plan', 'api:openai': 'openai', 'api:claude': 'claude', 'api:gemini': 'gemini',
             })
-            for scenario in project['routing']['scenarios'].values():
-                self.assertEqual(scenario['providers'], ['muse' if scenario['mode'] == 'agent' else 'chatgpt-plan'])
+            for name, scenario in project['routing']['scenarios'].items():
+                if scenario['mode'] == 'agent':
+                    self.assertEqual(scenario['providers'], ['muse'])
+                elif name in {'report_audit', 'document_translation'}:
+                    self.assertEqual(scenario['providers'], ['openai', 'claude'])
+                else:
+                    self.assertEqual(scenario['providers'], ['chatgpt-plan'])
 
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()

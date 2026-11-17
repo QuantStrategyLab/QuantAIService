@@ -119,11 +119,13 @@ class GeminiProviderTests(unittest.TestCase):
             self.assertEqual(self.finish(self.runtime(reply))['status'], 'failed')
 
     def test_configured_limits_and_direct_model_override_are_rejected(self):
-        for kwargs in ({'max_output_tokens': 8193}, {'max_output_tokens': True},
-                       {'timeout_seconds': 61}, {'timeout_seconds': 0}):
+        for kwargs in ({'max_output_tokens': 32769}, {'max_output_tokens': True},
+                       {'timeout_seconds': 181}, {'timeout_seconds': 0}):
             with self.assertRaises(ValueError):
                 GeminiProvider(lambda: 'synthetic', model='synthetic-model',
                                api_usage_authorized=True, **kwargs)
+        GeminiProvider(lambda: 'synthetic', model='synthetic-model',
+                       api_usage_authorized=True, max_output_tokens=32768, timeout_seconds=180)
         provider = GeminiProvider(lambda: self.fail('must not read key'), model='synthetic-model',
                                   api_usage_authorized=True)
         with self.assertRaises(SubmissionRejected):

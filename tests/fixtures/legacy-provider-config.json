@@ -14,7 +14,8 @@
   },
   "providers": {
     "dot": {
-      "type": "dot_events"
+      "type": "dot_events",
+      "enabled": true
     },
     "grok": {
       "type": "grok_webhook",

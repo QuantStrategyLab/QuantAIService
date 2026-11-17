@@ -126,6 +126,20 @@ class WorkerToolsPreflightTests(unittest.TestCase):
             self.assertFalse(result['valid'])
             self.assertNotIn('private-project', raw)
             self.assertNotIn('private-subject', raw)
+
+    def test_muse_worker_preflight_and_disabled_provider_rejection(self):
+        muse_config = copy.deepcopy(self.config)
+        muse_config['providers'] = {'muse': {'type': 'muse', 'enabled': True}}
+        muse_config['projects'] = {
+            project: {'providers': {'agent': 'muse'}, 'models': {'muse': ['configured']}}
+            for project in self.projects
+        }
+        muse_config['grants'][0]['provider'] = 'muse'
+        result = check_worker_tools(muse_config, 'example-worker', self.projects)
+        self.assertEqual(result['tool_count'], 5)
+        muse_config['providers']['muse']['enabled'] = False
+        with self.assertRaises(ValueError):
+            check_worker_tools(muse_config, 'example-worker', self.projects)
         def reject(_):
             raise ValueError('private guard detail')
         code, result, raw = self.invoke(guard=reject)

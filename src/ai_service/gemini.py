@@ -37,13 +37,13 @@ class GeminiProvider:
             raise ValueError('explicit Gemini API usage authorization is required')
         if not isinstance(model, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,127}', model):
             raise ValueError('a fixed Gemini model identifier is required')
-        if type(max_output_tokens) is not int or not 1 <= max_output_tokens <= 8192:
+        if type(max_output_tokens) is not int or not 1 <= max_output_tokens <= 32768:
             raise ValueError('invalid inference output limit')
-        if type(timeout_seconds) is not int or not 1 <= timeout_seconds <= 60:
+        if type(timeout_seconds) is not int or not 1 <= timeout_seconds <= 180:
             raise ValueError('invalid inference timeout')
         self._key_client, self._model = key_client, model
         self._max_output_tokens, self._timeout_seconds = max_output_tokens, timeout_seconds
-        self._transport = transport or PublicHTTPS(timeout=timeout_seconds, max_response_bytes=2_000_000)
+        self._transport = transport or PublicHTTPS(timeout=timeout_seconds, max_response_bytes=4_000_000)
 
     @staticmethod
     def _failed(task_id, verification='unavailable'):

@@ -7,18 +7,14 @@ attestations. Agent mode stays separate from API mode (`gemini_api` and similar)
 
 | Provider | Configuration type | Example enablement | Invocation |
 | --- | --- | --- | --- |
-| `grokbot` | `grok_webhook` | omitted | Existing Grok Bot Routine webhook |
-| `claudeduet` | `claudeduet` | omitted | Scaffold only; no verified trigger protocol |
 | `muse` | `muse` | `true` | Cloudflare event subscription or scheduled MCP polling |
+| `grokbot` | `grok_webhook` | `false` | Opt-in Grok Bot Routine webhook |
+| `claudeduet` | `claudeduet` | `false` | Scaffold only; disabled pending verified trigger protocol |
+| `dot` | `dot_events` | `false` | Opt-in Dot MCP event subscription + claim |
 
-The enclosing Python example service remains `enabled: false`. Grok Bot is
-explicitly enabled at the provider level as requested, but this does not deploy
-it, create a Routine, authorize usage or establish a connection.
+In `config/quant.example.json` and `cloudflare/task-service/wrangler.example.jsonc`, `muse` is `enabled: true` while `grokbot`, `claudeduet`, and `dot` remain `enabled: false` without URLs or secret bindings. The enclosing Python example service stays `enabled: false`. Synchronous API slots include `openai` (`openai_api`), `claude` (`anthropic_api`), `gemini` (`gemini_api`), and `chatgpt-plan` (`chatgpt_plan_oauth`), all disabled and unauthorized until configured; `max_output_tokens` supports `1..32768` and `timeout_seconds` supports `1..180`.
 
-Replace the placeholder URL with an approved HTTPS Routine endpoint and bind an approved
-Secret using `AI_SERVICE_GROKBOT_WEBHOOK_KEY`; do not put its value in config.
-Without that credential the Python application refuses startup; the Worker
-rejects submission before outbound activity. There is no fallback to Dot or API.
+To enable `grokbot`, supply an approved HTTPS Routine endpoint, `key_env` (`AI_SERVICE_GROKBOT_WEBHOOK_KEY`), and bound Secret; disabled `grok_webhook`/`claude_routine` entries skip URL and `key_env` checks during configuration validation. Without credentials, Python startup and Worker submission both reject enabled triggers. Disabled `dot_events` providers also fail closed (`disabled` or `not_configured`) in both Python and Worker runtimes. There is no fallback to Dot or API.
 
 Claude Duet is a different product from Claude Code Routines. The repositories
 and the [Duet getting-started documentation](https://support.claude.com/en/articles/17631495-get-started-with-claude-duet)
@@ -110,7 +106,9 @@ do not verify real connections, billing, latency or business completion.
 
 The native three-role briefing consumer also accepts the new provider names
 in its protected role binding. Distinct worker identities and current readback
-remain required; a name alone never yields approval, and Duet / Muse remain
-unavailable in the production runtime until an adapter is verified.
-Enable a Muse project route only after verifying its delivery mode, MCP worker
-identity, cancellation and result receipt.
+remain required; a name alone never yields approval, and `claudeduet` remains
+disabled until a verified adapter exists.
+Preflight worker tool verification (`check_worker_tools`) accepts enabled
+owner-scoped `dot_events` or `muse` workers. Enable an agent project route
+only after verifying its delivery mode, MCP worker identity, cancellation, and
+result receipt.

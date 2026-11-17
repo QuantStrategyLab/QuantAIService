@@ -21,7 +21,7 @@ for(const name of ['grok','claude','grokbot','claudeduet','muse','duet-enabled',
  policy.PROJECT_POLICIES[project].models[name]=['configured-bot'];
 }
 policy.SYNTHETIC_ROUTINE_KEY='synthetic-routine-key';
-policy.AGENT_PROVIDERS={grok:{type:'grok_webhook',enabled:true,url:'https://routine.example/trigger',key_env:'SYNTHETIC_ROUTINE_KEY'},claude:{type:'claude_routine',enabled:true,url:'https://api.anthropic.com/v1/claude_code/routines/trig_SYNTHETIC/fire',key_env:'SYNTHETIC_ROUTINE_KEY'},'disabled-bot':{type:'grok_webhook',enabled:false,url:'https://routine.example/trigger',key_env:'SYNTHETIC_ROUTINE_KEY'},'missing-bot-key':{type:'grok_webhook',enabled:true,url:'https://routine.example/trigger',key_env:'ABSENT_KEY'}};
+policy.AGENT_PROVIDERS={dot:{type:'dot_events',enabled:true},grok:{type:'grok_webhook',enabled:true,url:'https://routine.example/trigger',key_env:'SYNTHETIC_ROUTINE_KEY'},claude:{type:'claude_routine',enabled:true,url:'https://api.anthropic.com/v1/claude_code/routines/trig_SYNTHETIC/fire',key_env:'SYNTHETIC_ROUTINE_KEY'},'disabled-bot':{type:'grok_webhook',enabled:false,url:'https://routine.example/trigger',key_env:'SYNTHETIC_ROUTINE_KEY'},'missing-bot-key':{type:'grok_webhook',enabled:true,url:'https://routine.example/trigger',key_env:'ABSENT_KEY'}};
 policy.AGENT_PROVIDERS.grokbot={...policy.AGENT_PROVIDERS.grok};
 policy.AGENT_PROVIDERS.claudeduet={type:'claudeduet',enabled:false};
 policy.AGENT_PROVIDERS.muse={type:'muse',enabled:false};
@@ -54,7 +54,7 @@ const outboundService=async request=>{outbound++;const url=new URL(request.url);
   if(apiReply==='server')return new Response(null,{status:503});
   if(apiReply==='redirect')return new Response(null,{status:302,headers:{Location:'https://never-follow.example/'}});
   if(apiReply==='bad-receipt')return new Response('{"modelVersion":', {status:200});
-  if(apiReply==='oversize')return new Response(' '.repeat(2000001),{status:200});
+  if(apiReply==='oversize')return new Response(' '.repeat(4000001),{status:200});
   const text=apiReply==='schema'?'{"wrong":true}':apiReply==='duplicate'?' {"count":1,"count":2} ':'{"count":2,"ratio":1.0}';
   return Response.json({modelVersion:apiReply==='mismatch'?'another-model':'synthetic-fixed',candidates:[{finishReason:apiReply==='incomplete'?'MAX_TOKENS':'STOP',content:{parts:[{text}]}}],usageMetadata:{promptTokenCount:3,candidatesTokenCount:2,totalTokenCount:5,unsafe:'not copied'}});
  }
@@ -94,11 +94,14 @@ try{
   assert.deepEqual(config.AUTH_CLIENTS,{});assert.equal(config.ADMISSIONS_JSON,'[]');
   assert.deepEqual(config.PROJECT_CONTEXTS,{});assert.deepEqual(config.PROJECT_POLICIES,{});
   const agents=config.AGENT_PROVIDERS;
-  assert.deepEqual(agents,{muse:{type:'muse',enabled:true}});
+  assert.deepEqual(agents,{muse:{type:'muse',enabled:true},grokbot:{type:'grok_webhook',enabled:false},claudeduet:{type:'claudeduet',enabled:false},dot:{type:'dot_events',enabled:false}});
+  assert.equal(config.API_PROVIDERS.openai.type,'openai_api');assert.equal(config.API_PROVIDERS.openai.enabled,false);
+  assert.equal(config.API_PROVIDERS.claude.type,'anthropic_api');assert.equal(config.API_PROVIDERS.claude.enabled,false);
   assert.equal(config.API_PROVIDERS['gemini'].type,'gemini_api');
   assert.equal(agents.muse.enabled,true);assert.equal(agents.muse.type,'muse');
   assert.equal(agents.muse.url,undefined);
   assert.equal(agents.muse.key_env,undefined);
+  assert.equal(agents.grokbot.url,undefined);assert.equal(agents.grokbot.key_env,undefined);
   assert.throws(()=>nativeConfiguration(config,'grokbot'));
   assert.throws(()=>nativeConfiguration(config,'claudeduet'));
   assert.throws(()=>nativeConfiguration(config,'muse'));

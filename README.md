@@ -78,6 +78,14 @@ Server configuration lives in a JSON file based on
 listening resource, the SQLite state path, accepted token issuers, and the
 provider backends. Replace every `CONFIGURE_*` placeholder with your own value.
 
+The reference configurations enable `muse` (`enabled: true`) for long-running
+strategy backtest and review (`strategy_backtest_review`, `pr_code_review`),
+keep dormant `grokbot`, `claudeduet`, and `dot` slots at `enabled: false` with
+no URLs or secrets, and configure disabled `openai` (`openai_api`), `claude`
+(`anthropic_api`), `gemini` (`gemini_api`), and `chatgpt-plan`
+(`chatgpt_plan_oauth`) API entries alongside `report_audit` and
+`document_translation` API scenarios.
+
 ## Repository layout
 
 ```

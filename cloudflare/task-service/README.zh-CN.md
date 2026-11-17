@@ -4,7 +4,7 @@
 
 独立部署的 Cloudflare Worker、OAuth KV 和 SQLite Durable Object。此目录的生产入口使用 Quant 状态空间；Pigbibi 回归夹具使用单独的测试状态类。保留 DO 类名 PersonalTaskStore 仅为存储绑定兼容，组织身份由服务端配置限定。
 
-Dot 是当前 agent 执行方。API 模式保留同一任务提交、查询、事件和幂等合同，当前支持旧服务已有的 Gemini 文本 JSON 协议；默认关闭。Claude、Grok Routine 已有适配，默认关闭。
+参考配置启用 `muse`，并将 `dot`、`grokbot` 与 `claudeduet` 保持关闭直至显式配置。API 模式为 `openai_api`、`anthropic_api` 和 `gemini_api` 结构化 JSON 路由保留同一任务提交、查询、事件和幂等合同，默认全部关闭。Claude 与 Grok Routine 适配默认关闭。
 
 MCP 的资源 metadata 和未登录 challenge 广告 `AUTH_CLIENTS` 中精确匹配该资源、provider 非 null 的已配置工作角色 scope 并集，顺序沿服务端 `SCOPES`；不根据请求、当前 token 或 REST 调用方推断权限。该广告供客户端在正常授权时申请所需能力，不是执行许可：MCP 基本操作仍要求 `tasks:work`，订阅及其管理仍要求 `events:subscribe`，原 client、admission、组织、项目和 audience 校验保持不变。REST 继续只广告当前读取或提交操作的最小 scope。
 
@@ -12,13 +12,13 @@ MCP 的资源 metadata 和未登录 challenge 广告 `AUTH_CLIENTS` 中精确匹
 
 需要使用原插件正常授权所需 scope，再核验事件目录、active 订阅及真实任务结果，不能修改 KV grant 或借用其他客户端 token 代替。资源 metadata 更新不保证宿主立即更新已保存的 scope；以工具和事件实际发现、授权页面及最终 grant 为准。
 
-API 路由由受保护的服务端配置注入：项目 `PROJECT_POLICIES[project].providers` 的 `api` 或 `api:<profile>` 指向显式 provider 别名，`models[别名]` 限定模型。另在 Worker 的 `API_PROVIDERS[别名]` 配置 `type: "gemini_api"`、`enabled: true`、`api_usage_authorized: true`、准确 `model` 和 `key_env`（已有 Secret 的绑定名）；可设置 `max_output_tokens`（1..8192，默认1024）与 `timeout_seconds`（1..60，默认60）。缺少任一启用、授权、模型或凭据条件时拒绝 API 请求，不影响 Dot。这里的布尔配置记录既有批准，本身不授予付费授权；生产启用与真实调用仍需相应授权。
+API 路由由受保护的服务端配置注入：项目 `PROJECT_POLICIES[project].providers` 的 `api` 或 `api:<profile>` 指向显式 provider 别名，`models[别名]` 限定模型。另在 Worker 的 `API_PROVIDERS[别名]` 配置 `type`（`"openai_api"`、`"anthropic_api"` 或 `"gemini_api"`）、`enabled: true`、`api_usage_authorized: true`、准确 `model` 和 `key_env`（已有 Secret 的绑定名）；可设置 `max_output_tokens`（1..32768；OpenAI/Anthropic 默认 4096，Gemini 默认 1024）与 `timeout_seconds`（1..180；OpenAI/Anthropic 默认 90，Gemini 默认 60）。缺少任一启用、授权、模型或凭据条件时拒绝 API 请求。这里的布尔配置记录既有批准，本身不授予付费授权；生产启用与真实调用仍需相应授权。
 
-场景路由可在 `API_PROVIDERS[别名].tier_models` 中按 `simple`、`standard`、`complex` 配置各档的有序模型数组。服务按当前档位与项目允许名单取交集，优先核对场景首选，再通过同一账号的 Gemini 模型元数据接口筛选支持 `generateContent` 的型号。已显式指定型号的请求保留该约束。未配置分档的现有提供方沿用固定型号。
+场景路由可在 `API_PROVIDERS[别名].tier_models` 中按 `simple`、`standard`、`complex` 配置各档的有序模型数组。Gemini 提供方按当前档位与项目允许名单取交集，优先核对场景首选，再通过同一账号的 Gemini 模型元数据接口筛选支持 `generateContent` 的型号。已显式指定型号的请求保留该约束。未配置分档的现有提供方沿用固定型号。
 
-API 使用固定的 Google HTTPS 源，不接收调用者提供的 URL，不跟随跳转，不重试推理。仅接收文本数据材料，不提供工具或更改安全设置。收到模型与配置不同、非正常终止或不符合输出 schema 的结果不会作为成功输出。HTTP拒绝记为失败；连接丢失、服务端错误或无法确认的回执保留 `outcome_unknown`，原冻结意图仍可查询，不重发新任务。执行前先持久化 submitting；网络在 SQLite 事务和阻塞整个 DO 的短临界区以外。同步 API 的取消仅表示已请求，未声称远端已停止；若随后收到已核验的完整回执，仍按该事实记录结果。
+API 仅访问固定的官方 HTTPS 源（`api.openai.com`、`api.anthropic.com` 或 `generativelanguage.googleapis.com`），不接收调用者提供的 URL，不跟随跳转，不重试推理。OpenAI 与 Anthropic 支持文本与有界内联图像材料，Gemini 仅接收文本数据材料。收到模型与配置不同、非正常终止或不符合输出 schema 的结果不会作为成功输出。HTTP 拒绝记为失败；连接丢失、服务端错误或无法确认的回执保留 `outcome_unknown`，原冻结意图仍可查询，不重发新任务。执行前先持久化 submitting；网络在 SQLite 事务和阻塞整个 DO 的短临界区以外。同步 API 的取消仅表示已请求，未声称远端已停止；若随后收到已核验的完整回执，仍按该事实记录结果。
 
-本实现只移植 Gemini API 纵切，旧 ChatGPT-plan OAuth Responses 提供者尚未迁入 Worker；不能据此认定所有旧 API 提供者或整个迁移已完成。
+旧 ChatGPT-plan OAuth Responses 提供者尚未迁入 Worker，暂不支持 OAuth 套餐配额转发。
 
 ## GitHub Actions 调用方身份
 
@@ -115,6 +115,6 @@ worker 默认保持原项目。要访问其他项目，在对应 `AUTH_CLIENTS[c
 
 Dot agent 在 worker 领取前仅有持久化事件，没有正在执行的工作。显式取消或期限到达时，未领取任务直接进入 cancelled，释放并发名额；旧版本留下的同类 cancel_requested 会由 alarm 完成取消，保留原请求和错误原因。已经领取的任务仍须原 worker 确认停止，已有终态不会被取消请求改写。其他 provider 的未知提交和取消规则保持不变。
 
-### Grok Bot 与 Claude Duet
+### Agent 槽位（`muse`、`grokbot`、`claudeduet`、`dot`）
 
-新增名称、配置和准入步骤见 [agent providers](../../docs/agent-providers.md)。`grokbot` 在 provider 示例中为 `enabled: true`，仍需有效 endpoint、Secret 绑定和完整项目/worker 准入；`claudeduet` 与 `muse` 默认关闭，尚无已核验的触发协议，误设启用也会拒绝。Claude Duet 不复用 Claude Code Routine token；Muse 不走 API 模式，仅保留 MCP claim 身份脚手架，禁止 Cursor Cloud Agents 拉起。
+配置与准入步骤见 [agent providers](../../docs/agent-providers.md)。参考配置启用 `muse`（`enabled: true`，使用 Cloudflare 事件订阅或 MCP 轮询），`grokbot`、`claudeduet` 与 `dot` 保持 `enabled: false` 且不填 URL/Secret。未显式启用的 `dot_events`、`grok_webhook` 与 `claude_routine` 在提交前与路由阶段默认关闭，`claudeduet` 因尚无已核验触发协议保持关闭。Claude Duet 不复用 Claude Code Routine token，禁止 Cursor Cloud Agents 拉起 Muse。

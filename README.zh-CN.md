@@ -47,6 +47,8 @@ python -m unittest discover -s tests/task_service -v
 
 服务端配置存放在以 [`config/quant.example.json`](config/quant.example.json) 为模板的 JSON 文件中，定义监听地址、SQLite 状态路径、接受的 token 签发方以及 provider 后端。请把所有 `CONFIGURE_*` 占位符替换为你自己的值。
 
+参考配置默认启用 `muse`（`enabled: true`）用于策略回测与代码审查（`strategy_backtest_review`、`pr_code_review`），将未接通的 `grokbot`、`claudeduet` 与 `dot` 槽位保持 `enabled: false` 且不填 URL/Secret，并在 `API_PROVIDERS` / `providers` 中提供默认关闭的 `openai`（`openai_api`）、`claude`（`anthropic_api`）、`gemini`（`gemini_api`）及 `chatgpt-plan` 占位条目与 `report_audit`、`document_translation` API 场景示例。
+
 ## 仓库结构
 
 ```
