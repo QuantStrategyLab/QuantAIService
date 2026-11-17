@@ -450,21 +450,21 @@ export class TaskStore extends DurableObject {
     if(existing===null||existing>Date.now()+10)await this.ctx.storage.setAlarm(Date.now()+10);
   }
 
-  async #eventAccess(owner,identity) {
-    if(!EVENT_AGENTS.has(identity.provider)||typeof identity.grantId!=='string'||!identity.grantId||!identity.scopes?.includes('events:subscribe'))return false;
+  async #eventAccess(owner,identity,scopes=['events:subscribe']) {
+    if(!EVENT_AGENTS.has(identity.provider)||typeof identity.grantId!=='string'||!identity.grantId||!scopes.every(scope=>identity.scopes?.includes(scope)))return false;
     // Provider 1.2.4 persists grants under this key. No bearer token is stored.
     // Do not cache authority across admissions, sends, retries or restarts.
     let grant;
     try { grant=await this.env.OAUTH_KV.get(`grant:github-${identity.githubUserId}:${identity.grantId}`,{type:'json'}); }
     catch { return false; }
     if(!grant||grant.id!==identity.grantId||grant.userId!==`github-${identity.githubUserId}`||grant.clientId!==identity.clientId||grant.resource!==identity.resource||
-      !Array.isArray(grant.scope)||!grant.scope.includes('events:subscribe')||
+      !Array.isArray(grant.scope)||!scopes.every(scope=>grant.scope.includes(scope))||
       (grant.expiresAt!==undefined&&(!Number.isFinite(grant.expiresAt)||grant.expiresAt<=now())))return false;
     let project;try{project=workerContext(this.env,identity,owner);}catch{return false;}
     const client=this.env.AUTH_CLIENTS?.[identity.clientId];
-    if(!project||project.project!==owner||client?.provider!==identity.provider||!client.scopes?.includes('events:subscribe'))return false;
+    if(!project||project.project!==owner||client?.provider!==identity.provider||!scopes.every(scope=>client.scopes?.includes(scope)))return false;
     let admissions;try{admissions=JSON.parse(this.env.ADMISSIONS_JSON??'[]');}catch{return false;}
-    return admissions.some(a=>a.githubUserId===identity.githubUserId&&a.ownerId===project.ownerId&&a.clientIds.includes(identity.clientId)&&a.providers.includes(identity.provider)&&a.scopes.includes('events:subscribe'));
+    return admissions.some(a=>a.githubUserId===identity.githubUserId&&a.ownerId===project.ownerId&&a.clientIds.includes(identity.clientId)&&a.providers.includes(identity.provider)&&scopes.every(scope=>a.scopes.includes(scope)));
   }
 
   #musePollWindow(owner) {
@@ -479,14 +479,14 @@ export class TaskStore extends DurableObject {
     if (timeout <= window) return false;
     const poll = this.sql.exec('SELECT identity_json, seen FROM muse_polls WHERE owner=?', owner).toArray()[0];
     return Boolean(poll && now() - poll.seen < window &&
-      await this.#eventAccess(owner, JSON.parse(poll.identity_json)) && now() - poll.seen < window);
+      await this.#eventAccess(owner, JSON.parse(poll.identity_json), ['events:subscribe','tasks:work']) && now() - poll.seen < window);
   }
 
   async pollMuseTasks(owner, worker, identity) {
     const provider = this.env.AGENT_PROVIDERS?.muse;
     if (!this.#musePollWindow(owner) || provider?.type !== 'muse' || provider.enabled !== true ||
-        identity.provider !== 'muse' || !identity.scopes.includes('tasks:work') ||
-        !admittedProviders(this.#policy(owner)).has('muse') || !await this.#eventAccess(owner, identity)) {
+        identity.provider !== 'muse' || !admittedProviders(this.#policy(owner)).has('muse') ||
+        !await this.#eventAccess(owner, identity, ['events:subscribe','tasks:work'])) {
       denied('Muse polling is not admitted for this project');
     }
     return this.ctx.storage.transactionSync(() => {
@@ -495,9 +495,10 @@ export class TaskStore extends DurableObject {
         ON CONFLICT(owner) DO UPDATE SET identity_json=excluded.identity_json,seen=excluded.seen`,
         owner, JSON.stringify(identity), timestamp);
       const tasks = this.sql.exec(`SELECT id AS task_id,status,attempt AS attempt_id,revision,deadline
-        FROM tasks WHERE owner=? AND provider='muse' AND json_extract(request,'$.mode')='agent' AND deadline>?
-          AND ((status='running' AND worker IS NULL) OR (status IN ('running','cancel_requested') AND worker=?))
-        ORDER BY deadline,created,id LIMIT 8`, owner, timestamp, worker).toArray();
+        FROM tasks WHERE owner=? AND provider='muse' AND json_extract(request,'$.mode')='agent'
+          AND ((status='running' AND deadline>? AND (worker IS NULL OR worker=?))
+            OR (status='cancel_requested' AND worker=?))
+        ORDER BY deadline,created,id LIMIT 8`, owner, timestamp, worker, worker).toArray();
       return {tasks};
     });
   }
