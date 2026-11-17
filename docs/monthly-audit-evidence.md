@@ -6,11 +6,11 @@
 workflow runs from `QuantStrategyLab/HkEquitySnapshotPipelines` and
 `QuantStrategyLab/UsEquitySnapshotPipelines`. Both source repositories are public;
 the workflow uses its existing `GITHUB_TOKEN` to read public evidence and create
-only a central `monthly-review` issue in QuantAIService. A scheduled run also sends the public evidence to the
+only a central `monthly-review` issue in QuantAIService. When `MONTHLY_API_AUDIT_READY=true`, a scheduled run also sends the public evidence to the
 configured OpenAI and Anthropic APIs for two independent advisory reviews.
 Existing repository secrets and model variables configure these paid calls.
 
-本任务按月汇总两个公开源仓库的现有报告。定时运行会各调用一次 GPT 和 Claude，
+本任务按月汇总两个公开源仓库的现有报告。设置 `MONTHLY_API_AUDIT_READY=true` 后，定时运行会各调用一次 GPT 和 Claude，
 将独立建议与模型回执写入审计工件。源问题仍由源 issue 跟踪，
 `quality_accepted` 始终为 `false`。
 
@@ -41,7 +41,9 @@ time. Hashes do not prove historical completeness or remediation. Long texts are
 explicitly truncated; read linked sources for the full text.
 
 `api_probe=true` submits one synthetic request per provider from `main`.
-It only publishes a verification artifact and incurs provider usage. Each
+It only publishes a verification artifact and incurs provider usage. When both
+probes report the configured models successfully, set
+`MONTHLY_API_AUDIT_READY=true` to activate scheduled inference. Each
 scheduled audit stores provider outputs separately from the evidence report.
 Automatic reruns skip paid requests and retain the original run's results.
 

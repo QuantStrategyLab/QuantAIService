@@ -50,7 +50,7 @@ jobs:
           fi
           python scripts/monthly_audit_report.py --month "$REPORT_MONTH" "${arguments[@]}" > "$RUNNER_TEMP/qar-monthly.json"
       - name: Run independent GPT and Claude audits
-        if: ${{ github.repository == 'QuantStrategyLab/QuantAIService' && github.ref == 'refs/heads/main' && github.run_attempt == 1 && (inputs.api_probe || github.event_name == 'schedule') }}
+        if: ${{ github.repository == 'QuantStrategyLab/QuantAIService' && github.ref == 'refs/heads/main' && github.run_attempt == 1 && (inputs.api_probe || (github.event_name == 'schedule' && vars.MONTHLY_API_AUDIT_READY == 'true')) }}
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -73,7 +73,7 @@ jobs:
           retention-days: 90
           if-no-files-found: error
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
-        if: ${{ always() && github.repository == 'QuantStrategyLab/QuantAIService' && github.ref == 'refs/heads/main' && github.run_attempt == 1 && (inputs.api_probe || github.event_name == 'schedule') }}
+        if: ${{ always() && github.repository == 'QuantStrategyLab/QuantAIService' && github.ref == 'refs/heads/main' && github.run_attempt == 1 && (inputs.api_probe || (github.event_name == 'schedule' && vars.MONTHLY_API_AUDIT_READY == 'true')) }}
         with:
           name: qar-monthly-api-${{ github.run_id }}
           path: ${{ runner.temp }}/qar-monthly-api.json
