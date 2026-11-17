@@ -6,11 +6,13 @@ from __future__ import annotations
 import fcntl
 import hashlib
 import json
+import math
 import os
 import re
 import sys
 import tempfile
 import threading
+import time
 from collections.abc import Callable, Mapping
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -71,6 +73,135 @@ _OPERATIONAL_ERROR_TYPES = frozenset({
 _OPERATIONAL_DIAGNOSIS_SOURCE_REPOSITORY = "QuantStrategyLab/QuantAIService"
 
 
+def _is_hex64(value: Any) -> bool:
+    return isinstance(value, str) and _EVENT_ID_RE.fullmatch(value) is not None
+
+
+def _is_nonempty_str(value: Any) -> bool:
+    return isinstance(value, str) and bool(value)
+
+
+def _is_bounded_str(value: Any, *, max_len: int = 200, no_space: bool = False) -> bool:
+    if not isinstance(value, str) or not 1 <= len(value) <= max_len:
+        return False
+    return not no_space or not any(char.isspace() for char in value)
+
+
+def _is_finite_number(value: Any) -> bool:
+    return type(value) in (int, float) and math.isfinite(value)
+
+
+def _is_positive_int(value: Any) -> bool:
+    return type(value) is int and value > 0
+
+
+def _optional_str(mapping: Any, key: str) -> str | None:
+    if not isinstance(mapping, Mapping):
+        return None
+    value = mapping.get(key)
+    return value if isinstance(value, str) else None
+
+
+def _optional_int(mapping: Any, key: str) -> int | None:
+    if not isinstance(mapping, Mapping):
+        return None
+    value = mapping.get(key)
+    return value if type(value) is int else None
+
+
+def _require_dict(value: Any, error_message: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise OSError(error_message)
+    return value
+
+
+class _LifecycleIdentity:
+    __slots__ = ("domain", "strategy_profile", "platform")
+
+    def __init__(self, *, domain: Any, strategy_profile: str | None, platform: Any) -> None:
+        self.domain = domain
+        self.strategy_profile = strategy_profile
+        self.platform = platform
+
+
+def _read_lifecycle_identity(record: Any, *, default_domain: Any = None) -> _LifecycleIdentity:
+    """Extract duck-typed lifecycle attributes from QPK objects or test doubles."""
+    if record is None:
+        return _LifecycleIdentity(domain=default_domain, strategy_profile=None, platform=None)
+    profile = getattr(record, "strategy_profile", None)
+    return _LifecycleIdentity(
+        domain=getattr(record, "domain", default_domain),
+        strategy_profile=profile if isinstance(profile, str) else None,
+        platform=getattr(record, "platform", None),
+    )
+
+
+def _is_binance_live_record(
+    record: Any,
+    *,
+    platform: str | None = None,
+    require_platform: bool = False,
+) -> bool:
+    if record is None:
+        return False
+    identity = _read_lifecycle_identity(record)
+    if identity.domain != "crypto" or identity.strategy_profile != _BINANCE_LIVE_PROFILE:
+        return False
+    if platform is not None:
+        return identity.platform == platform
+    if require_platform:
+        return bool(str(identity.platform or "").strip())
+    return True
+
+
+def _has_complete_live_coverage(snapshot: Any, request: Mapping[str, str]) -> bool:
+    coverage = getattr(snapshot, "interval_return_coverage", None)
+    if not isinstance(coverage, Mapping):
+        return False
+    return (
+        coverage.get("coverage_status") == "complete_requested_window"
+        and coverage.get("requested_window_complete") is True
+        and coverage.get("requested_start_at") == request["required_start_at"]
+        and coverage.get("requested_end_at") == request["required_end_at"]
+        and coverage.get("return_start_at") == request["required_start_at"]
+        and coverage.get("return_end_at") == request["required_end_at"]
+        and type(coverage.get("return_count")) is int
+        and coverage.get("return_count", 0) >= 10
+    )
+
+
+def _same_live_provenance(drift: Any, snapshot: Any) -> bool:
+    return (
+        getattr(drift, "as_of", None) == getattr(snapshot, "as_of", None)
+        and getattr(drift, "source_revision", None) == getattr(snapshot, "source_revision", None)
+    )
+
+
+class _DriftQualification:
+    __slots__ = ("reason", "alert_suppressed", "baseline_available")
+
+    def __init__(self, *, reason: Any, alert_suppressed: Any, baseline_available: Any) -> None:
+        self.reason = reason
+        self.alert_suppressed = alert_suppressed
+        self.baseline_available = baseline_available
+
+    @classmethod
+    def from_record(cls, drift: Any) -> _DriftQualification:
+        return cls(
+            reason=getattr(drift, "reason", ""),
+            alert_suppressed=getattr(drift, "alert_suppressed", False),
+            baseline_available=getattr(drift, "baseline_available", True),
+        )
+
+    def is_qualified(self) -> bool:
+        return (
+            self.alert_suppressed is False
+            and self.baseline_available is True
+            and isinstance(self.reason, str)
+            and not self.reason.strip()
+        )
+
+
 def _collect_drift_results(run_drift_detection, *, domains=DOMAINS):
     results: dict[str, list[Any]] = {}
     errors: list[dict[str, str]] = []
@@ -93,13 +224,10 @@ def _qualified_profile_rows(rows, domain, expected_profiles):
     grouped: dict[str, list[Any]] = {}
     unexpected = False
     for row in rows:
-        profile = getattr(row, "strategy_profile", None)
+        identity = _read_lifecycle_identity(row, default_domain=domain)
+        profile = identity.strategy_profile
         # Older lifecycle objects may omit domain; their collecting call owns it.
-        if (
-            not isinstance(profile, str)
-            or profile not in expected_profiles
-            or getattr(row, "domain", domain) != domain
-        ):
+        if profile is None or profile not in expected_profiles or identity.domain != domain:
             unexpected = True
             continue
         grouped.setdefault(profile, []).append(row)
@@ -183,22 +311,9 @@ def _run_binance_live_profile_monitor(run_monitor, *, source_revision: str, env=
         ))
     except Exception:
         return [], "live_coverage_incomplete"
-    if (len(snapshots) != 1
-            or getattr(snapshots[0], "domain", None) != "crypto"
-            or getattr(snapshots[0], "strategy_profile", None) != _BINANCE_LIVE_PROFILE
-            or getattr(snapshots[0], "platform", None) != request["stream_id"]):
+    if len(snapshots) != 1 or not _is_binance_live_record(snapshots[0], platform=request["stream_id"]):
         return [], "live_coverage_incomplete"
-    coverage = getattr(snapshots[0], "interval_return_coverage", None)
-    if not isinstance(coverage, Mapping) or (
-        coverage.get("coverage_status") != "complete_requested_window"
-        or coverage.get("requested_window_complete") is not True
-        or coverage.get("requested_start_at") != request["required_start_at"]
-        or coverage.get("requested_end_at") != request["required_end_at"]
-        or coverage.get("return_start_at") != request["required_start_at"]
-        or coverage.get("return_end_at") != request["required_end_at"]
-        or type(coverage.get("return_count")) is not int
-        or coverage.get("return_count", 0) < 10
-    ):
+    if not _has_complete_live_coverage(snapshots[0], request):
         return [], "live_coverage_incomplete"
     return snapshots, None
 
@@ -231,25 +346,19 @@ def _run_binance_live_profile_drift(snapshot, *, store=None):
         from quant_platform_kit.strategy_lifecycle.drift_detector import detect_drift
         from quant_platform_kit.strategy_lifecycle.performance_store import PerformanceStore
 
-        if (getattr(snapshot, "domain", None) != "crypto"
-                or getattr(snapshot, "strategy_profile", None) != _BINANCE_LIVE_PROFILE
-                or not str(getattr(snapshot, "platform", "") or "").strip()):
+        if not _is_binance_live_record(snapshot, require_platform=True):
             return None, "live_drift_snapshot_unavailable"
         store = store or PerformanceStore.from_env()
         baseline = store.load_latest_backtest("crypto", _BINANCE_LIVE_PROFILE)
-        if (baseline is None
-                or getattr(baseline, "domain", None) != "crypto"
-                or getattr(baseline, "strategy_profile", None) != _BINANCE_LIVE_PROFILE):
+        if not _is_binance_live_record(baseline):
             return None, "live_drift_baseline_unavailable"
         # Previous drift records have no live-stream identity and cannot carry
         # severity into another stream. The direct detector still honors any
         # qualification failure attached to this exact snapshot.
         drift = detect_drift(snapshot, backtest=baseline)
         if (
-            getattr(drift, "domain", None) != "crypto"
-            or getattr(drift, "strategy_profile", None) != _BINANCE_LIVE_PROFILE
-            or getattr(drift, "as_of", None) != getattr(snapshot, "as_of", None)
-            or getattr(drift, "source_revision", None) != getattr(snapshot, "source_revision", None)
+            not _is_binance_live_record(drift)
+            or not _same_live_provenance(drift, snapshot)
             or not _drift_is_qualified_for_monitoring(drift)
         ):
             return None, "live_drift_unavailable"
@@ -366,7 +475,7 @@ def _artifact_status_error(
         error["reason_code"] = reason_code
     if shared_root_cause and _SAFE_TOKEN.fullmatch(shared_root_cause):
         error["shared_root_cause"] = shared_root_cause
-    if isinstance(http_status, int) and 100 <= http_status <= 599:
+    if type(http_status) is int and 100 <= http_status <= 599:
         error["http_status"] = http_status
     if isinstance(rate_limit_reset_at, str) and _SAFE_RESET_AT.fullmatch(rate_limit_reset_at):
         error["rate_limit_reset_at"] = rate_limit_reset_at
@@ -420,10 +529,9 @@ def _load_expected_coverage(
 
     shared_upstream = payload.get("shared_upstream")
     shared_reason = None
-    if isinstance(shared_upstream, dict):
-        candidate = str(shared_upstream.get("reason_code") or "")
-        if candidate in _GITHUB_UPSTREAM_CODES:
-            shared_reason = candidate
+    upstream_candidate = _optional_str(shared_upstream, "reason_code")
+    if upstream_candidate in _GITHUB_UPSTREAM_CODES:
+        shared_reason = upstream_candidate
 
     expected_profiles: dict[str, list[str]] = {}
     not_configured: set[str] = set()
@@ -441,21 +549,19 @@ def _load_expected_coverage(
         head_sha = str(status.get("head_sha") or "")
         valid_ready = (
             status.get("status") == "ready"
-            and isinstance(status.get("artifact_id"), int)
-            and status["artifact_id"] > 0
-            and isinstance(status.get("run_id"), int)
-            and status["run_id"] > 0
+            and _is_positive_int(status.get("artifact_id"))
+            and _is_positive_int(status.get("run_id"))
             and re.fullmatch(r"[0-9a-f]{40}", head_sha)
             and isinstance(profiles, list)
             and bool(profiles)
-            and all(isinstance(profile, str) and profile for profile in profiles)
+            and all(_is_nonempty_str(profile) for profile in profiles)
         )
         if valid_ready:
             expected_profiles[domain] = list(profiles)
             source_revisions[domain] = head_sha
             continue
-        domain_shared = status.get("shared_root_cause")
-        if isinstance(domain_shared, str) and domain_shared in _GITHUB_UPSTREAM_CODES:
+        domain_shared = _optional_str(status, "shared_root_cause")
+        if domain_shared in _GITHUB_UPSTREAM_CODES:
             shared_for_domain = domain_shared
         elif shared_reason and (
             str(status.get("code") or "") in _GITHUB_UPSTREAM_CODES
@@ -465,23 +571,17 @@ def _load_expected_coverage(
         else:
             shared_for_domain = None
         reason = status.get("reason_code")
+        reset_at = _optional_str(status, "rate_limit_reset_at")
+        if reset_at is None:
+            reset_at = _optional_str(shared_upstream, "rate_limit_reset_at")
         errors[domain] = _artifact_status_error(
             domain,
             code=str(status.get("code") or "artifact_sync_status_unavailable"),
             error_type=str(status.get("error_type") or "RuntimeError"),
             reason_code=str(reason) if reason is not None else None,
             shared_root_cause=shared_for_domain,
-            http_status=status.get("http_status")
-            if isinstance(status.get("http_status"), int)
-            else None,
-            rate_limit_reset_at=str(status["rate_limit_reset_at"])
-            if isinstance(status.get("rate_limit_reset_at"), str)
-            else (
-                str(shared_upstream.get("rate_limit_reset_at"))
-                if isinstance(shared_upstream, dict)
-                and isinstance(shared_upstream.get("rate_limit_reset_at"), str)
-                else None
-            ),
+            http_status=_optional_int(status, "http_status"),
+            rate_limit_reset_at=reset_at,
         )
     return expected_profiles, source_revisions, str(payload["as_of"]), errors, not_configured
 
@@ -715,23 +815,20 @@ def _load_delivery_payload(root: Path) -> dict[str, Any]:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise OSError("alert_state_unreadable") from exc
-    if not isinstance(payload, dict):
-        raise OSError("alert_state_malformed")
+    payload = _require_dict(payload, "alert_state_malformed")
     deliveries = payload.get("deliveries", {})
     if deliveries is None:
         deliveries = {}
-    if not isinstance(deliveries, dict):
-        raise OSError("alert_state_malformed")
+    deliveries = _require_dict(deliveries, "alert_state_malformed")
     normalized: dict[str, dict[str, dict[str, Any]]] = {}
     for event_id, targets in deliveries.items():
-        if not isinstance(event_id, str) or _EVENT_ID_RE.fullmatch(event_id) is None:
+        if not _is_hex64(event_id):
             raise OSError("alert_state_malformed")
-        if not isinstance(targets, dict):
-            raise OSError("alert_state_malformed")
+        targets = _require_dict(targets, "alert_state_malformed")
         event_targets: dict[str, dict[str, Any]] = {}
         for target_hash, record in targets.items():
             parsed = _delivery_record(record)
-            if not isinstance(target_hash, str) or _EVENT_ID_RE.fullmatch(target_hash) is None or parsed is None:
+            if not _is_hex64(target_hash) or parsed is None:
                 raise OSError("alert_state_malformed")
             event_targets[target_hash] = parsed
         normalized[event_id] = event_targets
@@ -777,7 +874,7 @@ def _health_event_ids(payload: dict[str, Any]) -> list[str]:
         return []
     event_ids: list[str] = []
     for item in raw:
-        if isinstance(item, str) and _EVENT_ID_RE.fullmatch(item) and item not in event_ids:
+        if _is_hex64(item) and item not in event_ids:
             event_ids.append(item)
     return event_ids
 
@@ -932,7 +1029,7 @@ def deliver_telegram_targets(
     if not isinstance(root, Path) or not root.is_dir():
         result["errors"].append("alert_state_root_unavailable")
         return result
-    if not isinstance(event_id, str) or _EVENT_ID_RE.fullmatch(event_id) is None:
+    if not _is_hex64(event_id):
         result["errors"].append("alert_state_malformed")
         return result
     ordered: list[str] = []
@@ -1056,13 +1153,9 @@ def _load_operational_diagnosis_state(root: Path) -> dict[str, Any]:
         return {}
     except (OSError, json.JSONDecodeError) as exc:
         raise OSError("operational diagnosis state is unavailable") from exc
-    if not isinstance(payload, dict):
-        raise OSError("operational diagnosis state is unavailable")
+    payload = _require_dict(payload, "operational diagnosis state is unavailable")
     attempts = payload.get("operational_diagnosis_attempts", [])
-    if not isinstance(attempts, list) or any(
-        not isinstance(item, str) or not re.fullmatch(r"[0-9a-f]{64}", item)
-        for item in attempts
-    ):
+    if not isinstance(attempts, list) or any(not _is_hex64(item) for item in attempts):
         raise OSError("operational diagnosis state is unavailable")
     attempt_date = payload.get("operational_diagnosis_last_attempt_date")
     if attempt_date is not None:
@@ -1195,6 +1288,393 @@ def _rehearsal_creation(value):
     return safe
 
 
+class _RehearsalPaths:
+    __slots__ = ("intent", "binding", "submitted", "claimed", "cancel", "verified")
+
+    def __init__(
+        self,
+        *,
+        intent: Path,
+        binding: Path,
+        submitted: Path,
+        claimed: Path,
+        cancel: Path,
+        verified: Path,
+    ) -> None:
+        self.intent = intent
+        self.binding = binding
+        self.submitted = submitted
+        self.claimed = claimed
+        self.cancel = cancel
+        self.verified = verified
+
+    @classmethod
+    def from_receipt(cls, path: Path) -> _RehearsalPaths:
+        raw = str(path)
+        return cls(
+            intent=path,
+            binding=Path(raw + ".binding"),
+            submitted=Path(raw + ".submitted"),
+            claimed=Path(raw + ".claimed"),
+            cancel=Path(raw + ".cancel"),
+            verified=Path(raw + ".verified"),
+        )
+
+
+class _RehearsalState:
+    __slots__ = ("subscription_id", "result", "keep_subscription", "expires", "creation", "verified")
+
+    def __init__(
+        self,
+        *,
+        subscription_id: str,
+        result: dict[str, Any],
+        keep_subscription: bool = False,
+        expires: datetime | None = None,
+        creation: Mapping[str, Any] | None = None,
+        verified: dict[str, Any] | None = None,
+    ) -> None:
+        self.subscription_id = subscription_id
+        self.result = result
+        self.keep_subscription = keep_subscription
+        self.expires = expires
+        self.creation = creation
+        self.verified = verified
+
+
+def _read_bound_receipt(receipt: Path, binding: Mapping[str, Any], contract_error: type[Exception]) -> dict[str, Any]:
+    if receipt.is_symlink():
+        raise contract_error("receipt must not be a symbolic link")
+    value = json.loads(receipt.read_text())
+    if any(value.get(key) != expected for key, expected in binding.items()):
+        raise contract_error("receipt binds a different operation")
+    return value
+
+
+def _check_rehearsal_subscription(state: Mapping[str, Any], creation: Mapping[str, Any], contract_error: type[Exception]) -> None:
+    if (state.get("created_at") != creation["created_at"]
+            or state.get("expires_at") != creation["expires_at"]):
+        raise contract_error("subscription readback is not this creation")
+
+
+def _check_rehearsal_record(
+    record: Mapping[str, Any],
+    task_id: str,
+    task: Any,
+    binding: Mapping[str, Any],
+    claimed_path: Path,
+    *,
+    expected_worker: str,
+    expected_attempt: str,
+    write_private: Callable[..., Any],
+    digest: Callable[[Any], str],
+    contract_error: type[Exception],
+) -> Mapping[str, Any]:
+    if (record.get("id") != task_id or record.get("owner") != task.spec["project"]
+            or record.get("provider") != "dot" or type(record.get("revision")) is not int
+            or record["revision"] != 1
+            or not {"worker", "attempt"} <= record.keys()
+            or digest(record.get("request")) != digest(task.request)):
+        raise contract_error("task readback mismatch")
+    seen = _read_bound_receipt(claimed_path, binding, contract_error) if claimed_path.exists() else None
+    identity = {
+        "task_id": task_id, "worker": record.get("worker"),
+        "attempt": record.get("attempt"), "revision": record["revision"],
+    }
+    if seen is not None and any(seen.get(key) != value for key, value in identity.items()):
+        raise contract_error("observed claim identity regressed")
+    if (record.get("attempt"), record.get("worker")) == (None, None):
+        if record["status"] not in {
+            "queued", "submitting", "running", "outcome_unknown",
+            "cancel_requested", "cancelled", "failed",
+        }:
+            raise contract_error("terminal output requires an actual claim")
+    elif (record.get("attempt"), record.get("worker")) != (expected_attempt, expected_worker):
+        raise contract_error("incomplete or wrong claim identity")
+    elif seen is None:
+        # Persist observed identity before accepting any later cancellation.
+        write_private(claimed_path, {"status": "observed", **binding, **identity})
+    return record
+
+
+def _prepare_rehearsal_context(
+    *,
+    instance: Any,
+    occurrence: Any,
+    submitted_at: Any,
+    receipt_path: Any,
+    subscription_id: str,
+    expected_worker: str,
+    expected_attempt: str,
+    subscription_creation: Any,
+    load_instance: Callable[[Any], dict[str, Any]],
+    prepare: Callable[..., Any],
+    digest: Callable[[Any], str],
+    contract_error: type[Exception],
+) -> tuple[Any, dict[str, Any], dict[str, Any], datetime, datetime, _RehearsalPaths]:
+    loaded = load_instance(instance)
+    if (loaded["project"] != _OPERATIONAL_DIAGNOSIS_SOURCE_REPOSITORY
+            or loaded["template"] != "protocol_probe"
+            or loaded["inputs"]["data_classification"] != "synthetic"
+            or loaded["inputs"]["fields"].get("ttl_seconds") != 600
+            or len(loaded["stages"]) != 1
+            or loaded["stages"][0]["limits"]["timeout_seconds"] != 600):
+        raise contract_error("Q04 requires its fixed project, synthetic probe and 600s limits")
+    task = prepare(
+        loaded,
+        {"schema_version": "synthetic.protocol-input.v1", "series": [100, 102, 99, 105], "no_order": True},
+        occurrence=occurrence,
+        submitted_at=submitted_at,
+    )
+    # This is evidence from the in-process subscription creation boundary,
+    # not authentication of a native subscription or proof of live acceptance.
+    creation = _rehearsal_creation(subscription_creation)
+    request, response = creation["request"], creation["response"]
+    if (creation["kind"] != "offline.fixture" or creation["worker"] != expected_worker
+            or creation["provider"] != "dot" or request["name"] != "task.requested"
+            or request["arguments"] != {"project": task.spec["project"]}
+            or type(request.get("ttlMs")) is not int or request["ttlMs"] != 600000
+            or request["delivery"]["mode"] != "webhook"
+            or response["id"] != subscription_id
+            or subscription_id != "sub_" + digest([
+                expected_worker, request["delivery"]["url"], "task.requested", request["arguments"]])
+            or response["refreshBefore"] != creation["expires_at"]):
+        raise contract_error("Q04 subscription creation evidence mismatch")
+    expires = datetime.fromisoformat(creation["expires_at"].replace("Z", "+00:00"))
+    created = datetime.fromisoformat(creation["created_at"].replace("Z", "+00:00"))
+    if not 0 < (expires - created).total_seconds() <= 600:
+        raise contract_error("Q04 subscription creation lifetime mismatch")
+    binding = {
+        "operation_key": task.spec["operation_key"],
+        "request_sha256": digest(task.request),
+        "project": task.spec["project"],
+        "provider": "dot",
+        "subscription_id": subscription_id,
+        "expected_worker": expected_worker,
+        "expected_attempt": expected_attempt,
+        "subscription_creation": creation,
+        "subscription_creation_sha256": digest(creation),
+    }
+    deadline = datetime.fromisoformat(task.spec["deadline"].replace("Z", "+00:00"))
+    return task, creation, binding, deadline, expires, _RehearsalPaths.from_receipt(Path(receipt_path))
+
+
+def _resolve_rehearsal_binding(
+    paths: _RehearsalPaths,
+    binding: Mapping[str, Any],
+    state: _RehearsalState,
+    *,
+    write_private: Callable[..., Any],
+    digest: Callable[[Any], str],
+    contract_error: type[Exception],
+) -> bool:
+    # The immutable companion is complete/fsynced before any intent or submit.
+    # Its existence never authorizes another submit, even if intent is lost.
+    state.result = {"status": "deferred", "reason": "submit_outcome_unknown", "binding_unknown": True}
+    state.keep_subscription = True
+    fresh_binding = False
+    try:
+        if not paths.binding.exists() and (paths.intent.exists() or paths.submitted.exists()):
+            raise contract_error("existing receipt has no immutable original binding")
+        write_private(paths.binding, {"binding": binding, "binding_sha256": digest(binding)})
+        fresh_binding = True
+    except FileExistsError:
+        pass
+    if paths.binding.is_symlink():
+        raise contract_error("binding receipt must not be a symbolic link")
+    envelope = json.loads(paths.binding.read_text())
+    original = {key: envelope["binding"][key] for key in binding}
+    original["subscription_creation"] = _rehearsal_creation(original["subscription_creation"])
+    if (any(not isinstance(value, str) for key, value in original.items() if key != "subscription_creation")
+            or digest(original) != envelope["binding_sha256"]
+            or original["project"] != _OPERATIONAL_DIAGNOSIS_SOURCE_REPOSITORY
+            or original["provider"] != "dot"):
+        raise contract_error("immutable binding receipt is incomplete or inconsistent")
+    state.result = {"status": "deferred", "reason": "submit_outcome_unknown", **original}
+    # Cleanup must keep using the persisted original scope after mismatched input.
+    state.subscription_id = original["subscription_id"]
+    state.creation = original["subscription_creation"]
+    state.expires = datetime.fromisoformat(state.creation["expires_at"].replace("Z", "+00:00"))
+    if original != binding:
+        raise contract_error("current inputs do not match the immutable original binding")
+    fresh = False
+    if fresh_binding:
+        try:
+            write_private(paths.intent, {"status": "intent", **binding})
+            fresh = True
+        except FileExistsError:
+            _read_bound_receipt(paths.intent, binding, contract_error)
+    else:
+        _read_bound_receipt(paths.intent, binding, contract_error)
+    if fresh:
+        state.keep_subscription = False  # Complete fresh intent; no submit attempted.
+    return fresh
+
+
+def _submit_rehearsal_task(
+    client: Any,
+    task: Any,
+    binding: Mapping[str, Any],
+    paths: _RehearsalPaths,
+    state: _RehearsalState,
+    sub_state: Mapping[str, Any],
+    *,
+    deadline: datetime,
+    cancel: bool,
+    end: bool,
+    expected_worker: str,
+    expected_attempt: str,
+    write_private: Callable[..., Any],
+    digest: Callable[[Any], str],
+    submit: Callable[..., Any],
+    contract_error: type[Exception],
+) -> None:
+    if cancel or end or datetime.now(timezone.utc) >= deadline:
+        raise contract_error("Q04 submission cancelled or expired")
+    if sub_state["status"] != "active" or state.expires is None or datetime.now(timezone.utc) >= state.expires:
+        raise contract_error("Q04 requires its still-active subscription")
+    state.result = {"status": "deferred", "reason": "submit_outcome_unknown", **binding}
+    state.keep_subscription = True
+    record = submit(client, task)
+    task_id = record.get("id")
+    if not _is_nonempty_str(task_id):
+        raise contract_error("task identity required")
+    _check_rehearsal_record(
+        record, task_id, task, binding, paths.claimed,
+        expected_worker=expected_worker, expected_attempt=expected_attempt,
+        write_private=write_private, digest=digest, contract_error=contract_error,
+    )
+    write_private(paths.submitted, {"status": record["status"], "task_id": task_id, **binding})
+
+
+def _reconcile_submitted_rehearsal(
+    client: Any,
+    task: Any,
+    binding: Mapping[str, Any],
+    paths: _RehearsalPaths,
+    state: _RehearsalState,
+    *,
+    deadline: datetime,
+    cancel: bool,
+    end: bool,
+    expected_worker: str,
+    expected_attempt: str,
+    write_private: Callable[..., Any],
+    digest: Callable[[Any], str],
+    verify: Callable[..., dict[str, Any]],
+    contract_error: type[Exception],
+) -> None:
+    # Do not replace submit uncertainty until this whole sidecar is usable.
+    task_id = _read_bound_receipt(paths.submitted, binding, contract_error)["task_id"]
+    if not _is_nonempty_str(task_id):
+        raise contract_error("task identity required")
+    if state.expires is None:
+        raise contract_error("subscription expiry required")
+    cancelling = (cancel or end or paths.cancel.exists()
+                  or datetime.now(timezone.utc) >= min(deadline, state.expires))
+    state.result = {
+        "status": "deferred" if cancelling else "unavailable",
+        "reason": "cancellation_unconfirmed" if cancelling else "synthetic_readback_rejected",
+        "task_id": task_id,
+        **binding,
+    }
+    record = _check_rehearsal_record(
+        client.get(task_id), task_id, task, binding, paths.claimed,
+        expected_worker=expected_worker, expected_attempt=expected_attempt,
+        write_private=write_private, digest=digest, contract_error=contract_error,
+    )
+    state.result.update({key: record[key] for key in ("worker", "attempt", "revision")})
+    terminal = {"completed", "failed", "invalid_output", "cancelled"}
+    state.keep_subscription = record["status"] not in terminal
+    if cancelling:
+        if state.keep_subscription:
+            try:
+                write_private(paths.cancel, {"status": "intent", "task_id": task_id, **binding})
+            except FileExistsError:
+                if _read_bound_receipt(paths.cancel, binding, contract_error)["task_id"] != task_id:
+                    raise contract_error("cancel identity mismatch")
+            else:
+                _check_rehearsal_record(
+                    client.cancel(task_id), task_id, task, binding, paths.claimed,
+                    expected_worker=expected_worker, expected_attempt=expected_attempt,
+                    write_private=write_private, digest=digest, contract_error=contract_error,
+                )
+            record = _check_rehearsal_record(
+                client.get(task_id), task_id, task, binding, paths.claimed,
+                expected_worker=expected_worker, expected_attempt=expected_attempt,
+                write_private=write_private, digest=digest, contract_error=contract_error,
+            )
+            state.result.update({key: record[key] for key in ("worker", "attempt", "revision")})
+            state.keep_subscription = record["status"] not in terminal
+        if record["status"] == "cancelled":
+            state.result["status"], state.result["reason"] = "cancelled", "cancellation_confirmed"
+    elif state.keep_subscription:
+        state.result.update(
+            status="deferred",
+            reason=("ai_outcome_unknown" if record["status"] == "outcome_unknown" else "ai_task_pending"),
+        )
+    else:
+        state.verified = {
+            **binding,
+            **verify(task, record, task_id=task_id, provider="dot"),
+            "worker": record["worker"],
+        }
+
+
+def _cleanup_rehearsal_subscription(
+    event_client: Any,
+    state: _RehearsalState,
+    *,
+    end: bool,
+    contract_error: type[Exception],
+) -> None:
+    try:
+        sub_state = _rehearsal_subscription(event_client, state.subscription_id, "get_event_subscription")
+        retain = (state.keep_subscription and not end and state.expires is not None
+                  and datetime.now(timezone.utc) < state.expires)
+        if retain and sub_state["status"] == "active":
+            if state.creation is None:
+                raise contract_error("subscription creation evidence missing")
+            _check_rehearsal_subscription(sub_state, state.creation, contract_error)
+            state.result["cleanup"] = "retained"
+            return
+        if sub_state["status"] != "gone":
+            _rehearsal_subscription(event_client, state.subscription_id, "delete_event_subscription")
+        sub_state = _rehearsal_subscription(event_client, state.subscription_id, "get_event_subscription")
+        if sub_state["status"] != "gone":
+            raise contract_error("subscription cleanup is unconfirmed")
+        state.result["cleanup"] = "gone"
+        if retain:
+            state.result["subscription_status"] = "gone"
+    except Exception:
+        state.verified = None
+        state.result.update(cleanup="unknown", cleanup_reason="subscription_cleanup_unconfirmed")
+        if state.result.get("reason") != "submit_outcome_unknown":
+            state.result.update(status="unavailable", reason="subscription_cleanup_unconfirmed")
+
+
+def _finalize_rehearsal_result(
+    paths: _RehearsalPaths | None,
+    state: _RehearsalState,
+    binding: Mapping[str, Any] | None,
+    *,
+    write_private: Callable[..., Any],
+    contract_error: type[Exception],
+) -> dict[str, Any]:
+    if state.verified is None or paths is None or binding is None:
+        return state.result
+    state.verified["cleanup"] = "gone"
+    try:
+        try:
+            write_private(paths.verified, state.verified)
+        except FileExistsError:
+            if _read_bound_receipt(paths.verified, binding, contract_error) != state.verified:
+                raise contract_error("verified receipt mismatch")
+        return state.verified
+    except Exception:
+        return {**state.result, "status": "unavailable", "reason": "verified_receipt_unavailable"}
+
+
 def run_historical_diagnosis_rehearsal(
     *, instance=None, occurrence=None, submitted_at=None, receipt_path=None,
     client=None, event_client=None, subscription_id=None, cancel=False,
@@ -1209,7 +1689,7 @@ def run_historical_diagnosis_rehearsal(
     if any(value is None for value in (
         instance, occurrence, submitted_at, receipt_path, client, event_client,
         subscription_creation,
-    )) or any(not isinstance(value, str) or not value for value in (
+    )) or any(not _is_nonempty_str(value) for value in (
         subscription_id, expected_worker, expected_attempt,
     )):
         return {"status": "deferred", "reason": "explicit_synthetic_context_required"}
@@ -1218,218 +1698,54 @@ def run_historical_diagnosis_rehearsal(
     from ai_service.scenarios.pilot import digest, prepare, submit, verify
     from ai_service.scenarios.pilot_cli import write_private
 
-    result = {"status": "unavailable", "reason": "synthetic_operation_rejected"}
-    verified = None
-    keep_subscription = False
-    expires = None
+    state = _RehearsalState(
+        subscription_id=subscription_id,
+        result={"status": "unavailable", "reason": "synthetic_operation_rejected"},
+    )
+    paths: _RehearsalPaths | None = None
+    binding: dict[str, Any] | None = None
     try:
-        instance = load_instance(instance)
-        if (instance["project"] != _OPERATIONAL_DIAGNOSIS_SOURCE_REPOSITORY
-                or instance["template"] != "protocol_probe"
-                or instance["inputs"]["data_classification"] != "synthetic"
-                or instance["inputs"]["fields"].get("ttl_seconds") != 600
-                or len(instance["stages"]) != 1
-                or instance["stages"][0]["limits"]["timeout_seconds"] != 600):
-            raise ContractError("Q04 requires its fixed project, synthetic probe and 600s limits")
-        task = prepare(instance, {"schema_version": "synthetic.protocol-input.v1",
-                                 "series": [100, 102, 99, 105], "no_order": True},
-                       occurrence=occurrence, submitted_at=submitted_at)
-        # This is evidence from the in-process subscription creation boundary,
-        # not authentication of a native subscription or proof of live acceptance.
-        creation = _rehearsal_creation(subscription_creation)
-        request, response = creation["request"], creation["response"]
-        if (creation["kind"] != "offline.fixture" or creation["worker"] != expected_worker
-                or creation["provider"] != "dot" or request["name"] != "task.requested"
-                or request["arguments"] != {"project": task.spec["project"]}
-                or type(request.get("ttlMs")) is not int or request["ttlMs"] != 600000
-                or request["delivery"]["mode"] != "webhook"
-                or response["id"] != subscription_id
-                or subscription_id != "sub_" + digest([
-                    expected_worker, request["delivery"]["url"], "task.requested", request["arguments"]])
-                or response["refreshBefore"] != creation["expires_at"]):
-            raise ContractError("Q04 subscription creation evidence mismatch")
-        expires = datetime.fromisoformat(creation["expires_at"].replace("Z", "+00:00"))
-        created = datetime.fromisoformat(creation["created_at"].replace("Z", "+00:00"))
-        if not 0 < (expires - created).total_seconds() <= 600:
-            raise ContractError("Q04 subscription creation lifetime mismatch")
-        path = Path(receipt_path)
-        binding = {"operation_key": task.spec["operation_key"],
-                   "request_sha256": digest(task.request), "project": task.spec["project"],
-                   "provider": "dot", "subscription_id": subscription_id,
-                   "expected_worker": expected_worker, "expected_attempt": expected_attempt,
-                   "subscription_creation": creation, "subscription_creation_sha256": digest(creation)}
-
-        def read_bound(receipt):
-            if receipt.is_symlink():
-                raise ContractError("receipt must not be a symbolic link")
-            value = json.loads(receipt.read_text())
-            if any(value.get(key) != expected for key, expected in binding.items()):
-                raise ContractError("receipt binds a different operation")
-            return value
-
-        claimed_path = Path(str(path) + ".claimed")
-
-        def check_record(record, task_id):
-            if (record.get("id") != task_id or record.get("owner") != task.spec["project"]
-                    or record.get("provider") != "dot" or type(record.get("revision")) is not int
-                    or record["revision"] != 1
-                    or not {"worker", "attempt"} <= record.keys()
-                    or digest(record.get("request")) != digest(task.request)):
-                raise ContractError("task readback mismatch")
-            seen = read_bound(claimed_path) if claimed_path.exists() else None
-            identity = {"task_id": task_id, "worker": record.get("worker"),
-                        "attempt": record.get("attempt"), "revision": record["revision"]}
-            if seen is not None and any(seen.get(key) != value for key, value in identity.items()):
-                raise ContractError("observed claim identity regressed")
-            if (record.get("attempt"), record.get("worker")) == (None, None):
-                if record["status"] not in {"queued", "submitting", "running", "outcome_unknown",
-                                             "cancel_requested", "cancelled", "failed"}:
-                    raise ContractError("terminal output requires an actual claim")
-            elif (record.get("attempt"), record.get("worker")) != (expected_attempt, expected_worker):
-                raise ContractError("incomplete or wrong claim identity")
-            elif seen is None:
-                # Persist observed identity before accepting any later cancellation.
-                write_private(claimed_path, {"status": "observed", **binding, **identity})
-            return record
-
-        def get_bound(task_id):
-            return check_record(client.get(task_id), task_id)
-
-        def check_subscription(state):
-            if (state.get("created_at") != creation["created_at"]
-                    or state.get("expires_at") != creation["expires_at"]):
-                raise ContractError("subscription readback is not this creation")
-
-        submitted = Path(str(path) + ".submitted")
-        binding_path = Path(str(path) + ".binding")
-        cancel_path = Path(str(path) + ".cancel")
-        deadline = datetime.fromisoformat(task.spec["deadline"].replace("Z", "+00:00"))
-        # The immutable companion is complete/fsynced before any intent or submit.
-        # Its existence never authorizes another submit, even if intent is lost.
-        result = {"status": "deferred", "reason": "submit_outcome_unknown", "binding_unknown": True}
-        keep_subscription = True
-        fresh_binding = False
-        try:
-            if not binding_path.exists() and (path.exists() or submitted.exists()):
-                raise ContractError("existing receipt has no immutable original binding")
-            write_private(binding_path, {"binding": binding, "binding_sha256": digest(binding)})
-            fresh_binding = True
-        except FileExistsError:
-            pass
-        if binding_path.is_symlink():
-            raise ContractError("binding receipt must not be a symbolic link")
-        envelope = json.loads(binding_path.read_text())
-        original = {key: envelope["binding"][key] for key in binding}
-        original["subscription_creation"] = _rehearsal_creation(original["subscription_creation"])
-        if (any(not isinstance(value, str) for key, value in original.items() if key != "subscription_creation")
-                or digest(original) != envelope["binding_sha256"]
-                or original["project"] != _OPERATIONAL_DIAGNOSIS_SOURCE_REPOSITORY
-                or original["provider"] != "dot"):
-            raise ContractError("immutable binding receipt is incomplete or inconsistent")
-        result = {"status": "deferred", "reason": "submit_outcome_unknown", **original}
-        # Cleanup must keep using the persisted original scope after mismatched input.
-        subscription_id, creation = original["subscription_id"], original["subscription_creation"]
-        expires = datetime.fromisoformat(creation["expires_at"].replace("Z", "+00:00"))
-        if original != binding:
-            raise ContractError("current inputs do not match the immutable original binding")
-        fresh = False
-        if fresh_binding:
-            try:
-                write_private(path, {"status": "intent", **binding})
-                fresh = True
-            except FileExistsError:
-                read_bound(path)
-        else:
-            read_bound(path)
+        task, creation, binding, deadline, expires, paths = _prepare_rehearsal_context(
+            instance=instance, occurrence=occurrence, submitted_at=submitted_at,
+            receipt_path=receipt_path, subscription_id=subscription_id,
+            expected_worker=expected_worker, expected_attempt=expected_attempt,
+            subscription_creation=subscription_creation, load_instance=load_instance,
+            prepare=prepare, digest=digest, contract_error=ContractError,
+        )
+        state.creation = creation
+        state.expires = expires
+        fresh = _resolve_rehearsal_binding(
+            paths, binding, state, write_private=write_private, digest=digest,
+            contract_error=ContractError,
+        )
+        sub_state = _rehearsal_subscription(event_client, state.subscription_id, "get_event_subscription")
+        if state.creation is None:
+            raise ContractError("subscription creation evidence missing")
+        _check_rehearsal_subscription(sub_state, state.creation, ContractError)
         if fresh:
-            keep_subscription = False  # Complete fresh intent; no submit attempted.
-        state = _rehearsal_subscription(event_client, subscription_id, "get_event_subscription")
-        check_subscription(state)
-        if fresh:
-            if cancel or end or datetime.now(timezone.utc) >= deadline:
-                raise ContractError("Q04 submission cancelled or expired")
-            if state["status"] != "active" or datetime.now(timezone.utc) >= expires:
-                raise ContractError("Q04 requires its still-active subscription")
-            result = {"status": "deferred", "reason": "submit_outcome_unknown", **binding}
-            keep_subscription = True
-            record = submit(client, task)
-            task_id = record.get("id")
-            if not isinstance(task_id, str) or not task_id:
-                raise ContractError("task identity required")
-            check_record(record, task_id)
-            write_private(submitted, {"status": record["status"], "task_id": task_id, **binding})
-        if submitted.exists():
-            # Do not replace submit uncertainty until this whole sidecar is usable.
-            task_id = read_bound(submitted)["task_id"]
-            if not isinstance(task_id, str) or not task_id:
-                raise ContractError("task identity required")
-            cancelling = (cancel or end or cancel_path.exists()
-                          or datetime.now(timezone.utc) >= min(deadline, expires))
-            result = {"status": "deferred" if cancelling else "unavailable",
-                      "reason": "cancellation_unconfirmed" if cancelling else "synthetic_readback_rejected",
-                      "task_id": task_id, **binding}
-            record = get_bound(task_id)
-            actual = {key: record[key] for key in ("worker", "attempt", "revision")}
-            result.update(actual)
-            terminal = {"completed", "failed", "invalid_output", "cancelled"}
-            keep_subscription = record["status"] not in terminal
-            if cancelling:
-                if keep_subscription:
-                    try:
-                        write_private(cancel_path, {"status": "intent", "task_id": task_id, **binding})
-                    except FileExistsError:
-                        if read_bound(cancel_path)["task_id"] != task_id:
-                            raise ContractError("cancel identity mismatch")
-                    else:
-                        check_record(client.cancel(task_id), task_id)
-                    record = get_bound(task_id)
-                    result.update({key: record[key] for key in ("worker", "attempt", "revision")})
-                    keep_subscription = record["status"] not in terminal
-                if record["status"] == "cancelled":
-                    result["status"], result["reason"] = "cancelled", "cancellation_confirmed"
-            elif keep_subscription:
-                result.update(status="deferred", reason=("ai_outcome_unknown" if record["status"] == "outcome_unknown"
-                                                        else "ai_task_pending"))
-            else:
-                verified = {**binding, **verify(task, record, task_id=task_id, provider="dot"),
-                            "worker": record["worker"]}
+            _submit_rehearsal_task(
+                client, task, binding, paths, state, sub_state,
+                deadline=deadline, cancel=cancel, end=end,
+                expected_worker=expected_worker, expected_attempt=expected_attempt,
+                write_private=write_private, digest=digest, submit=submit,
+                contract_error=ContractError,
+            )
+        if paths.submitted.exists():
+            _reconcile_submitted_rehearsal(
+                client, task, binding, paths, state,
+                deadline=deadline, cancel=cancel, end=end,
+                expected_worker=expected_worker, expected_attempt=expected_attempt,
+                write_private=write_private, digest=digest, verify=verify,
+                contract_error=ContractError,
+            )
     except Exception:
         # Preserve uncertainty and its original binding; never echo transport errors.
         pass
     finally:
-        try:
-            state = _rehearsal_subscription(event_client, subscription_id, "get_event_subscription")
-            retain = keep_subscription and not end and expires is not None and datetime.now(timezone.utc) < expires
-            if retain and state["status"] == "active":
-                check_subscription(state)
-                result["cleanup"] = "retained"
-            else:
-                if state["status"] != "gone":
-                    _rehearsal_subscription(event_client, subscription_id, "delete_event_subscription")
-                state = _rehearsal_subscription(event_client, subscription_id, "get_event_subscription")
-                if state["status"] != "gone":
-                    raise ContractError("subscription cleanup is unconfirmed")
-                result["cleanup"] = "gone"
-                if retain:
-                    result["subscription_status"] = "gone"
-        except Exception:
-            verified = None
-            result.update(cleanup="unknown", cleanup_reason="subscription_cleanup_unconfirmed")
-            if result.get("reason") != "submit_outcome_unknown":
-                result.update(status="unavailable", reason="subscription_cleanup_unconfirmed")
-    if verified is not None:
-        verified["cleanup"] = "gone"
-        try:
-            verified_path = Path(str(path) + ".verified")
-            try:
-                write_private(verified_path, verified)
-            except FileExistsError:
-                if read_bound(verified_path) != verified:
-                    raise ContractError("verified receipt mismatch")
-            return verified
-        except Exception:
-            return {**result, "status": "unavailable", "reason": "verified_receipt_unavailable"}
-    return result
+        _cleanup_rehearsal_subscription(event_client, state, end=end, contract_error=ContractError)
+    return _finalize_rehearsal_result(
+        paths, state, binding, write_private=write_private, contract_error=ContractError,
+    )
 
 
 def _diagnosis_binding():
@@ -1459,12 +1775,10 @@ def _diagnosis_native_client(binding, factory):
             or binding["schema_version"] != "quant.monitor-diagnosis-native.v1"
             or binding["project"] != _OPERATIONAL_DIAGNOSIS_SOURCE_REPOSITORY
             or binding["mode"] not in {"agent", "api"}
-            or any(not isinstance(binding[key], str) or not 1 <= len(binding[key]) <= 200
-                   or any(char.isspace() for char in binding[key])
+            or any(not _is_bounded_str(binding[key], no_space=True)
                    for key in ("resource", "audience", "provider", "profile", "model"))
             or len(binding["profile"]) > 100 or ":" in binding["profile"]
-            or (binding["mode"] == "agent" and (
-                not isinstance(binding["worker"], str) or not 1 <= len(binding["worker"]) <= 200))
+            or (binding["mode"] == "agent" and not _is_bounded_str(binding["worker"]))
             or (binding["mode"] == "api" and binding["worker"] is not None)):
         raise ValueError("native binding required")
     if factory is None and not (
@@ -1505,6 +1819,262 @@ def _save_native_diagnosis(root, state):
         os.close(directory)
 
 
+class _DiagnosisSession:
+    __slots__ = ("root", "binding", "client", "now", "stage")
+
+    def __init__(
+        self,
+        *,
+        root: Path,
+        binding: dict[str, Any],
+        client: Any,
+        now: Callable[[], float],
+        stage: str = "diagnosis_state_processing",
+    ) -> None:
+        self.root = root
+        self.binding = binding
+        self.client = client
+        self.now = now
+        self.stage = stage
+
+
+def _diagnosis_unavailable() -> dict[str, Any]:
+    return {
+        "status": "unavailable",
+        "reason": "ai_result_unavailable",
+        "failure_stage": "diagnosis_result_processing",
+        "failure_category": "result_unavailable",
+    }
+
+
+def _stop_operational_diagnosis(
+    session: _DiagnosisSession,
+    state: dict[str, Any],
+    saved: dict[str, Any],
+) -> dict[str, Any]:
+    saved["phase"] = "halt"
+    if saved["task_id"] and not saved["cancel_sent"]:
+        saved["cancel_sent"] = True
+        _save_native_diagnosis(session.root, state)
+        try:
+            session.client.cancel(saved["task_id"])
+        except Exception:
+            pass  # cancel may have committed; never repeat it automatically.
+    else:
+        _save_native_diagnosis(session.root, state)
+    return {"status": "unavailable", "reason": "ai_task_stop_requested"}
+
+
+def _halt_operational_diagnosis(
+    session: _DiagnosisSession,
+    state: dict[str, Any],
+    saved: dict[str, Any],
+) -> dict[str, Any]:
+    saved["phase"] = "halt"
+    _save_native_diagnosis(session.root, state)
+    return _diagnosis_unavailable()
+
+
+def _is_valid_saved_diagnosis(
+    saved: Any,
+    binding: Mapping[str, Any],
+    data_errors: list[dict[str, str]],
+) -> bool:
+    expected_keys = {
+        "binding", "request", "request_sha256", "deadline", "task_id", "task_deadline",
+        "claim", "output_sha256", "cancel_sent", "phase", "errors", "observation",
+    }
+    if not isinstance(saved, dict) or set(saved) != expected_keys:
+        return False
+    return (
+        saved["binding"] == binding
+        and saved["request_sha256"] == _diagnosis_digest(saved["request"])
+        and _diagnosis_digest(saved["request"]) == _diagnosis_digest(
+            _diagnosis_request(data_errors, saved["observation"], binding),
+        )
+        and _is_finite_number(saved["deadline"])
+        and type(saved["cancel_sent"]) is bool
+        and saved["phase"] in {"intent", "pending", "completed", "halt"}
+        and (saved["task_id"] is None or _is_bounded_str(saved["task_id"]))
+        and (saved["task_deadline"] is None or _is_finite_number(saved["task_deadline"]))
+    )
+
+
+def _admit_or_resume_diagnosis(
+    session: _DiagnosisSession,
+    state: dict[str, Any],
+    data_errors: list[dict[str, str]],
+    fingerprint: str,
+    observation: dict[str, str] | None,
+    attempt_date: str | None,
+    *,
+    cancel: bool,
+) -> tuple[dict[str, Any] | None, bool, dict[str, Any] | None]:
+    native = _require_dict(state.get("operational_diagnosis_native", {}), "invalid diagnosis state")
+    legacy_pending = _require_dict(state.get("operational_diagnosis_pending", {}), "invalid diagnosis state")
+    saved = native.get(fingerprint)
+    if saved is None:
+        last_date = state.get("operational_diagnosis_last_attempt_date")
+        if attempt_date is not None and last_date is not None and last_date >= attempt_date:
+            return None, False, {"status": "skipped", "reason": "daily_attempt_limit"}
+        if fingerprint in state.get("operational_diagnosis_attempts", []):
+            return None, False, {"status": "skipped", "reason": "already_attempted"}
+        # An old pending ID has no frozen native contract; never adopt or replace it.
+        if legacy_pending.get(fingerprint) is not None or cancel:
+            return None, False, _diagnosis_unavailable()
+        request = _diagnosis_request(data_errors, observation, session.binding)
+        saved = {
+            "binding": session.binding,
+            "request": request,
+            "request_sha256": _diagnosis_digest(request),
+            "deadline": session.now() + 600,
+            "task_id": None,
+            "task_deadline": None,
+            "claim": None,
+            "output_sha256": None,
+            "cancel_sent": False,
+            "phase": "intent",
+            "errors": [{key: error[key] for key in ("domain", "code", "error_type")} for error in data_errors],
+            "observation": observation,
+        }
+        native[fingerprint] = saved
+        attempts = state.setdefault("operational_diagnosis_attempts", [])
+        attempts.append(fingerprint)
+        state["operational_diagnosis_native"] = native
+        if attempt_date is not None:
+            state["operational_diagnosis_last_attempt_date"] = attempt_date
+        state["schema_version"] = "quant_monitor_alert_state.v1"
+        session.stage = "diagnosis_attempt_persistence"
+        _save_native_diagnosis(session.root, state)
+        return saved, True, None
+
+    if not _is_valid_saved_diagnosis(saved, session.binding, data_errors):
+        return None, False, _diagnosis_unavailable()
+    if saved.get("phase") == "completed":
+        reason = (
+            "daily_attempt_limit"
+            if attempt_date and state.get("operational_diagnosis_last_attempt_date", "") >= attempt_date
+            else "already_attempted"
+        )
+        return None, False, {"status": "skipped", "reason": reason}
+    if saved.get("phase") == "halt":
+        return None, False, _diagnosis_unavailable()
+    if saved.get("task_id") is None:
+        return None, False, {"status": "unavailable", "reason": "ai_outcome_unknown"}
+    return saved, False, None
+
+
+def _fetch_diagnosis_record(
+    session: _DiagnosisSession,
+    state: dict[str, Any],
+    saved: dict[str, Any],
+    fingerprint: str,
+    *,
+    fresh: bool,
+    cancel: bool,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    session.stage = "diagnosis_execution"
+    current = session.now()
+    if not _is_finite_number(current):
+        return None, _halt_operational_diagnosis(session, state, saved)
+    if cancel or current >= saved["deadline"] or (
+            saved["task_deadline"] is not None and current >= saved["task_deadline"]):
+        return None, _stop_operational_diagnosis(session, state, saved)
+    try:
+        record = (
+            session.client.submit(saved["request"], "monitor-diagnosis:" + fingerprint)
+            if fresh
+            else session.client.get(saved["task_id"])
+        )
+    except Exception as exc:
+        return None, {
+            "status": "unavailable",
+            "reason": "ai_outcome_unknown",
+            "failure_stage": session.stage,
+            "failure_category": _diagnosis_failure_category(exc),
+        }
+    return record, None
+
+
+def _is_valid_diagnosis_record(
+    record: Any,
+    binding: Mapping[str, Any],
+    saved: Mapping[str, Any],
+) -> bool:
+    if not isinstance(record, dict):
+        return False
+    return (
+        record.get("owner") == binding["project"]
+        and record.get("provider") == binding["provider"]
+        and type(record.get("revision")) is int
+        and record["revision"] == 1
+        and record.get("result_kind") == "advisory"
+        and _diagnosis_digest(record.get("request")) == saved["request_sha256"]
+        and _is_bounded_str(record.get("id"))
+        and (saved["task_id"] is None or saved["task_id"] == record["id"])
+        and _is_finite_number(record.get("deadline"))
+        and (saved["task_deadline"] is None or saved["task_deadline"] == record["deadline"])
+    )
+
+
+def _validated_diagnosis_claim(
+    record: Mapping[str, Any],
+    binding: Mapping[str, Any],
+    saved: Mapping[str, Any],
+) -> list[Any] | None:
+    worker, attempt = record.get("worker"), record.get("attempt")
+    claim = [worker, attempt, record["revision"]]
+    has_identity = worker is not None or attempt is not None
+    if binding["mode"] == "api" and has_identity:
+        return None
+    if binding["mode"] == "agent" and has_identity and (
+        worker != binding["worker"] or not _is_bounded_str(attempt)
+    ):
+        return None
+    if saved["claim"] is not None and saved["claim"] != claim:
+        return None
+    return claim
+
+
+def _evaluate_diagnosis_record(
+    session: _DiagnosisSession,
+    state: dict[str, Any],
+    saved: dict[str, Any],
+    record: Any,
+) -> dict[str, Any]:
+    session.stage = "diagnosis_result_processing"
+    if not _is_valid_diagnosis_record(record, session.binding, saved):
+        return _halt_operational_diagnosis(session, state, saved)
+    saved["task_id"], saved["task_deadline"] = record["id"], record["deadline"]
+    # Save the known task before checking expiry or interpreting its result.
+    _save_native_diagnosis(session.root, state)
+    current = session.now()
+    if not _is_finite_number(current) or current >= min(saved["deadline"], record["deadline"]):
+        return _stop_operational_diagnosis(session, state, saved)
+    claim = _validated_diagnosis_claim(record, session.binding, saved)
+    if claim is None:
+        return _halt_operational_diagnosis(session, state, saved)
+    if record.get("worker") is not None:
+        saved["claim"] = claim
+    status = record.get("status")
+    if status in {"queued", "submitting", "running"}:
+        saved["phase"] = "pending"
+        _save_native_diagnosis(session.root, state)
+        return {"status": "deferred", "reason": "ai_task_pending", "job_id": record["id"]}
+    if status == "completed" and (session.binding["mode"] == "api" or saved["claim"] is not None):
+        from jsonschema import Draft202012Validator
+
+        if Draft202012Validator(saved["request"]["output_schema"]).is_valid(record.get("output")):
+            saved["phase"] = "completed"
+            saved["output_sha256"] = _diagnosis_digest(record["output"])
+            _save_native_diagnosis(session.root, state)
+            current = session.now()
+            if not _is_finite_number(current) or current >= min(saved["deadline"], record["deadline"]):
+                return _stop_operational_diagnosis(session, state, saved)
+            return {"status": "succeeded", "job_id": record["id"]}
+    return _halt_operational_diagnosis(session, state, saved)
+
+
 def _run_operational_diagnosis(
     root: Path,
     data_errors: list[dict[str, str]],
@@ -1523,172 +2093,49 @@ def _run_operational_diagnosis(
     resumption reads only a known, fully bound ID. Cancellation is a request, never
     proof that the worker stopped. Legacy client injection is no longer accepted.
     """
-    import math
-    import time
-
-    def number(value):
-        return type(value) in (int, float) and math.isfinite(value)
-
-    unavailable = {"status": "unavailable", "reason": "ai_result_unavailable",
-                   "failure_stage": "diagnosis_result_processing", "failure_category": "result_unavailable"}
     if not data_errors:
         return {"status": "skipped", "reason": "no_data_errors"}
     if config_loader is None and client_factory is None and not (
         os.environ.get("ACTIONS_ID_TOKEN_REQUEST_URL") and os.environ.get("ACTIONS_ID_TOKEN_REQUEST_TOKEN")
     ):
         return {"status": "skipped", "reason": "no_oidc"}
-    if not isinstance(fingerprint, str) or not re.fullmatch(r"[0-9a-f]{64}", fingerprint):
+    if not _is_hex64(fingerprint):
         return {"status": "rejected", "reason": "invalid_fingerprint"}
-    failure_stage = "diagnosis_state_processing"
+    session = _DiagnosisSession(root=root, binding={}, client=None, now=clock or time.time)
     try:
         # Missing configuration must neither create state nor spend an attempt.
-        state = _load_operational_diagnosis_state(root)
+        _load_operational_diagnosis_state(root)
         try:
             binding = json.loads(json.dumps((config_loader or _diagnosis_binding)(), allow_nan=False))
             client = _diagnosis_native_client(binding, client_factory)
-            now = clock or time.time
-            if not number(now()) or type(cancel) is not bool:
+            if not _is_finite_number(session.now()) or type(cancel) is not bool:
                 raise ValueError("invalid execution limits")
         except (ImportError, OSError, RuntimeError, ValueError, TypeError, KeyError, AttributeError):
             return {"status": "deferred", "reason": "ai_task_service_not_configured"}
+        session.binding = binding
+        session.client = client
         _prepare_operational_diagnosis_root(root)
         with _alert_state_exclusive(root):
             state = _load_operational_diagnosis_state(root)
-            native = state.get("operational_diagnosis_native", {})
-            legacy_pending = state.get("operational_diagnosis_pending", {})
-            if not isinstance(native, dict) or not isinstance(legacy_pending, dict):
-                raise OSError("invalid diagnosis state")
-            saved = native.get(fingerprint)
-            if saved is None:
-                last_date = state.get("operational_diagnosis_last_attempt_date")
-                if attempt_date is not None and last_date is not None and last_date >= attempt_date:
-                    return {"status": "skipped", "reason": "daily_attempt_limit"}
-                if fingerprint in state.get("operational_diagnosis_attempts", []):
-                    return {"status": "skipped", "reason": "already_attempted"}
-                # An old pending ID has no frozen native contract; never adopt or replace it.
-                if legacy_pending.get(fingerprint) is not None:
-                    return unavailable
-                if cancel:
-                    return unavailable
-                request = _diagnosis_request(data_errors, observation, binding)
-                saved = {"binding": binding, "request": request, "request_sha256": _diagnosis_digest(request),
-                         "deadline": now() + 600, "task_id": None, "task_deadline": None,
-                         "claim": None, "output_sha256": None, "cancel_sent": False, "phase": "intent",
-                         "errors": [{key: error[key] for key in ("domain", "code", "error_type")} for error in data_errors],
-                         "observation": observation}
-                native[fingerprint] = saved
-                attempts = state.setdefault("operational_diagnosis_attempts", [])
-                attempts.append(fingerprint)
-                state["operational_diagnosis_native"] = native
-                if attempt_date is not None:
-                    state["operational_diagnosis_last_attempt_date"] = attempt_date
-                state["schema_version"] = "quant_monitor_alert_state.v1"
-                failure_stage = "diagnosis_attempt_persistence"
-                _save_native_diagnosis(root, state)
-                fresh = True
-            else:
-                fresh = False
-                if (not isinstance(saved, dict) or set(saved) != {
-                        "binding", "request", "request_sha256", "deadline", "task_id", "task_deadline",
-                        "claim", "output_sha256", "cancel_sent", "phase", "errors", "observation"}
-                        or saved["binding"] != binding
-                        or saved["request_sha256"] != _diagnosis_digest(saved["request"])
-                        or _diagnosis_digest(saved["request"]) != _diagnosis_digest(
-                            _diagnosis_request(data_errors, saved["observation"], binding))
-                        or not number(saved["deadline"]) or type(saved["cancel_sent"]) is not bool
-                        or saved["phase"] not in {"intent", "pending", "completed", "halt"}
-                        or (saved["task_id"] is not None and (
-                            not isinstance(saved["task_id"], str) or not 1 <= len(saved["task_id"]) <= 200))
-                        or (saved["task_deadline"] is not None and not number(saved["task_deadline"]))):
-                    return unavailable
-                if saved.get("phase") == "completed":
-                    return {"status": "skipped", "reason": "daily_attempt_limit" if attempt_date and
-                            state.get("operational_diagnosis_last_attempt_date", "") >= attempt_date else "already_attempted"}
-                if saved.get("phase") == "halt":
-                    return unavailable
-                if saved.get("task_id") is None:
-                    return {"status": "unavailable", "reason": "ai_outcome_unknown"}
-            failure_stage = "diagnosis_execution"
-
-            def stop():
-                saved["phase"] = "halt"
-                if saved["task_id"] and not saved["cancel_sent"]:
-                    saved["cancel_sent"] = True
-                    _save_native_diagnosis(root, state)
-                    try:
-                        client.cancel(saved["task_id"])
-                    except Exception:
-                        pass  # cancel may have committed; never repeat it automatically.
-                else:
-                    _save_native_diagnosis(root, state)
-                return {"status": "unavailable", "reason": "ai_task_stop_requested"}
-
-            current = now()
-            if not number(current):
-                saved["phase"] = "halt"
-                _save_native_diagnosis(root, state)
-                return unavailable
-            if cancel or current >= saved["deadline"] or (
-                    saved["task_deadline"] is not None and current >= saved["task_deadline"]):
-                return stop()
-            try:
-                record = (client.submit(saved["request"], "monitor-diagnosis:" + fingerprint) if fresh
-                          else client.get(saved["task_id"]))
-            except Exception as exc:
-                return {"status": "unavailable", "reason": "ai_outcome_unknown",
-                        "failure_stage": failure_stage, "failure_category": _diagnosis_failure_category(exc)}
-            failure_stage = "diagnosis_result_processing"
-            if (not isinstance(record, dict) or record.get("owner") != binding["project"]
-                    or record.get("provider") != binding["provider"]
-                    or type(record.get("revision")) is not int or record["revision"] != 1
-                    or record.get("result_kind") != "advisory"
-                    or _diagnosis_digest(record.get("request")) != saved["request_sha256"]
-                    or not isinstance(record.get("id"), str) or not 1 <= len(record["id"]) <= 200
-                    or (saved["task_id"] is not None and saved["task_id"] != record["id"])
-                    or not number(record.get("deadline"))
-                    or (saved["task_deadline"] is not None and saved["task_deadline"] != record["deadline"])):
-                saved["phase"] = "halt"
-                _save_native_diagnosis(root, state)
-                return unavailable
-            saved["task_id"], saved["task_deadline"] = record["id"], record["deadline"]
-            # Save the known task before checking expiry or interpreting its result.
-            _save_native_diagnosis(root, state)
-            current = now()
-            if not number(current) or current >= min(saved["deadline"], record["deadline"]):
-                return stop()
-            worker, attempt = record.get("worker"), record.get("attempt")
-            claim = [worker, attempt, record["revision"]]
-            if (binding["mode"] == "api" and (worker is not None or attempt is not None)
-                    or binding["mode"] == "agent" and (worker is not None or attempt is not None) and (
-                        worker != binding["worker"] or not isinstance(attempt, str) or not 1 <= len(attempt) <= 200)
-                    or saved["claim"] is not None and saved["claim"] != claim):
-                saved["phase"] = "halt"
-                _save_native_diagnosis(root, state)
-                return unavailable
-            if worker is not None:
-                saved["claim"] = claim
-            status = record.get("status")
-            if status in {"queued", "submitting", "running"}:
-                saved["phase"] = "pending"
-                _save_native_diagnosis(root, state)
-                return {"status": "deferred", "reason": "ai_task_pending", "job_id": record["id"]}
-            if status == "completed" and (binding["mode"] == "api" or saved["claim"] is not None):
-                from jsonschema import Draft202012Validator
-                if Draft202012Validator(saved["request"]["output_schema"]).is_valid(record.get("output")):
-                    saved["phase"] = "completed"
-                    saved["output_sha256"] = _diagnosis_digest(record["output"])
-                    _save_native_diagnosis(root, state)
-                    current = now()
-                    if not number(current) or current >= min(saved["deadline"], record["deadline"]):
-                        return stop()
-                    return {"status": "succeeded", "job_id": record["id"]}
-            saved["phase"] = "halt"
-            _save_native_diagnosis(root, state)
-            return unavailable
+            saved, fresh, early_result = _admit_or_resume_diagnosis(
+                session, state, data_errors, fingerprint, observation, attempt_date, cancel=cancel,
+            )
+            if early_result is not None or saved is None:
+                return early_result or _diagnosis_unavailable()
+            record, early_result = _fetch_diagnosis_record(
+                session, state, saved, fingerprint, fresh=fresh, cancel=cancel,
+            )
+            if early_result is not None:
+                return early_result
+            return _evaluate_diagnosis_record(session, state, saved, record)
     except (OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
-        return {"status": "deferred" if failure_stage in {"diagnosis_state_processing", "diagnosis_attempt_persistence"} else "unavailable",
-                "reason": "dedupe_state_unavailable", "failure_stage": failure_stage,
-                "failure_category": _diagnosis_failure_category(exc)}
+        early_stages = {"diagnosis_state_processing", "diagnosis_attempt_persistence"}
+        return {
+            "status": "deferred" if session.stage in early_stages else "unavailable",
+            "reason": "dedupe_state_unavailable",
+            "failure_stage": session.stage,
+            "failure_category": _diagnosis_failure_category(exc),
+        }
 
 
 def _diagnosis_failure_category(error: Exception) -> str:
@@ -1748,12 +2195,9 @@ def diagnose_recent_cycles(root: Path, *, now: datetime | None = None) -> dict[s
     failure_stage = "diagnosis_state_processing"
     try:
         state = _load_operational_diagnosis_state(state_root)
-        native = state.get("operational_diagnosis_native", {})
-        if not isinstance(native, dict):
-            raise OSError("invalid diagnosis state")
+        native = _require_dict(state.get("operational_diagnosis_native", {}), "invalid diagnosis state")
         for fingerprint, pending in native.items():
-            if not isinstance(pending, dict):
-                raise OSError("invalid diagnosis state")
+            pending = _require_dict(pending, "invalid diagnosis state")
             if pending.get("phase") in {"intent", "pending"}:
                 return _run_operational_diagnosis(
                     state_root, pending["errors"], fingerprint, observation=pending["observation"],
@@ -1813,13 +2257,7 @@ def _drift_is_qualified_for_monitoring(drift: Any) -> bool:
     """Retained restrictions and suppressed checks are not new degradation evidence."""
     # QPK's nonempty reason denotes an unevaluable comparison. Older drift
     # objects without qualification metadata retain their existing behavior.
-    reason = getattr(drift, "reason", "")
-    return (
-        getattr(drift, "alert_suppressed", False) is False
-        and getattr(drift, "baseline_available", True) is True
-        and isinstance(reason, str)
-        and not reason.strip()
-    )
+    return _DriftQualification.from_record(drift).is_qualified()
 
 
 def _build_monitoring_findings(
@@ -1951,7 +2389,7 @@ def main(*, effects_enabled: bool = True, emit_summary: bool = True,
             live_monitor_reasons[domain] = live_error
         elif domain == "crypto" and _BINANCE_LIVE_PROFILE in expected_profiles.get(domain, ()):
             live_snapshot_by_domain[domain] = next(
-                (row for row in snapshots if getattr(row, "strategy_profile", None) == _BINANCE_LIVE_PROFILE),
+                (row for row in snapshots if _read_lifecycle_identity(row).strategy_profile == _BINANCE_LIVE_PROFILE),
                 None,
             )
         return snapshots
