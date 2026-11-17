@@ -1,6 +1,8 @@
 # Contributing
 
-Thanks for contributing to `AIAuditBridge`.
+Thanks for contributing to `QuantAIService`.
+
+Documentation follows the [QuantStrategyLab documentation style guide](https://github.com/QuantStrategyLab/.github/blob/main/docs/STYLE_GUIDE.md).
 
 ## Ground Rules
 
