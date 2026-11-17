@@ -25,6 +25,19 @@ class MonthlyAuditReportTests(unittest.TestCase):
             with self.subTest(month=month), self.assertRaises(ValueError):
                 monthly.collect_report(month, Mock())
 
+    def test_multibyte_evidence_fits_the_dual_api_input_limit(self):
+        def source_api(method, endpoint, **options):
+            if '/comments?' in endpoint:
+                return [{'html_url': 'https://github.com/example/issues/1#comment', 'body': '审' * 5000}] * 2
+            result = fake_api(method, endpoint, **options)
+            if isinstance(result, list):
+                result[0]['body'] = '核' * 12000
+            return result
+
+        report = monthly.collect_report('2026-11', source_api)
+        self.assertLess(len(report['body'].encode('utf-8')), 65536)
+        self.assertEqual(report['body'].count('[Excerpt truncated;'), 6)
+
     def test_successful_runs_never_accept_quality_and_empty_comments_are_gaps(self):
         api = Mock(side_effect=fake_api)
         report = monthly.collect_report('2026-11', api)
