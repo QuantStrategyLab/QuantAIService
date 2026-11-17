@@ -241,6 +241,9 @@ test('available model selection stays inside the project, provider and complexit
   });
   assert.equal(await selectAPIModel(env, 'api', {}, decision, models), 'current');
   assert.deepEqual(visited, ['old', 'image', 'current']);
+  visited.length = 0;
+  assert.equal(await selectAPIModel(env, 'api', {}, {...decision, model: 'current'}, models), 'current');
+  assert.deepEqual(visited, ['current']);
   await assert.rejects(selectAPIModel(env, 'api', {model: 'old'}, decision, models));
   fetch.mock.mockImplementation(() => new Response(null, {status: 403}));
   const count = fetch.mock.callCount();
