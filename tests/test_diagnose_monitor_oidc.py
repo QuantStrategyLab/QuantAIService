@@ -812,6 +812,8 @@ class NativeOpener:
         self.lost_submit = False
         self.status = 'completed'
         self.owner = caller.REPOSITORY
+        self.provider = 'dot'
+        self.poll_provider = None
         self.empty_output = False
 
     def open(self, req, timeout):
@@ -826,7 +828,8 @@ class NativeOpener:
         else:
             status = self.status
         output = {'diagnosis': ''} if self.empty_output else {'diagnosis': 'synthetic advisory'}
-        value = {'id': NATIVE_ID, 'owner': self.owner, 'provider': 'dot', 'request': self.payload,
+        provider = self.provider if req.method == 'POST' or self.poll_provider is None else self.poll_provider
+        value = {'id': NATIVE_ID, 'owner': self.owner, 'provider': provider, 'request': self.payload,
                  'status': status, 'result_kind': 'advisory', 'output': output}
         return io.BytesIO(json.dumps(value).encode())
 
@@ -896,6 +899,35 @@ def test_native_diagnosis_uses_common_task_contract_and_advisory_receipt(tmp_pat
     assert opener.payload['mode'] == 'agent' and opener.payload['model'] == 'configured-dot'
     assert 'Do not place orders' in opener.payload['objective']
     assert native_run(tmp_path, NativeOpener()) == {'status': 'skipped', 'reason': 'daily_attempt_limit'}
+
+
+def test_native_diagnosis_accepts_muse_and_preserves_accepted_route_on_resume(tmp_path):
+    snapshot(tmp_path)
+    muse = NativeOpener()
+    muse.provider = 'muse'
+    env = {**native_environment(), 'AI_SERVICE_DIAGNOSIS_PROFILE': 'muse',
+           'AI_SERVICE_DIAGNOSIS_MODEL': 'configured-muse'}
+    state_dir = tmp_path / 'actions-state'
+    receipt = caller.diagnose(tmp_path, state_dir, env=env, opener=muse, now=NOW)
+    assert receipt['provider'] == receipt['profile'] == 'muse'
+    assert receipt['model'] == 'configured-muse' and receipt['advisory_only']
+
+    path = state_dir / (NOW.date().isoformat() + '.json')
+    state = json.loads(path.read_text())
+    state.pop('receipt')
+    path.write_text(json.dumps(state))
+    muse.calls.clear()
+    resumed = native_run(tmp_path, muse)
+    assert resumed['provider'] == 'muse'
+    assert [r.method for r in muse.calls] == ['GET', 'GET']
+
+
+def test_native_diagnosis_rejects_a_provider_change_after_submission(tmp_path):
+    snapshot(tmp_path)
+    opener = NativeOpener()
+    opener.poll_provider = 'muse'
+    with pytest.raises(caller.Rejected, match='native_task_identity_changed'):
+        native_run(tmp_path, opener)
 
 
 def test_native_lost_acknowledgement_does_not_submit_again(tmp_path):
