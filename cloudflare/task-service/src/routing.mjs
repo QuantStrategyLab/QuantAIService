@@ -193,15 +193,17 @@ export function decideRoute(routing,request,{project,providerReady,entryReady,lo
     let entry;
     try{entry=tierEntry(routing,scenarioId,tier,provider);}
     catch(e){skips.push(`skip:${provider}:${e.message}`);continue;}
+    let model=entry.model;
     if(typeof entryReady==='function'){
-      const [ok,why]=entryReady(provider,entry,tier);
+      const [ok,why,configuredModel]=entryReady(provider,entry,tier);
       if(!ok){skips.push(`skip:${provider}:${why}`);continue;}
+      model=configuredModel??model;
     }
-    if(Object.hasOwn(request,'model')&&request.model!==entry.model)fail('model does not match complexity tier');
+    if(Object.hasOwn(request,'model')&&request.model!==model)fail('model does not match complexity tier');
     let reason=`scenario:${scenarioId};tier:${tier}`;
     if(category)reason=`category:${category};`+reason;
     if(skips.length)reason+=';'+skips.join(';');
-    const decision={provider,scenario:scenarioId,category,tier,model:entry.model,reasoning_effort:entry.reasoning_effort,mode:configured.mode,reason};
+    const decision={provider,scenario:scenarioId,category,tier,model,reasoning_effort:entry.reasoning_effort,mode:configured.mode,reason};
     const payload={event:'task_routing',project_masked:maskProject(project),provider:decision.provider,category:decision.category,
       tier:decision.tier,model:decision.model,effort:decision.reasoning_effort,reason:decision.reason,scenario:decision.scenario};
     (log??console).info?.(JSON.stringify(payload));

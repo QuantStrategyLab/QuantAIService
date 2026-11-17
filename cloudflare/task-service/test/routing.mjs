@@ -251,15 +251,29 @@ test('available model selection stays inside the project, provider and complexit
   assert.equal(fetch.mock.callCount(), count + 1);
 });
 
-test('retired scenario preference can route to a replacement after provider rotation', () => {
+test('explicit API pins allow approved replacements after rotation', async (t) => {
   const name = 'gemini';
   const item = {type: 'gemini_api', enabled: true, api_usage_authorized: true,
-    model: 'current', key_env: 'KEY', tier_models: {standard: ['unapproved', 'current']}};
+    model: 'current', key_env: 'KEY', tier_models: {simple: ['unapproved', 'current']}};
   const env = {API_PROVIDERS: {[name]: item}, KEY: 'synthetic'};
   const admitted = ['retired', 'current'];
-  const decision = {model: 'retired', tier: 'standard'};
-  const models = apiModelCandidates(env, name, {}, decision, admitted);
-  assert.deepEqual(models, ['current']);
-  assert.equal(apiConfiguration(env, name, {model: models[0], complexity: 'standard'}).model, 'current');
-  assert.deepEqual(apiModelCandidates(env, name, {model: 'retired'}, decision, admitted), []);
+  const routing = {...ROUTING, scenarios: {...ROUTING.scenarios, rotation: {
+    mode: 'api', providers: [name], matching: {default_complexity: 'simple'},
+    tier_overrides: {simple: {[name]: {model: 'retired', reasoning_effort: 'low'}}},
+  }}};
+  t.mock.method(globalThis, 'fetch', async () =>
+    Response.json({name: 'models/current', supportedGenerationMethods: ['generateContent']}));
+  for (const pin of [{}, {model: 'current'}]) {
+    const request = {mode: 'api', scenario: 'rotation', ...pin};
+    const decision = decideRoute(routing, request, {
+      providerReady: () => [true, 'ready'],
+      entryReady(provider, entry, tier) {
+        const models = apiModelCandidates(env, provider, request, {model: entry.model, tier}, admitted);
+        return [true, 'ready', apiConfiguration(env, provider, {model: models[0], complexity: tier}).model];
+      },
+      log: {info(){}},
+    });
+    assert.equal(await selectAPIModel(env, name, request, decision, admitted), 'current');
+  }
+  assert.deepEqual(apiModelCandidates(env, name, {model: 'retired'}, {model: 'retired', tier: 'simple'}, admitted), []);
 });

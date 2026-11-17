@@ -221,8 +221,8 @@ export class TaskStore extends DurableObject {
             if (request.mode === 'api') {
               try {
                 const candidates = apiModelCandidates(this.env, name, request, {model: entry.model, tier}, policy.models[name]);
-                apiConfiguration(this.env, name, {...request, model: candidates[0], complexity: tier});
-                return [true, 'ready'];
+                const config = apiConfiguration(this.env, name, {...request, model: candidates[0], complexity: tier});
+                return [true, 'ready', config.model];
               } catch {
                 return [false, 'api_model_mismatch'];
               }
