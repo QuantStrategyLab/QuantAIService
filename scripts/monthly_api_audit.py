@@ -25,12 +25,9 @@ MODEL_ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,127}')
 POLICY_PATH = Path(__file__).resolve().parents[1] / 'config' / 'monthly-audit-models.json'
 
 
-def evidence_tier(evidence, *, probe):
-    # A monthly cross-source review starts at standard. A short synthetic check is simple.
-    size = len(evidence.encode('utf-8'))
-    if size >= 50000:
-        return 'complex'
-    return 'standard' if not probe or size >= 4000 else 'simple'
+def evidence_tier(evidence):
+    # Cross-source monthly reviews start at standard, including the synthetic readiness check.
+    return 'complex' if len(evidence.encode('utf-8')) >= 50000 else 'standard'
 
 
 def matches_model(configured, actual):
@@ -122,7 +119,7 @@ def infer(provider, model, evidence, tier, transport, headers, *, probe):
                 'required': ['expected', 'observed'], 'additionalProperties': False,
             }}}
         if model in ('claude-sonnet-5', 'claude-sonnet-5-5'):
-            request.setdefault('output_config', {})['effort'] = {
+            request.setdefault('output_config', {})['effort'] = 'low' if probe else {
                 'simple': 'low', 'standard': 'medium', 'complex': 'high',
             }[tier]
     try:
@@ -182,7 +179,7 @@ def main(argv=None):
     if len(evidence.encode()) > 65536:
         parser.error('monthly evidence exceeds the configured input limit')
     transport = PublicHTTPS(timeout=90)
-    tier = evidence_tier(evidence, probe=args.probe)
+    tier = evidence_tier(evidence)
     policy = json.loads(POLICY_PATH.read_text(encoding='utf-8'))
     results = {name: review(name, evidence, os.environ, transport, candidates=policy[tier].get(name),
                             tier=tier, probe=args.probe) for name in providers}

@@ -105,6 +105,6 @@ class MonthlyApiAuditTests(unittest.TestCase):
                 transport.request.assert_called_once()
 
     def test_real_monthly_starts_at_standard_and_raises_on_utf8_bytes(self):
-        self.assertEqual(audit.evidence_tier(audit.PROBE, probe=True), 'simple')
-        self.assertEqual(audit.evidence_tier('two source reviews', probe=False), 'standard')
-        self.assertEqual(audit.evidence_tier('研' * 17000, probe=False), 'complex')
+        self.assertEqual(audit.evidence_tier(audit.PROBE), 'standard')
+        self.assertEqual(audit.evidence_tier('two source reviews'), 'standard')
+        self.assertEqual(audit.evidence_tier('研' * 17000), 'complex')

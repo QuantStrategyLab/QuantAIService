@@ -44,11 +44,11 @@ Run the task server with your own configuration. The bundled
 
 Monthly audits select GPT and Claude separately from the ordered, per-tier
 [approved model lists](config/monthly-audit-models.json). The evidence review
-starts at `standard` and moves to `complex` at 50,000 UTF-8 bytes. A small
-synthetic check uses `simple`. Each provider checks model metadata with its own
+starts at `standard` and moves to `complex` at 50,000 UTF-8 bytes. The synthetic
+readiness check uses the regular monthly tier. Each provider checks model metadata with its own
 credential. A Responses-only OpenAI key can use inference directly and advance
 only after an explicit model-not-found response. Receipts record the tier,
-selection method and provider-reported model. The simple Claude tier uses the lower-priced Sonnet 5 series. Standard and complex reviews also admit Sonnet 4.6 as a fallback. Failed or incomplete reviews
+selection method and provider-reported model. Claude reviews prefer the lower-priced Sonnet 5 series and can fall back to Sonnet 4.6. Failed or incomplete reviews
 remain visible independently.
 
 Update the lists through review when a stable model is introduced or retired.
