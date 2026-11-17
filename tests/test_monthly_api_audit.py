@@ -18,7 +18,7 @@ class MonthlyApiAuditTests(unittest.TestCase):
             ('openai', {'model': 'gpt-synthetic-2026-11-01', 'status': 'completed',
                         'output': [{'type': 'message', 'content': [{'type': 'output_text', 'text': 'AUDIT_PROBE_OK'}]}]}),
             ('anthropic', {'model': 'claude-synthetic', 'stop_reason': 'end_turn',
-                           'content': [{'type': 'text', 'text': 'AUDIT_PROBE_OK'}]}),
+                           'content': [{'type': 'text', 'text': '{"expected":2,"observed":1}'}]}),
         ):
             with self.subTest(provider=name):
                 transport = Mock()
@@ -44,6 +44,14 @@ class MonthlyApiAuditTests(unittest.TestCase):
         self.assertEqual(audit.review('anthropic', audit.PROBE, ENV, transport),
                          {'status': 'model_mismatch'})
         self.assertEqual(transport.request.call_count, 2)
+
+    def test_claude_probe_rejects_swapped_counts(self):
+        reply = {'model': ENV['ANTHROPIC_MODEL'], 'stop_reason': 'end_turn',
+                 'content': [{'type': 'text', 'text': '{"expected":1,"observed":2}'}]}
+        transport = Mock()
+        transport.request.return_value = HttpReply(200, json.dumps(reply).encode())
+        self.assertEqual(audit.review('anthropic', audit.PROBE, ENV, transport, probe=True),
+                         {'status': 'invalid_output'})
 
     def test_missing_credentials_make_no_request(self):
         transport = Mock()

@@ -38,6 +38,12 @@ def review(provider, evidence, env, transport, *, probe=False):
         headers.update({'x-api-key': key, 'anthropic-version': '2023-06-01'})
         request = {'model': model, 'system': instructions,
                    'messages': [{'role': 'user', 'content': evidence}], 'max_tokens': limit}
+        if probe:
+            request['system'] = 'Extract the expected and observed source counts from the evidence as integers.'
+            request['output_config'] = {'format': {'type': 'json_schema', 'schema': {
+                'type': 'object', 'properties': {field: {'type': 'integer'} for field in ('expected', 'observed')},
+                'required': ['expected', 'observed'], 'additionalProperties': False,
+            }}}
     try:
         response = transport.request(url, headers=headers, body=json_body(request))
     except TransportError:
@@ -61,7 +67,14 @@ def review(provider, evidence, env, transport, *, probe=False):
         output = ''.join(parts).strip()
     except (ValueError, KeyError, TypeError):
         return {'status': 'invalid_receipt'}
-    if not output or (probe and output != 'AUDIT_PROBE_OK'):
+    if probe and provider == 'anthropic':
+        try:
+            counts = json.loads(output)
+        except ValueError:
+            counts = None
+        if counts != {'expected': 2, 'observed': 1} or any(type(v) is not int for v in counts.values()):
+            return {'status': 'invalid_output'}
+    if not output or (probe and provider == 'openai' and output != 'AUDIT_PROBE_OK'):
         return {'status': 'invalid_output'}
     result = {'status': 'completed', 'model': actual, 'model_verification': 'provider_reported'}
     if not probe:
@@ -74,15 +87,19 @@ def main(argv=None):
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument('--probe', action='store_true')
     mode.add_argument('--report', type=Path)
+    parser.add_argument('--probe-provider', choices=['both', *PROVIDERS], default='both')
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args(argv)
     if os.environ.get('GITHUB_RUN_ATTEMPT') != '1':
         parser.error('use a first-attempt workflow run to avoid duplicate API charges')
+    if not args.probe and args.probe_provider != 'both':
+        parser.error('monthly reports require both providers')
+    providers = PROVIDERS if args.probe_provider == 'both' else [args.probe_provider]
     evidence = PROBE if args.probe else json.loads(args.report.read_text(encoding='utf-8'))['body']
     if len(evidence.encode()) > 65536:
         parser.error('monthly evidence exceeds the configured input limit')
     transport = PublicHTTPS(timeout=90)
-    results = {name: review(name, evidence, os.environ, transport, probe=args.probe) for name in PROVIDERS}
+    results = {name: review(name, evidence, os.environ, transport, probe=args.probe) for name in providers}
     complete = all(result['status'] == 'completed' for result in results.values())
     args.output.write_text(json.dumps({'probe': args.probe, 'complete': complete, 'quality_accepted': False,
                                        'reviews': results}, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
