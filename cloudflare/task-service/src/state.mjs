@@ -98,6 +98,7 @@ export class TaskStore extends DurableObject {
         revision INTEGER NOT NULL, created REAL NOT NULL,
         PRIMARY KEY(task_id, idem));
     `);
+    this.sql.exec('CREATE TABLE IF NOT EXISTS muse_polls (owner TEXT PRIMARY KEY, identity_json TEXT NOT NULL, seen REAL NOT NULL)');
     initializeTaskMetadata(this.sql);
     // Local M1 stores may predate canonical report preservation. Never invent a
     // report body for old rows: the lost numeric lexemes cannot be recovered.
@@ -205,11 +206,12 @@ export class TaskStore extends DurableObject {
       await this.#wake();
       return this.#record(existing);
     }
+    const timeout = Object.hasOwn(request, "timeout_seconds") ? request.timeout_seconds : policy.max_timeout_seconds;
     let provider;
     let body = canonicalRequest;
     if (usesRouting) {
       const hasDotSubscription = await this.#liveSubscription(owner, 'dot');
-      const hasMuseSubscription = await this.#liveSubscription(owner, 'muse');
+      const hasMuseSubscription = await this.#museReady(owner, timeout);
       let decision;
       try {
         decision = decideRoute(policy.routing, request, {
@@ -269,8 +271,9 @@ export class TaskStore extends DurableObject {
       try { nativeConfiguration(this.env,provider); } catch { denied('execution mode is unavailable'); }
     }
     if (!policy.models[provider]?.includes(request.model)) denied("model is not admitted");
-    const timeout = Object.hasOwn(request, "timeout_seconds") ? request.timeout_seconds : policy.max_timeout_seconds;
     if (!Number.isSafeInteger(timeout) || timeout < 1 || timeout > policy.max_timeout_seconds) invalid("timeout_seconds exceeds project policy");
+    if (!usesRouting && request.mode === 'agent' && provider === 'muse' &&
+        this.#musePollWindow(owner) && !await this.#museReady(owner, timeout)) denied('execution mode is unavailable');
     if (!Array.isArray(Object.hasOwn(request, "materials") ? request.materials : [])) invalid("materials must be an array");
     if (Object.hasOwn(request, "issue")) denied("App comments are not configured");
     if (!object(request.output_schema)) invalid("output_schema must be an object");
@@ -464,6 +467,41 @@ export class TaskStore extends DurableObject {
     return admissions.some(a=>a.githubUserId===identity.githubUserId&&a.ownerId===project.ownerId&&a.clientIds.includes(identity.clientId)&&a.providers.includes(identity.provider)&&a.scopes.includes('events:subscribe'));
   }
 
+  #musePollWindow(owner) {
+    const policy = this.#policy(owner);
+    const seconds = policy.muse_poll_seconds;
+    return Number.isSafeInteger(seconds) && seconds > 0 && seconds < policy.max_timeout_seconds ? seconds : 0;
+  }
+
+  async #museReady(owner, timeout) {
+    const window = this.#musePollWindow(owner);
+    if (!window) return await this.#liveSubscription(owner, 'muse');
+    if (timeout <= window) return false;
+    const poll = this.sql.exec('SELECT identity_json, seen FROM muse_polls WHERE owner=?', owner).toArray()[0];
+    return Boolean(poll && now() - poll.seen < window &&
+      await this.#eventAccess(owner, JSON.parse(poll.identity_json)) && now() - poll.seen < window);
+  }
+
+  async pollMuseTasks(owner, worker, identity) {
+    const provider = this.env.AGENT_PROVIDERS?.muse;
+    if (!this.#musePollWindow(owner) || provider?.type !== 'muse' || provider.enabled !== true ||
+        identity.provider !== 'muse' || !identity.scopes.includes('tasks:work') ||
+        !admittedProviders(this.#policy(owner)).has('muse') || !await this.#eventAccess(owner, identity)) {
+      denied('Muse polling is not admitted for this project');
+    }
+    return this.ctx.storage.transactionSync(() => {
+      const timestamp = now();
+      this.sql.exec(`INSERT INTO muse_polls(owner,identity_json,seen) VALUES(?,?,?)
+        ON CONFLICT(owner) DO UPDATE SET identity_json=excluded.identity_json,seen=excluded.seen`,
+        owner, JSON.stringify(identity), timestamp);
+      const tasks = this.sql.exec(`SELECT id AS task_id,status,attempt AS attempt_id,revision,deadline
+        FROM tasks WHERE owner=? AND provider='muse' AND json_extract(request,'$.mode')='agent' AND deadline>?
+          AND ((status='running' AND worker IS NULL) OR (status IN ('running','cancel_requested') AND worker=?))
+        ORDER BY deadline,created,id LIMIT 8`, owner, timestamp, worker).toArray();
+      return {tasks};
+    });
+  }
+
   async #liveSubscription(owner, provider='dot') {
     for(const sub of this.sql.exec('SELECT * FROM subscriptions WHERE owner=? AND deleted IS NULL AND (non_expiring=1 OR expires>?)',owner,now()).toArray()){
       const identity=JSON.parse(sub.identity_json);
@@ -602,8 +640,9 @@ export class TaskStore extends DurableObject {
     await this.ctx.blockConcurrencyWhile(async()=>{
       const timestamp=now();
       for(const candidate of this.sql.exec("SELECT * FROM tasks WHERE status IN ('queued','submitting','running') OR (status='cancel_requested' AND ((json_extract(request,'$.mode')='api' AND handle IS NULL) OR (provider IN ('dot','muse') AND json_extract(request,'$.mode')='agent' AND worker IS NULL AND attempt IS NULL)))").toArray()){
+        const polling = candidate.provider==='muse' && this.#musePollWindow(candidate.owner)>0;
         const active=EVENT_AGENTS.has(candidate.provider)&&candidate.status==='queued'
-          ?await this.#liveSubscription(candidate.owner,candidate.provider):false;
+          ?polling || await this.#liveSubscription(candidate.owner,candidate.provider):false;
         this.ctx.storage.transactionSync(()=>{
           const task=this.#row(candidate.owner,candidate.id),timestamp=now();
           const unclaimedEvent=EVENT_AGENTS.has(task.provider)&&JSON.parse(task.request).mode==='agent'&&!task.worker&&!task.attempt;
@@ -620,7 +659,8 @@ export class TaskStore extends DurableObject {
           if(!EVENT_AGENTS.has(task.provider)){this.nativeInFlight.add(task.id);nativeJobs.push({...task,change:'requested'});return;}
           if(!active){this.#state(task.id,'failed',{error:'submission_rejected'});return;}
           // Pure durable event acceptance has no remote side effect between these writes.
-          this.#state(task.id,'running',{handle:JSON.stringify({task_id:task.id,acceptance:'event_pending',model_verification:'unavailable'})});
+          const acceptance = polling ? 'poll_pending' : 'event_pending';
+          this.#state(task.id,'running',{handle:JSON.stringify({task_id:task.id,acceptance,model_verification:'unavailable'})});
         });
       }
       const matchedOwners=new Set();
@@ -646,6 +686,7 @@ export class TaskStore extends DurableObject {
           const pending=this.sql.exec("SELECT COUNT(*) AS n FROM event_deliveries WHERE subscription=? AND status='pending'",sub.id).one().n;
           const rows=this.sql.exec(`SELECT e.seq,e.status,e.created,t.id,t.owner,t.revision FROM events e JOIN tasks t ON t.id=e.task_id
             WHERE t.owner=? AND t.provider=? AND e.seq>? AND e.status IN ('queued','message','cancel_requested')
+            AND COALESCE(json_extract(t.handle,'$.acceptance'),'')<>'poll_pending'
             AND t.status IN ('running','cancel_requested','outcome_unknown') ORDER BY e.seq LIMIT ?`,sub.owner,provider,sub.start_seq,Math.max(0,128-pending)).toArray();
           for(const e of rows){const body=JSON.stringify({eventId:'evt_'+e.seq,name:'task.requested',timestamp:new Date(e.created*1000).toISOString(),cursor:null,data:{task_id:e.id,project:e.owner,revision:e.revision,change:e.status}});this.sql.exec('INSERT OR IGNORE INTO event_deliveries(subscription,seq,body) VALUES(?,?,?)',sub.id,e.seq,body);}
           if(rows.length)this.sql.exec('UPDATE subscriptions SET start_seq=? WHERE id=?',rows.at(-1).seq,sub.id);
@@ -653,7 +694,8 @@ export class TaskStore extends DurableObject {
       }
       this.ctx.storage.transactionSync(()=>{
         const fresh=this.sql.exec(`SELECT e.seq,t.id AS task_id,t.owner FROM events e JOIN tasks t ON t.id=e.task_id
-          WHERE t.provider IN ('dot','muse') AND e.status IN ('queued','message','cancel_requested') AND COALESCE(e.fanout_noted,0)=0 AND e.created>=? LIMIT 32`,timestamp-3600).toArray();
+          WHERE t.provider IN ('dot','muse') AND e.status IN ('queued','message','cancel_requested') AND COALESCE(e.fanout_noted,0)=0
+          AND COALESCE(json_extract(t.handle,'$.acceptance'),'')<>'poll_pending' AND e.created>=? LIMIT 32`,timestamp-3600).toArray();
         for(const event of fresh){
           const matches=matchedCounts.get(event.owner)??0;
           if(!matchedOwners.has(event.owner))this.#log({message:'event_unmatched',event:'task.requested',task_id:event.task_id,matching_subscriptions:0});
