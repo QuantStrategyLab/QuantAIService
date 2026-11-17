@@ -82,9 +82,9 @@ async function subscriptionFixture(t) {
     const view = async (id, token = dotToken) => (await tool('get_event_subscription', {subscription_id: id}, token)).body.result.structuredContent;
     const logs = async () => (await worker.eventLogs()).map(line => JSON.parse(line));
     const taskRequest = {mode: 'agent', model: 'configured-dot', objective: 'Synthetic subscription observation', materials: [], output_schema: {type: 'object', additionalProperties: false}};
-    const submit = async (idem) => {
+    const submit = async (idem, status = 202) => {
       const response = await request('/v1/tasks', {method: 'POST', headers: {Authorization: 'Bearer ' + callerToken, 'Content-Type': 'application/json', 'Idempotency-Key': idem}, body: JSON.stringify(taskRequest)});
-      assert.equal(response.status, 202, await response.clone().text());
+      assert.equal(response.status, status, await response.clone().text());
       return response.json();
     };
     return {
@@ -110,6 +110,16 @@ async function subscriptionFixture(t) {
       taskStatus: (id) => worker.fixtureTaskStatus(project, id),
       tick: () => worker.alarmProbe('tick'),
       restart: async () => {await mf.setOptions(workerOptions(policy)); worker = await mf.getWorker();},
+      removeProject: async () => {
+        delete policy.PROJECT_POLICIES[project];
+        await mf.setOptions(workerOptions(policy));
+        worker = await mf.getWorker();
+      },
+      retireDot: async () => {
+        policy.AGENT_PROVIDERS = {dot: {type: 'dot_events', enabled: false}, muse: {type: 'muse', enabled: true}};
+        await mf.setOptions(workerOptions(policy));
+        worker = await mf.getWorker();
+      },
     };
   }
 }
@@ -347,4 +357,30 @@ test('retry expiry during signing prevents a second callback', async t => {
   await f.tick();
   await new Promise(resolveWait => setTimeout(resolveWait, 500));
   assert.equal(f.seen.length, 1, 'retry must recheck expiry after awaited signing');
+});
+
+
+test('retired Dot cannot receive pending callbacks or admit new tasks', async (t) => {
+  const f = await subscriptionFixture(t);
+  const subscription = await f.subscribe('retry', null);
+  assert.ok(subscription.body.result.id);
+  const task = await f.submit('before-retirement');
+  await until(() => f.seen.some(event => event.task === task.id));
+  await f.retireDot();
+  await f.submit('after-retirement', 403);
+  const claim = await f.tool('claim_task', {task_id: task.id, attempt_id: 'retired-dot'});
+  assert.equal(claim.body.error.code, -32003);
+  await new Promise(resolveWait => setTimeout(resolveWait, 2500));
+  await f.tick();
+  assert.equal(f.seen.filter(event => event.task === task.id).length, 1);
+});
+
+
+test('subscriptions from removed projects cannot interrupt the shared alarm', async (t) => {
+  const f = await subscriptionFixture(t);
+  const subscription = await f.subscribe('removed-project', null);
+  assert.ok(subscription.body.result.id);
+  await f.removeProject();
+  await f.tick();
+  assert.equal(f.seen.length, 0);
 });

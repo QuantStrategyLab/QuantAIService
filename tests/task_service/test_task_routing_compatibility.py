@@ -12,7 +12,7 @@ from tests.fixtures.routing_contract import ContractError, check_routing_contrac
 
 class RoutingCompatibilityTests(unittest.TestCase):
     def setUp(self):
-        example = Path(__file__).resolve().parents[2] / 'config' / 'quant.example.json'
+        example = Path(__file__).resolve().parents[2] / 'tests' / 'fixtures' / 'legacy-provider-config.json'
         self.projects = json.loads(example.read_text(encoding='utf-8'))['projects']
         self.routing = next(iter(self.projects.values()))['routing']
 

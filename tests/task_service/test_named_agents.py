@@ -17,10 +17,22 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class NamedAgentTests(unittest.TestCase):
+    def test_default_configuration_uses_muse_only_for_agent_tasks(self):
+        config = json.loads((ROOT / 'config/quant.example.json').read_text())
+        validate_configuration({**config, 'enabled': True})
+        self.assertEqual(set(config['providers']), {'muse', 'gemini', 'chatgpt-plan'})
+        self.assertTrue(config['providers']['muse']['enabled'])
+        for project in config['projects'].values():
+            self.assertEqual(project['providers'], {
+                'agent': 'muse', 'agent:muse': 'muse', 'api': 'chatgpt-plan', 'api:gemini': 'gemini',
+            })
+            for scenario in project['routing']['scenarios'].values():
+                self.assertEqual(scenario['providers'], ['muse' if scenario['mode'] == 'agent' else 'chatgpt-plan'])
+
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
-        self.config = json.loads((ROOT / 'config/quant.example.json').read_text())
+        self.config = json.loads((ROOT / 'tests/fixtures/legacy-provider-config.json').read_text())
         self.assertFalse(self.config['enabled'])
         self.config.update(enabled=True, state_path=str(Path(temporary.name) / 'tasks.sqlite'))
         self.project = next(iter(self.config['projects']))

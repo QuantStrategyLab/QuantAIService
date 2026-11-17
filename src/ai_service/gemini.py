@@ -95,7 +95,7 @@ class GeminiProvider:
             return self._failed(task_id, 'provider_reported')
         fragments = []
         for part in result_parts:
-            if not isinstance(part, dict) or not isinstance(part.get('text'), str) or set(part) - {'text', 'thought'}:
+            if not isinstance(part, dict) or not isinstance(part.get('text'), str) or set(part) - {'text', 'thought', 'thoughtSignature'}:
                 return self._failed(task_id, 'provider_reported')
             if part.get('thought') is not True:
                 fragments.append(part['text'])

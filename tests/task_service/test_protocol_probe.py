@@ -92,7 +92,7 @@ class ProtocolProbeTests(unittest.TestCase):
         spec = importlib.util.spec_from_file_location('quant-probe_candidate', ROOT / 'scripts/prepare_pilot_config.py')
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
-        config = json.loads((ROOT / 'config/quant.example.json').read_text())
+        config = json.loads((ROOT / 'tests/fixtures/legacy-provider-config.json').read_text())
         config['enabled'] = True
         config['projects']['example-org/ExampleProject'] = copy.deepcopy(config['projects']['example-org/ExampleResearch'])
         original = copy.deepcopy(config)

@@ -20,7 +20,7 @@ from quant_ai_service.task_routing import (
 
 
 ROOT = Path(__file__).resolve().parents[2]
-EXAMPLE = ROOT / 'config' / 'quant.example.json'
+EXAMPLE = ROOT / 'tests' / 'fixtures' / 'legacy-provider-config.json'
 REQUIRED_SCENARIOS = {
     'pr_code_review',
     'strategy_research_summary',
@@ -28,6 +28,23 @@ REQUIRED_SCENARIOS = {
     'signal_context',
     'quick_notification',
 }
+
+
+
+class SharedComplexityContractTests(unittest.TestCase):
+    def test_shared_complexity_cases(self):
+        fixtures = ROOT / 'tests' / 'fixtures' / 'routing-complexity-cases.json'
+        registry = next(iter(json.loads(EXAMPLE.read_text())['projects'].values()))['routing']
+        for sample in json.loads(fixtures.read_text()):
+            with self.subTest(case=sample['name']):
+                routing = {**registry, 'scenarios': {
+                    'shared_probe': {'mode': 'agent', 'providers': ['muse'], 'matching': sample['matching']},
+                }}
+                payload = {'objective': sample['text'] * sample['repeat'], 'materials': sample['materials']}
+                actual = resolve_complexity(routing, 'shared_probe', requested=sample['requested'],
+                                          material_bytes=len(json.dumps(payload, ensure_ascii=False, separators=(',', ':')).encode('utf-8')),
+                                          material_count=len(payload['materials']), has_image=bool(payload['materials'] and payload['materials'][0].get('type') == 'image'))
+                self.assertEqual(actual, sample['expected'])
 
 
 class MaskAccountIdTests(unittest.TestCase):
