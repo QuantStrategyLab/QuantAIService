@@ -1,0 +1,9 @@
+[
+  {"name":"short input preserves explicit simple","requested":"simple","text":"x","repeat":4,"materials":[],"matching":{},"expected":"simple"},
+  {"name":"UTF-8 size can raise explicit simple","requested":"simple","text":"审","repeat":1340,"materials":[],"matching":{},"expected":"standard"},
+  {"name":"material count raises explicit simple","requested":"simple","text":"x","repeat":4,"materials":[{},{},{},{},{},{},{},{}],"matching":{},"expected":"complex"},
+  {"name":"small image with explicit floor","requested":"simple","text":"x","repeat":4,"materials":[{"type":"image"}],"matching":{"min_with_image":"standard"},"expected":"standard"},
+  {"name":"image floor overrides image-only size heuristic","requested":"simple","text":"x","repeat":21000,"materials":[{"type":"image"}],"matching":{"min_with_image":"standard"},"expected":"standard"},
+  {"name":"large image without explicit floor","requested":"simple","text":"x","repeat":21000,"materials":[{"type":"image"}],"matching":{},"expected":"complex"},
+  {"name":"overall size floor still applies to images","requested":"standard","text":"x","repeat":51000,"materials":[{"type":"image"}],"matching":{"min_with_image":"standard"},"expected":"complex"}
+]

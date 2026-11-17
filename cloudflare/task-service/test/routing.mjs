@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import {readFileSync} from 'node:fs';
+import {executeAPI} from '../src/api.mjs';
 import {decideRoute,maskProject,providerReadiness,resolveComplexity,validateRoutingConfig} from '../src/routing.mjs';
 
 // Quant-shaped fixtures (not Personal example_* / gemini-text catalogs).
@@ -183,4 +185,37 @@ test('quick_notification stays single-provider chatgpt-plan without gemini fallb
   assert.equal(decision.model,'chatgpt-plan-fast');
   assert.equal(decision.tier,'simple');
   assert.equal(ROUTING.scenarios.quick_notification.providers.length,1);
+});
+
+
+const complexityCases = JSON.parse(readFileSync(new URL('../../../tests/fixtures/routing-complexity-cases.json', import.meta.url)));
+for (const sample of complexityCases) {
+  test(sample.name, () => {
+    const routing = {...ROUTING, scenarios: {
+      shared_probe: {mode: 'agent', providers: ['muse'], matching: sample.matching},
+    }};
+    const request = {complexity: sample.requested, objective: sample.text.repeat(sample.repeat), materials: sample.materials};
+    assert.equal(resolveComplexity(request, 'shared_probe', routing), sample.expected);
+  });
+}
+
+
+for (const [model, thinkingConfig] of [
+  ['gemini-2.5-flash-lite', {thinkingBudget: 1024}],
+  ['gemini-3.5-flash-lite', {thinkingLevel: 'MEDIUM'}],
+]) test(`routed API verifies the model and reasoning setting for ${model}`, async (t) => {
+  const fetch = t.mock.method(globalThis, 'fetch', async (_url, options) => {
+    assert.deepEqual(JSON.parse(options.body).generationConfig.thinkingConfig, thinkingConfig);
+    return Response.json({modelVersion: model, candidates: [
+      {finishReason: 'STOP', content: {parts: [{text: '{"ok":true}'}]}},
+    ]});
+  });
+  const env = {API_PROVIDERS: {api: {
+    type: 'gemini_api', enabled: true, api_usage_authorized: true, model, key_env: 'TEST_KEY',
+  }}, TEST_KEY: 'synthetic-only'};
+  const receipt = await executeAPI(env, 'api', {
+    model, reasoning_effort: 'medium', objective: 'Synthetic test', output_schema: {type: 'object'},
+  }, 10);
+  assert.equal(fetch.mock.callCount(), 1);
+  assert.equal(receipt.model_verification, 'provider_reported');
 });

@@ -368,6 +368,7 @@ export class TaskStore extends DurableObject {
       const row = this.#agentRow(owner, taskId, providerName);
       if (row.attempt && (row.worker !== worker || row.attempt !== attemptId)) conflict("task already belongs to another execution attempt");
       if (!row.attempt) {
+        if (this.env.AGENT_PROVIDERS?.[providerName]?.enabled === false) denied("worker is not assigned to this task");
         if (!["submitting", "running", "outcome_unknown"].includes(row.status)) conflict("task cannot be claimed in its current state");
         if (now() >= row.deadline) conflict("task deadline passed");
         this.#state(taskId, "running", { worker, attempt: attemptId, error: null, claimed_at: now() });
@@ -455,7 +456,7 @@ export class TaskStore extends DurableObject {
 
   async #eventAccess(owner,identity,scopes=['events:subscribe']) {
     if(!EVENT_AGENTS.has(identity.provider)||typeof identity.grantId!=='string'||!identity.grantId||!scopes.every(scope=>identity.scopes?.includes(scope)))return false;
-    if(!admittedProviders(this.#policy(owner)).has(identity.provider) ||
+    if(!Object.hasOwn(this.policies,owner) || !admittedProviders(this.policies[owner]).has(identity.provider) ||
       this.env.AGENT_PROVIDERS?.[identity.provider]?.enabled===false) return false;
     // Provider 1.2.4 persists grants under this key. No bearer token is stored.
     // Do not cache authority across admissions, sends, retries or restarts.

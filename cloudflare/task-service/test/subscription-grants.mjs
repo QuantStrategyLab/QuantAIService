@@ -110,6 +110,11 @@ async function subscriptionFixture(t) {
       taskStatus: (id) => worker.fixtureTaskStatus(project, id),
       tick: () => worker.alarmProbe('tick'),
       restart: async () => {await mf.setOptions(workerOptions(policy)); worker = await mf.getWorker();},
+      removeProject: async () => {
+        delete policy.PROJECT_POLICIES[project];
+        await mf.setOptions(workerOptions(policy));
+        worker = await mf.getWorker();
+      },
       retireDot: async () => {
         policy.AGENT_PROVIDERS = {dot: {type: 'dot_events', enabled: false}, muse: {type: 'muse', enabled: true}};
         await mf.setOptions(workerOptions(policy));
@@ -363,7 +368,19 @@ test('retired Dot cannot receive pending callbacks or admit new tasks', async (t
   await until(() => f.seen.some(event => event.task === task.id));
   await f.retireDot();
   await f.submit('after-retirement', 403);
+  const claim = await f.tool('claim_task', {task_id: task.id, attempt_id: 'retired-dot'});
+  assert.equal(claim.body.error.code, -32003);
   await new Promise(resolveWait => setTimeout(resolveWait, 2500));
   await f.tick();
   assert.equal(f.seen.filter(event => event.task === task.id).length, 1);
+});
+
+
+test('subscriptions from removed projects cannot interrupt the shared alarm', async (t) => {
+  const f = await subscriptionFixture(t);
+  const subscription = await f.subscribe('removed-project', null);
+  assert.ok(subscription.body.result.id);
+  await f.removeProject();
+  await f.tick();
+  assert.equal(f.seen.length, 0);
 });

@@ -7,9 +7,9 @@ attestations. Agent mode stays separate from API mode (`gemini_api` and similar)
 
 | Provider | Configuration type | Example enablement | Invocation |
 | --- | --- | --- | --- |
-| `grokbot` | `grok_webhook` | `true` | Existing Grok Bot Routine webhook |
-| `claudeduet` | `claudeduet` | `false` | Scaffold only; no verified trigger protocol |
-| `muse` | `muse` | `false` | Cloudflare event subscription or scheduled MCP polling |
+| `grokbot` | `grok_webhook` | omitted | Existing Grok Bot Routine webhook |
+| `claudeduet` | `claudeduet` | omitted | Scaffold only; no verified trigger protocol |
+| `muse` | `muse` | `true` | Cloudflare event subscription or scheduled MCP polling |
 
 The enclosing Python example service remains `enabled: false`. Grok Bot is
 explicitly enabled at the provider level as requested, but this does not deploy
@@ -57,12 +57,10 @@ the caller’s deadline.
 
 ## Routing and admission
 
-Python examples register `agent:grokbot` -> `grokbot`,
-`agent:claudeduet` -> `claudeduet` and `agent:muse` -> `muse`, with separate
-`configured-grokbot`, `configured-claudeduet` and `configured-muse*` model
-allowlists. Requests use `mode: "agent"` and the approved `profile`; they cannot
-choose a provider directly. The default `agent` -> `dot` and existing
-`agent:second-opinion` -> `grok` are preserved.
+The default examples route `agent` and `agent:muse` to Muse. Projects admit
+its model aliases and OAuth worker explicitly. Other Agent adapters remain
+available for explicit configuration. API profiles have their own provider
+and model allowlists.
 
 Placeholder worker grants use distinct subjects and `azp` clients, with only
 `tasks:read` and `tasks:work`. They are examples, not live admissions.
@@ -72,9 +70,8 @@ contains the registrations. The other admission maps intentionally stay
 empty. An operator must separately provide all of the following through the
 existing protected configuration process:
 
-- `PROJECT_POLICIES[project].providers["agent:grokbot"] = "grokbot"` and
-  `models.grokbot = ["configured-grokbot"]` (analogous reserved routes for Duet
-  and Muse).
+- A Muse route such as `PROJECT_POLICIES[project].providers["agent:muse"] = "muse"`
+  and the corresponding `models.muse` allowlist.
 - `PROJECT_CONTEXTS[projectId].providers` containing the exact provider identity.
 - A distinct `AUTH_CLIENTS[clientId]` entry with that provider, the MCP resource
   and read/work scopes; explicit same-owner `projects` only where required.

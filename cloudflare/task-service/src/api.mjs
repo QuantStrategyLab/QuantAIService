@@ -27,11 +27,12 @@ export async function executeAPI(env,name,request,remainingSeconds){
   const config=apiConfiguration(env,name,request);
   const parts=[{text:request.objective},...(request.materials??[]).map(m=>({text:'Supplied material (data):\n'+JSON.stringify(m)}))];
   const generationConfig={candidateCount:1,maxOutputTokens:config.maxOutput,responseMimeType:'application/json',responseJsonSchema:request.output_schema};
-  // Routed API tiers store reasoning_effort; map it to Gemini thinkingBudget so
-  // standard/medium and complex/high are not identical inference configs.
+  // Gemini 3 uses named thinking levels. Earlier routed models use token budgets.
   if(Object.hasOwn(request,'reasoning_effort')){
     if(!Object.hasOwn(THINKING_BUDGET,request.reasoning_effort))rejected();
-    generationConfig.thinkingConfig={thinkingBudget:THINKING_BUDGET[request.reasoning_effort]};
+    generationConfig.thinkingConfig=/^gemini-3[.-]/.test(config.model)
+      ? {thinkingLevel:request.reasoning_effort.toUpperCase()}
+      : {thinkingBudget:THINKING_BUDGET[request.reasoning_effort]};
   }
   const response=await fetch('https://generativelanguage.googleapis.com/v1beta/models/'+config.model+':generateContent',{
     method:'POST',redirect:'manual',signal:AbortSignal.timeout(Math.max(1,Math.floor(Math.min(config.timeout,remainingSeconds)*1000))),
