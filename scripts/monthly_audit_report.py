@@ -36,10 +36,11 @@ def github_api(method, endpoint, payload=None, paginate=False):
 
 
 def evidence_snapshot(text, limit):
-    digest = hashlib.sha256(text.encode('utf-8')).hexdigest()
-    excerpt = text[:limit]
+    encoded = text.encode('utf-8')
+    digest = hashlib.sha256(encoded).hexdigest()
+    excerpt = encoded[:limit].decode('utf-8', 'ignore')
     fence = '`' * max(3, max((len(match) + 1 for match in re.findall(r'`+', excerpt)), default=3))
-    suffix = '\n[Excerpt truncated; SHA256 covers the complete text.]' if len(text) > limit else ''
+    suffix = '\n[Excerpt truncated; SHA256 covers the complete text.]' if len(encoded) > limit else ''
     return f'SHA256: `{digest}`\n\n{fence}text\n{excerpt}{suffix}\n{fence}'
 
 
