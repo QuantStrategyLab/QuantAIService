@@ -3,7 +3,7 @@ import {imageMaterials} from './image-materials.mjs';
 import {workerContext} from './projects.mjs';
 import {callbackURL,signingKey,signedHeaders} from './webhooks.mjs';
 import {callbackHost,classifyDelivery,emitEventLog,shortSubscriptionId} from './delivery-log.mjs';
-import {apiConfiguration,executeAPI,selectAPIModel} from './api.mjs';
+import {apiConfiguration,apiModelCandidates,executeAPI,selectAPIModel} from './api.mjs';
 import {nativeConfiguration,triggerNative} from './native.mjs';
 import {outputValid} from './validation.mjs';
 import {serialize,valueOf,objectNode,nodeFrom,parseJson,replaceFields} from './canonical.mjs';
@@ -220,7 +220,8 @@ export class TaskStore extends DurableObject {
           entryReady: (name, entry, tier) => {
             if (request.mode === 'api') {
               try {
-                apiConfiguration(this.env, name, {...request, model: entry.model, complexity: tier});
+                const candidates = apiModelCandidates(this.env, name, request, {model: entry.model, tier}, policy.models[name]);
+                apiConfiguration(this.env, name, {...request, model: candidates[0], complexity: tier});
                 return [true, 'ready'];
               } catch {
                 return [false, 'api_model_mismatch'];

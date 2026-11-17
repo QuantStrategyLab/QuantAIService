@@ -12,15 +12,21 @@ function tierCandidates(item, tier) {
   return candidates;
 }
 
-export async function selectAPIModel(env, provider, request, decision, admitted) {
+export function apiModelCandidates(env, provider, request, decision, admitted) {
   const item = env.API_PROVIDERS?.[provider];
-  if (!item || !Object.hasOwn(item, 'tier_models')) return decision.model;
+  if (!item || !Object.hasOwn(item, 'tier_models')) return [decision.model];
   const approved = tierCandidates(item, decision.tier);
   const ordered = approved.includes(decision.model)
     ? [decision.model, ...approved.filter(model => model !== decision.model)]
     : approved;
-  const candidates = ordered.filter(model => admitted?.includes(model) &&
+  return ordered.filter(model => admitted?.includes(model) &&
     (!Object.hasOwn(request, 'model') || request.model === model));
+}
+
+export async function selectAPIModel(env, provider, request, decision, admitted) {
+  const item = env.API_PROVIDERS?.[provider];
+  if (!item || !Object.hasOwn(item, 'tier_models')) return decision.model;
+  const candidates = apiModelCandidates(env, provider, request, decision, admitted);
   const signal = AbortSignal.timeout(8000);
   for (const model of candidates) {
     const {key} = apiConfiguration(env, provider, {...request, model, complexity: decision.tier});

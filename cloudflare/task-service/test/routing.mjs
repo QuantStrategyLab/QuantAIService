@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {readFileSync} from 'node:fs';
-import {executeAPI,selectAPIModel} from '../src/api.mjs';
+import {apiConfiguration,apiModelCandidates,executeAPI,selectAPIModel} from '../src/api.mjs';
 import {decideRoute,maskProject,providerReadiness,resolveComplexity,validateRoutingConfig} from '../src/routing.mjs';
 
 // Quant-shaped fixtures (not Personal example_* / gemini-text catalogs).
@@ -249,4 +249,17 @@ test('available model selection stays inside the project, provider and complexit
   const count = fetch.mock.callCount();
   await assert.rejects(selectAPIModel(env, 'api', {}, decision, models));
   assert.equal(fetch.mock.callCount(), count + 1);
+});
+
+test('retired scenario preference can route to a replacement after provider rotation', () => {
+  const name = 'gemini';
+  const item = {type: 'gemini_api', enabled: true, api_usage_authorized: true,
+    model: 'current', key_env: 'KEY', tier_models: {standard: ['unapproved', 'current']}};
+  const env = {API_PROVIDERS: {[name]: item}, KEY: 'synthetic'};
+  const admitted = ['retired', 'current'];
+  const decision = {model: 'retired', tier: 'standard'};
+  const models = apiModelCandidates(env, name, {}, decision, admitted);
+  assert.deepEqual(models, ['current']);
+  assert.equal(apiConfiguration(env, name, {model: models[0], complexity: 'standard'}).model, 'current');
+  assert.deepEqual(apiModelCandidates(env, name, {model: 'retired'}, decision, admitted), []);
 });
