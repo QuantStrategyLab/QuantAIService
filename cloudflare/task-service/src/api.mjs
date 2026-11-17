@@ -1,17 +1,57 @@
-// Opt-in port of ai_service.gemini.GeminiProvider. No model discovery or fallback.
+// Gemini model metadata and inference share the same account and fixed API origin.
 import {parseJson,valueOf} from './canonical.mjs';
 const object=v=>v!==null&&typeof v==='object'&&!Array.isArray(v);
 const rejected=()=>{throw Object.assign(new Error('inference rejected'),{name:'SubmissionRejected'});};
+const modelId = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+const modelsURL = 'https://generativelanguage.googleapis.com/v1beta/models/';
+function tierCandidates(item, tier) {
+  if (!Object.hasOwn(item, 'tier_models')) return [item.model];
+  const candidates = item.tier_models?.[tier];
+  if (!Array.isArray(candidates) || !candidates.length || candidates.length > 8 ||
+      candidates.some(model => typeof model !== 'string' || !modelId.test(model))) rejected();
+  return candidates;
+}
+
+export function apiModelCandidates(env, provider, request, decision, admitted) {
+  const item = env.API_PROVIDERS?.[provider];
+  if (!item || !Object.hasOwn(item, 'tier_models')) return [decision.model];
+  const approved = tierCandidates(item, decision.tier);
+  const ordered = approved.includes(decision.model)
+    ? [decision.model, ...approved.filter(model => model !== decision.model)]
+    : approved;
+  return ordered.filter(model => admitted?.includes(model) &&
+    (!Object.hasOwn(request, 'model') || request.model === model));
+}
+
+export async function selectAPIModel(env, provider, request, decision, admitted) {
+  const item = env.API_PROVIDERS?.[provider];
+  if (!item || !Object.hasOwn(item, 'tier_models')) return decision.model;
+  const candidates = apiModelCandidates(env, provider, request, decision, admitted);
+  const signal = AbortSignal.timeout(8000);
+  for (const model of candidates) {
+    const {key} = apiConfiguration(env, provider, {...request, model, complexity: decision.tier});
+    const response = await fetch(modelsURL + model, {
+      headers: {'x-goog-api-key': key}, redirect: 'manual', signal,
+    });
+    if (response.status === 404) { await response.body?.cancel(); continue; }
+    if (!response.ok) { await response.body?.cancel(); rejected(); }
+    const metadata = JSON.parse(await boundedBody(response));
+    if (metadata.name !== 'models/' + model || !Array.isArray(metadata.supportedGenerationMethods)) rejected();
+    if (metadata.supportedGenerationMethods.includes('generateContent')) return model;
+  }
+  rejected();
+}
 export function apiConfiguration(env,name,request){
   const item=env.API_PROVIDERS?.[name];
   if(!object(item)||item.type!=='gemini_api'||item.enabled!==true||item.api_usage_authorized!==true||
-     typeof item.model!=='string'||!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(item.model)||request.model!==item.model||
+     typeof request.model!=='string'||!modelId.test(request.model)||
+     !(request.model===item.model || (request.complexity && tierCandidates(item,request.complexity).includes(request.model)))||
      typeof item.key_env!=='string'||!/^[A-Z][A-Z0-9_]{0,127}$/.test(item.key_env))rejected();
   const maxOutput=item.max_output_tokens??1024,timeout=item.timeout_seconds??60,key=env[item.key_env];
   if(!Number.isSafeInteger(maxOutput)||maxOutput<1||maxOutput>8192||!Number.isSafeInteger(timeout)||timeout<1||timeout>60||
      typeof key!=='string'||!key||/[\r\n]/.test(key)||
      (request.materials??[]).some(m=>object(m)&&m.type==='image'))rejected();
-  return {model:item.model,key,maxOutput,timeout};
+  return {model:request.model,key,maxOutput,timeout};
 }
 async function boundedBody(response){
   const reader=response.body?.getReader();if(!reader)throw Error('invalid inference receipt');

@@ -33,6 +33,10 @@ python -m unittest discover -s tests/task_service -v
 
 ## 配置
 
+月报分别从[各档已批准的有序型号清单](config/monthly-audit-models.json)选择 GPT 和 Claude。正式月报从 `standard` 档开始，证据达到 50,000 个 UTF-8 字节后升为 `complex`，合成验证使用月报默认档。两家用各自的密钥读取模型元数据。仅有 Responses 权限的 OpenAI 密钥可直接推理，仅在服务商明确返回模型不存在后切换候选。回执记录复杂度、选择方式和服务商确认的实际型号，两家分别保留成功或失败结果。Claude 优先选择单价较低的 Sonnet 5 系列，也可回退到 Sonnet 4.6。
+
+稳定型号发布或退役时，通过代码审查更新清单。加入前核对文本 API、模型家族和输入输出单价。当前月报批准的家族为 GPT mini 和 Claude Sonnet。价格以 [OpenAI 官方报价](https://developers.openai.com/api/docs/pricing)和 [Claude 官方报价](https://platform.claude.com/docs/en/about-claude/pricing)为准。
+
 | 变量 | 必填 | 默认值 | 用途 |
 |---|---|---|---|
 | `AI_SERVICE_URL` | 是 | 无 | 任务服务的基础 URL。 |

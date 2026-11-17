@@ -59,8 +59,6 @@ jobs:
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          OPENAI_MODEL: ${{ vars.OPENAI_MODEL }}
-          ANTHROPIC_MODEL: ${{ vars.ANTHROPIC_MODEL }}
           PROBE_PROVIDER: ${{ inputs.probe_provider }}
           AUDIT_PROBE: ${{ inputs.api_probe }}
           PYTHONPATH: src

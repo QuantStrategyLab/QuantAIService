@@ -3,7 +3,7 @@ import {imageMaterials} from './image-materials.mjs';
 import {workerContext} from './projects.mjs';
 import {callbackURL,signingKey,signedHeaders} from './webhooks.mjs';
 import {callbackHost,classifyDelivery,emitEventLog,shortSubscriptionId} from './delivery-log.mjs';
-import {apiConfiguration,executeAPI} from './api.mjs';
+import {apiConfiguration,apiModelCandidates,executeAPI,selectAPIModel} from './api.mjs';
 import {nativeConfiguration,triggerNative} from './native.mjs';
 import {outputValid} from './validation.mjs';
 import {serialize,valueOf,objectNode,nodeFrom,parseJson,replaceFields} from './canonical.mjs';
@@ -217,11 +217,12 @@ export class TaskStore extends DurableObject {
         decision = decideRoute(policy.routing, request, {
           project: owner,
           providerReady: (name) => this.#providerReady(name, owner, hasDotSubscription, hasMuseSubscription),
-          entryReady: (name, entry) => {
+          entryReady: (name, entry, tier) => {
             if (request.mode === 'api') {
               try {
-                apiConfiguration(this.env, name, {...request, model: entry.model});
-                return [true, 'ready'];
+                const candidates = apiModelCandidates(this.env, name, request, {model: entry.model, tier}, policy.models[name]);
+                const config = apiConfiguration(this.env, name, {...request, model: candidates[0], complexity: tier});
+                return [true, 'ready', config.model];
               } catch {
                 return [false, 'api_model_mismatch'];
               }
@@ -237,6 +238,9 @@ export class TaskStore extends DurableObject {
             return [true, 'ready'];
           },
         });
+        if (request.mode === 'api') {
+          decision.model = await selectAPIModel(this.env, decision.provider, request, decision, policy.models[decision.provider]);
+        }
       } catch (e) {
         if (e.name === "RoutingError" && e.message === "no ready provider for scenario") denied(e.message);
         denied("execution mode is unavailable");
