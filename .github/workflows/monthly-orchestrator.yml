@@ -9,6 +9,11 @@ on:
         description: 'Run one synthetic request per model, without source collection or issue publication'
         type: boolean
         default: false
+      probe_provider:
+        description: 'Provider to verify for a synthetic probe'
+        type: choice
+        options: [both, openai, anthropic]
+        default: both
       month:
         description: 'Report month (YYYY-MM); empty uses current UTC month'
         required: false
@@ -56,11 +61,12 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           OPENAI_MODEL: ${{ vars.OPENAI_MODEL }}
           ANTHROPIC_MODEL: ${{ vars.ANTHROPIC_MODEL }}
+          PROBE_PROVIDER: ${{ inputs.probe_provider }}
           AUDIT_PROBE: ${{ inputs.api_probe }}
           PYTHONPATH: src
         run: |
           if [[ "$AUDIT_PROBE" == "true" ]]; then
-            mode=(--probe)
+            mode=(--probe --probe-provider "${PROBE_PROVIDER:-both}")
           else
             mode=(--report "$RUNNER_TEMP/qar-monthly.json")
           fi
