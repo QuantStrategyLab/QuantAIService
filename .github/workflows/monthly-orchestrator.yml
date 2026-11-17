@@ -5,6 +5,10 @@ on:
     - cron: '17 4 3 * *'
   workflow_dispatch:
     inputs:
+      api_probe:
+        description: 'Run one synthetic request per model, without source collection or issue publication'
+        type: boolean
+        default: false
       month:
         description: 'Report month (YYYY-MM); empty uses current UTC month'
         required: false
@@ -34,6 +38,7 @@ jobs:
         with:
           python-version: '3.12'
       - name: Collect source-owned monthly evidence
+        if: ${{ !inputs.api_probe }}
         env:
           GH_TOKEN: ${{ github.token }}
           REPORT_MONTH: ${{ inputs.month }}
@@ -44,9 +49,33 @@ jobs:
             arguments+=(--publish)
           fi
           python scripts/monthly_audit_report.py --month "$REPORT_MONTH" "${arguments[@]}" > "$RUNNER_TEMP/qar-monthly.json"
+      - name: Run independent GPT and Claude audits
+        if: ${{ github.repository == 'QuantStrategyLab/QuantAIService' && github.ref == 'refs/heads/main' && github.run_attempt == 1 && (inputs.api_probe || github.event_name == 'schedule') }}
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_MODEL: ${{ vars.OPENAI_MODEL }}
+          ANTHROPIC_MODEL: ${{ vars.ANTHROPIC_MODEL }}
+          AUDIT_PROBE: ${{ inputs.api_probe }}
+          PYTHONPATH: src
+        run: |
+          if [[ "$AUDIT_PROBE" == "true" ]]; then
+            mode=(--probe)
+          else
+            mode=(--report "$RUNNER_TEMP/qar-monthly.json")
+          fi
+          python scripts/monthly_api_audit.py "${mode[@]}" --output "$RUNNER_TEMP/qar-monthly-api.json"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        if: ${{ !inputs.api_probe && always() }}
         with:
           name: qar-monthly-evidence-${{ github.run_id }}
           path: ${{ runner.temp }}/qar-monthly.json
           retention-days: 90
           if-no-files-found: error
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        if: ${{ always() && github.repository == 'QuantStrategyLab/QuantAIService' && github.ref == 'refs/heads/main' && github.run_attempt == 1 && (inputs.api_probe || github.event_name == 'schedule') }}
+        with:
+          name: qar-monthly-api-${{ github.run_id }}
+          path: ${{ runner.temp }}/qar-monthly-api.json
+          retention-days: 90
+          if-no-files-found: warn
