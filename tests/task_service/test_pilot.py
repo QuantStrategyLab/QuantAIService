@@ -211,7 +211,7 @@ class PilotIntegrationTests(unittest.TestCase):
         spec = importlib.util.spec_from_file_location('candidate', ROOT / 'scripts/prepare_pilot_config.py')
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
-        config = json.loads((ROOT / 'config/quant.example.json').read_text())
+        config = json.loads((ROOT / 'tests/fixtures/legacy-provider-config.json').read_text())
         config['enabled'] = True
         grant = {'issuer': 'https://CONFIGURE_IDENTITY_PROVIDER', 'subject': 'synthetic-submit-subject',
                  'identity': 'synthetic-pilot-submitter', 'project': 'example-org/ExampleProject',
@@ -236,7 +236,7 @@ class PilotIntegrationTests(unittest.TestCase):
         import sys
         with tempfile.TemporaryDirectory() as directory:
             directory = Path(directory)
-            config = json.loads((ROOT / 'config/quant.example.json').read_text())
+            config = json.loads((ROOT / 'tests/fixtures/legacy-provider-config.json').read_text())
             config['enabled'] = True
             grant = {'issuer': 'https://CONFIGURE_IDENTITY_PROVIDER', 'subject': 'synthetic-sensitive-subject',
                      'identity': 'synthetic-pilot-submitter', 'project': 'example-org/ExampleProject',

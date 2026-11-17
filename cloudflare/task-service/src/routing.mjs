@@ -217,7 +217,10 @@ export function providerReadiness(name,{env={},configuredProviders={},hasDotSubs
   const item=configuredProviders[name];
   if(!item)return [false,'not_configured'];
   const kind=item.type;
-  if(kind==='dot_events')return hasDotSubscription?[true,'ready']:[false,'no_subscription'];
+  if(kind==='dot_events'){
+    if(item.enabled===false)return [false,'disabled'];
+    return hasDotSubscription?[true,'ready']:[false,'no_subscription'];
+  }
   if(kind==='grok_webhook'||kind==='claude_routine'){
     if(item.enabled!==true)return [false,'disabled'];
     if(name==='grokbot'&&!env.AI_SERVICE_GROK_READY)return [false,'grok_not_ready'];

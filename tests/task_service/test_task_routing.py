@@ -20,7 +20,7 @@ from quant_ai_service.task_routing import (
 
 
 ROOT = Path(__file__).resolve().parents[2]
-EXAMPLE = ROOT / 'config' / 'quant.example.json'
+EXAMPLE = ROOT / 'tests' / 'fixtures' / 'legacy-provider-config.json'
 REQUIRED_SCENARIOS = {
     'pr_code_review',
     'strategy_research_summary',

@@ -1,5 +1,7 @@
 # QuantAIService
 
+示例配置的 Agent 任务由 Muse 执行。API 任务走组织单独配置的后端，无需 Muse 订阅。启用 API 后端前先配置已批准的模型与凭据。
+
 [文档索引](docs/README.md)：当前任务运行时、V2 配置、监控与历史架构。
 
 独立打包、按项目隔离的 AI 任务运行时。

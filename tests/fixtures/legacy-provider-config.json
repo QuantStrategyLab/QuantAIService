@@ -1,0 +1,368 @@
+{
+  "enabled": false,
+  "resource": "https://CONFIGURE_SERVICE_HOST/mcp",
+  "state_path": "/var/lib/quant-ai-service/tasks.sqlite",
+  "issuers": {
+    "https://CONFIGURE_IDENTITY_PROVIDER": {
+      "jwks_url": "https://CONFIGURE_IDENTITY_PROVIDER/.well-known/jwks.json",
+      "require_scope": true
+    },
+    "https://token.actions.githubusercontent.com": {
+      "jwks_url": "https://token.actions.githubusercontent.com/.well-known/jwks",
+      "require_scope": false
+    }
+  },
+  "providers": {
+    "dot": {
+      "type": "dot_events"
+    },
+    "grok": {
+      "type": "grok_webhook",
+      "url": "https://CONFIGURE_CURSOR_ROUTINE_WEBHOOK",
+      "key_env": "AI_SERVICE_GROK_WEBHOOK_KEY",
+      "enabled": false
+    },
+    "claude": {
+      "type": "claude_routine",
+      "enabled": false,
+      "url": "https://api.anthropic.com/v1/claude_code/routines/trig_CONFIGURE/fire",
+      "key_env": "AI_SERVICE_CLAUDE_ROUTINE_TOKEN"
+    },
+    "grokbot": {
+      "type": "grok_webhook",
+      "enabled": true,
+      "url": "https://CONFIGURE_GROKBOT_ROUTINE_HOST/trigger",
+      "key_env": "AI_SERVICE_GROKBOT_WEBHOOK_KEY"
+    },
+    "claudeduet": {
+      "type": "claudeduet",
+      "enabled": false
+    },
+    "muse": {
+      "type": "muse",
+      "enabled": false
+    },
+    "gemini": {
+      "type": "gemini_api",
+      "enabled": false,
+      "model": "configured-api",
+      "key_env": "AI_SERVICE_GEMINI_API_KEY",
+      "api_usage_authorized": false
+    },
+    "chatgpt-plan": {
+      "type": "chatgpt_plan_oauth",
+      "plan_usage_authorized": false,
+      "token_env": "AI_SERVICE_CHATGPT_PLAN_TOKEN"
+    }
+  },
+  "projects": {
+    "example-org/ExampleResearch": {
+      "providers": {
+        "agent": "dot",
+        "agent:second-opinion": "grok",
+        "agent:grokbot": "grokbot",
+        "agent:claudeduet": "claudeduet",
+        "agent:muse": "muse",
+        "api": "chatgpt-plan",
+        "api:gemini": "gemini"
+      },
+      "models": {
+        "dot": [
+          "configured-dot",
+          "configured-dot-fast",
+          "configured-dot-strong"
+        ],
+        "grok": [
+          "configured-grok"
+        ],
+        "grokbot": [
+          "configured-grokbot",
+          "configured-grokbot-fast",
+          "configured-grokbot-strong"
+        ],
+        "claudeduet": [
+          "configured-claudeduet"
+        ],
+        "muse": [
+          "configured-muse",
+          "configured-muse-fast",
+          "configured-muse-strong"
+        ],
+        "chatgpt-plan": [
+          "configured-chatgpt-plan",
+          "configured-chatgpt-plan-fast",
+          "configured-chatgpt-plan-strong"
+        ],
+        "gemini": [
+          "configured-api",
+          "configured-api-fast"
+        ]
+      },
+      "max_active": 2,
+      "max_timeout_seconds": 3600,
+      "routing": {
+        "schema_version": "task.routing.v1",
+        "categories": {
+          "quant": {
+            "parent": null,
+            "default_complexity": "standard"
+          },
+          "quant_review": {
+            "parent": "quant",
+            "default_complexity": "complex"
+          },
+          "quant_research": {
+            "parent": "quant",
+            "default_complexity": "standard"
+          },
+          "quant_ops": {
+            "parent": "quant",
+            "default_complexity": "complex"
+          },
+          "quant_signals": {
+            "parent": "quant",
+            "default_complexity": "standard"
+          },
+          "quant_notify": {
+            "parent": "quant",
+            "default_complexity": "simple"
+          }
+        },
+        "scenarios": {
+          "pr_code_review": {
+            "category": "quant_review",
+            "mode": "agent",
+            "providers": ["muse", "grokbot", "dot"],
+            "matching": {
+              "hints": ["pull-request", "code-review", "architecture-audit"],
+              "default_complexity": "complex",
+              "min_with_image": "complex",
+              "size_thresholds": {
+                "standard": 4000,
+                "complex": 50000
+              }
+            },
+            "tier_overrides": {
+              "complex": {
+                "dot": {
+                  "model": "configured-dot-strong",
+                  "reasoning_effort": "high"
+                },
+                "muse": {
+                  "model": "configured-muse-strong",
+                  "reasoning_effort": "high"
+                },
+                "grokbot": {
+                  "model": "configured-grokbot-strong",
+                  "reasoning_effort": "high"
+                }
+              }
+            }
+          },
+          "strategy_research_summary": {
+            "category": "quant_research",
+            "mode": "agent",
+            "providers": ["muse", "grokbot", "dot"],
+            "matching": {
+              "hints": ["research-summary", "strategy-brief", "portfolio-note"],
+              "default_complexity": "standard"
+            }
+          },
+          "reconciliation_anomaly": {
+            "category": "quant_ops",
+            "mode": "agent",
+            "providers": ["muse", "grokbot", "dot"],
+            "matching": {
+              "hints": ["recon-diff", "ops-anomaly", "ledger-mismatch"],
+              "default_complexity": "complex",
+              "min_with_image": "complex"
+            }
+          },
+          "signal_context": {
+            "category": "quant_signals",
+            "mode": "agent",
+            "providers": ["muse", "grokbot", "dot"],
+            "matching": {
+              "hints": ["signal-context", "feature-note"],
+              "default_complexity": "standard"
+            }
+          },
+          "quick_notification": {
+            "category": "quant_notify",
+            "mode": "api",
+            "providers": ["chatgpt-plan"],
+            "matching": {
+              "hints": ["short-alert", "status-ping"],
+              "default_complexity": "simple"
+            }
+          }
+        },
+        "complexity_tiers": {
+          "simple": {
+            "dot": {
+              "model": "configured-dot-fast",
+              "reasoning_effort": "low"
+            },
+            "grokbot": {
+              "model": "configured-grokbot-fast",
+              "reasoning_effort": "low"
+            },
+            "muse": {
+              "model": "configured-muse-fast",
+              "reasoning_effort": "low"
+            },
+            "chatgpt-plan": {
+              "model": "configured-chatgpt-plan-fast",
+              "reasoning_effort": "low"
+            },
+            "gemini": {
+              "model": "configured-api-fast",
+              "reasoning_effort": "low"
+            }
+          },
+          "standard": {
+            "dot": {
+              "model": "configured-dot",
+              "reasoning_effort": "medium"
+            },
+            "grokbot": {
+              "model": "configured-grokbot",
+              "reasoning_effort": "medium"
+            },
+            "muse": {
+              "model": "configured-muse",
+              "reasoning_effort": "medium"
+            },
+            "chatgpt-plan": {
+              "model": "configured-chatgpt-plan",
+              "reasoning_effort": "medium"
+            },
+            "gemini": {
+              "model": "configured-api",
+              "reasoning_effort": "medium"
+            }
+          },
+          "complex": {
+            "dot": {
+              "model": "configured-dot-strong",
+              "reasoning_effort": "high"
+            },
+            "grokbot": {
+              "model": "configured-grokbot-strong",
+              "reasoning_effort": "high"
+            },
+            "muse": {
+              "model": "configured-muse-strong",
+              "reasoning_effort": "high"
+            },
+            "chatgpt-plan": {
+              "model": "configured-chatgpt-plan-strong",
+              "reasoning_effort": "high"
+            },
+            "gemini": {
+              "model": "configured-api",
+              "reasoning_effort": "high"
+            }
+          }
+        },
+        "heuristics": {
+          "size_simple_max": 1500,
+          "size_standard": 4000,
+          "size_complex": 50000,
+          "image_complex_size": 20000,
+          "materials_complex_count": 8
+        }
+      }
+    }
+  },
+  "grants": [
+    {
+      "issuer": "https://CONFIGURE_IDENTITY_PROVIDER",
+      "subject": "CONFIGURE_DOT_CONNECTION_SUBJECT",
+      "identity": "quant-dot",
+      "provider": "dot",
+      "scopes": [
+        "tasks:read",
+        "tasks:work",
+        "events:subscribe"
+      ],
+      "owner": "example-org",
+      "claims": {
+        "azp": "CONFIGURE_DOT_CLIENT"
+      }
+    },
+    {
+      "issuer": "https://CONFIGURE_IDENTITY_PROVIDER",
+      "subject": "CONFIGURE_GROK_CONNECTION_SUBJECT",
+      "identity": "quant-grok",
+      "provider": "grok",
+      "scopes": [
+        "tasks:read",
+        "tasks:work"
+      ],
+      "owner": "example-org",
+      "claims": {
+        "azp": "CONFIGURE_GROK_CLIENT"
+      }
+    },
+    {
+      "issuer": "https://CONFIGURE_IDENTITY_PROVIDER",
+      "subject": "CONFIGURE_GROKBOT_CONNECTION_SUBJECT",
+      "identity": "quant-grokbot",
+      "provider": "grokbot",
+      "scopes": [
+        "tasks:read",
+        "tasks:work"
+      ],
+      "owner": "example-org",
+      "claims": {
+        "azp": "CONFIGURE_GROKBOT_CLIENT"
+      }
+    },
+    {
+      "issuer": "https://CONFIGURE_IDENTITY_PROVIDER",
+      "subject": "CONFIGURE_CLAUDEDUET_CONNECTION_SUBJECT",
+      "identity": "quant-claudeduet",
+      "provider": "claudeduet",
+      "scopes": [
+        "tasks:read",
+        "tasks:work"
+      ],
+      "owner": "example-org",
+      "claims": {
+        "azp": "CONFIGURE_CLAUDEDUET_CLIENT"
+      }
+    },
+    {
+      "issuer": "https://CONFIGURE_IDENTITY_PROVIDER",
+      "subject": "CONFIGURE_MUSE_CONNECTION_SUBJECT",
+      "identity": "quant-muse",
+      "provider": "muse",
+      "scopes": [
+        "tasks:read",
+        "tasks:work",
+        "events:subscribe"
+      ],
+      "owner": "example-org",
+      "claims": {
+        "azp": "CONFIGURE_MUSE_CLIENT"
+      }
+    },
+    {
+      "issuer": "https://token.actions.githubusercontent.com",
+      "subject": "repo:example-org/ExampleResearch:ref:refs/heads/main",
+      "identity": "example-project-workflow",
+      "project": "example-org/ExampleResearch",
+      "scopes": [
+        "tasks:read",
+        "tasks:submit"
+      ],
+      "claims": {
+        "repository": "example-org/ExampleResearch",
+        "workflow_ref": "example-org/ExampleResearch/.github/workflows/ai-task.yml@refs/heads/main",
+        "ref": "refs/heads/main"
+      }
+    }
+  ],
+  "owner": "example-org"
+}

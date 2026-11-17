@@ -94,9 +94,9 @@ try{
   assert.deepEqual(config.AUTH_CLIENTS,{});assert.equal(config.ADMISSIONS_JSON,'[]');
   assert.deepEqual(config.PROJECT_CONTEXTS,{});assert.deepEqual(config.PROJECT_POLICIES,{});
   const agents=config.AGENT_PROVIDERS;
-  assert.equal(agents.grokbot.enabled,true);assert.equal(agents.grokbot.key_env,'AI_SERVICE_GROKBOT_WEBHOOK_KEY');
-  assert.equal(agents.claudeduet.enabled,false);assert.equal(agents.claudeduet.type,'claudeduet');
-  assert.equal(agents.muse.enabled,false);assert.equal(agents.muse.type,'muse');
+  assert.deepEqual(agents,{muse:{type:'muse',enabled:true}});
+  assert.equal(config.API_PROVIDERS['gemini'].type,'gemini_api');
+  assert.equal(agents.muse.enabled,true);assert.equal(agents.muse.type,'muse');
   assert.equal(agents.muse.url,undefined);
   assert.equal(agents.muse.key_env,undefined);
   assert.throws(()=>nativeConfiguration(config,'grokbot'));

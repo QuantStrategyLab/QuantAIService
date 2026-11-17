@@ -1,5 +1,7 @@
 # QuantAIService
 
+Reference configurations route Agent tasks to Muse. API tasks use the organization’s separately configured backend, independently of Muse. Enable the API provider after configuring its approved model and credentials.
+
 [Documentation index](docs/README.md) — current task runtime, V2 configuration, monitoring and historical architecture.
 
 An independently packaged, project-scoped task runtime for AI work.
