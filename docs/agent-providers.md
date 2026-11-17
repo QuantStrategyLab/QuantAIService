@@ -9,7 +9,7 @@ attestations. Agent mode stays separate from API mode (`gemini_api` and similar)
 | --- | --- | --- | --- |
 | `grokbot` | `grok_webhook` | `true` | Existing Grok Bot Routine webhook |
 | `claudeduet` | `claudeduet` | `false` | Scaffold only; no verified trigger protocol |
-| `muse` | `muse` | `false` | Scaffold only; Cloudflare MCP claim identity reserved; no outbound launch host |
+| `muse` | `muse` | `false` | Cloudflare event subscription or scheduled MCP polling |
 
 The enclosing Python example service remains `enabled: false`. Grok Bot is
 explicitly enabled at the provider level as requested, but this does not deploy
@@ -39,11 +39,21 @@ Shared surface with Dot / GrokBot / ClaudeDuet is the **Cloudflare Worker** task
 service (OAuth, queue, MCP claim/report). Each named agent keeps its own outbound
 wake channel; they must not share a Cursor Cloud Agents launch path.
 
-Muse currently has **no verified Cloudflare-compatible outbound trigger**. Its
-reserved type accepts disabled registration only. Setting `enabled: true` fails
-closed in both runtimes. Do not bind `url`, `key_env`, Cursor API keys, or
-`AI_SERVICE_MUSE_READY` for Muse. Scenario routing always reports muse as
-`unavailable` until a non-Cursor, service-compatible trigger exists.
+The Cloudflare Worker supports an independently scoped Muse webhook
+subscription and scheduled polling. Keep the example provider disabled until
+its project and worker grant pass end-to-end acceptance. Cloudflare does not
+use Cursor Cloud Agents or require a Muse API key.
+
+### Scheduled polling
+
+A personal Muse cloud schedule can call `poll_muse_tasks` using the project’s
+Muse OAuth grant. The response contains up to eight claimable tasks or pending
+tasks already claimed by that worker, ordered by deadline. Continue with the
+existing claim and report tools. Set `muse_poll_seconds` on an approved entry
+in `PROJECT_POLICIES` to select scheduled polling. The setting bounds the age
+of the last successful poll. New tasks need a deadline longer than this window.
+Enable it after measuring that the scheduling delay plus execution time fits
+the caller’s deadline.
 
 ## Routing and admission
 
@@ -72,10 +82,8 @@ existing protected configuration process:
 - The matching `ADMISSIONS_JSON` entry binding organization, project, user,
   owner, client and provider. Caller identities remain submit/read only.
 
-No worker gains `events:subscribe` for these names: event delivery stays with
-Dot; Grok Bot uses Routine webhooks; Muse stays claim-identity scaffold only.
-Existing project/provider checks reject
-legacy `grok` or `claude` workers claiming a new provider's task. Registering an
+Dot and Muse worker grants use `events:subscribe` for scoped queue delivery.
+Grok Bot uses Routine webhooks. Existing project/provider checks reject legacy `grok` or `claude` workers claiming a new provider's task. Registering an
 OAuth public client alone does not grant task access. This change runs no
 registration or grant-writing tooling.
 
@@ -107,6 +115,5 @@ The native three-role briefing consumer also accepts the new provider names
 in its protected role binding. Distinct worker identities and current readback
 remain required; a name alone never yields approval, and Duet / Muse remain
 unavailable in the production runtime until an adapter is verified.
-Keep `muse` disabled until a Cloudflare-compatible Muse Wonder trigger exists
-and MCP worker identity plus cancel/receipt checks are verified. Never wire Muse
-through Cursor Cloud Agents.
+Enable a Muse project route only after verifying its delivery mode, MCP worker
+identity, cancellation and result receipt.
