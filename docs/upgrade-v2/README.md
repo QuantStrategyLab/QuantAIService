@@ -10,6 +10,6 @@
 
 ## Migration history
 
-Former version-specific migration, login-inventory, and V1 retirement notes were archived out of the public repository and are not active connection guides or proof of current deployment. In particular, the former shared-core/thin-wrapper design was superseded by the independent runtime baseline.
+The dated [quant.md](quant.md), [identity-inventory.md](identity-inventory.md) and [retired-v1.md](retired-v1.md) files retain sanitized migration, login-inventory and retirement context. They contain version-specific or environment-specific statements and are not the current connection guide or proof of current login/deployment. In particular, the former shared-core/thin-wrapper design was superseded by the independent runtime baseline.
 
 V1 gateway components and fixed business orchestration are retired from active source. The old Cloudflare dashboard is not a V2 API entry. Business prompts, validation, adoption and financial permissions remain with the owning business repository. This index adds no authority to restore old workflows, merge, deploy, or submit business tasks.
