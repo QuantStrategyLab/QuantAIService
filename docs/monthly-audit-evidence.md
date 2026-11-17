@@ -55,5 +55,4 @@ Automatic reruns skip paid requests and retain the original run's results.
 
 - [Workflow](../.github/workflows/monthly-orchestrator.yml)
 - [Source report-only contract](https://github.com/QuantStrategyLab/UsEquitySnapshotPipelines/blob/main/docs/snapshot-ai-audit-automation.md)
-- [Retired v1](upgrade-v2/retired-v1.zh-CN.md)
 - [GitHub schedule limitations](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#schedule)

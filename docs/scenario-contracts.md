@@ -165,6 +165,6 @@ This loader is opt-in SDK only and is not wired into the server CLI. Do not pass
 
 Not implemented in this module: an endpoint or schedule engine, dispatcher, workflow DSL, auth or grant changes, live API enforcement, budget reservation, V2 envelope integration and result contracts. The current V2 seven-field submission contract is unchanged; compile output is a `TaskSpec`, not a submit-ready V2 envelope. Domain reference resolution and numeric execution stay in caller-owned adapters.
 
-Claude and Grok Routine adapters are disabled by default. Configure their project policy, worker OAuth admission and provider separately; see [Worker configuration](../cloudflare/task-service/README.zh-CN.md). Trigger receipts never prove task completion or the model identity.
+Claude and Grok Routine adapters are disabled by default. Configure their project policy, worker OAuth admission and provider separately; see [Worker configuration](../cloudflare/task-service/README.md) ([简体中文](../cloudflare/task-service/README.zh-CN.md)). Trigger receipts never prove task completion or the model identity.
 
 `grokbot` uses the existing Grok Bot webhook adapter and is enabled in the provider examples; the enclosing Python service stays disabled. `claudeduet` and `muse` are disabled registration scaffolds (not Routine aliases, not API routes). Accepting those worker types in an offline contract does not admit a connection or enable execution. See [agent configuration](agent-providers.md).
