@@ -21,21 +21,95 @@ PROVIDERS = {
 }
 
 
-def review(provider, evidence, env, transport, *, probe=False):
+MODEL_ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,127}')
+POLICY_PATH = Path(__file__).resolve().parents[1] / 'config' / 'monthly-audit-models.json'
+
+
+def evidence_tier(evidence):
+    # Cross-source monthly reviews start at standard, including the synthetic readiness check.
+    return 'complex' if len(evidence.encode('utf-8')) >= 50000 else 'standard'
+
+
+def matches_model(configured, actual):
+    return isinstance(actual, str) and (configured == actual or bool(
+        re.fullmatch(re.escape(configured) + r'-(?:\d{4}-\d{2}-\d{2}|\d{8})', actual)))
+
+
+def model_missing(provider, response, *, inference_model=None):
+    if response.status != 404:
+        return False
+    try:
+        error = json.loads(response.body)['error']
+        if provider == 'openai':
+            return error.get('code') == 'model_not_found'
+        return error.get('type') == 'not_found_error' and (
+            inference_model is None or error.get('message') == 'model: ' + inference_model)
+    except (AttributeError, KeyError, TypeError, ValueError):
+        return False
+
+
+def catalog_scope_denied(response):
+    if response.status == 403:
+        return True
+    if response.status != 401:
+        return False
+    try:
+        error = json.loads(response.body)['error']
+        return (error.get('code') == 'insufficient_permissions' or
+                'api.model.read' in str(error.get('message', '')))
+    except (AttributeError, KeyError, TypeError, ValueError):
+        return False
+
+
+def review(provider, evidence, env, transport, *, candidates, tier, probe=False):
     url, prefix = PROVIDERS[provider]
-    model = env.get(f'{prefix}_MODEL', '').strip()
     key = env.get(f'{prefix}_API_KEY', '').strip()
-    if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,127}', model) or not key or '\n' in key or '\r' in key:
+    if (not isinstance(candidates, list) or not candidates or
+            any(not isinstance(model, str) or not MODEL_ID.fullmatch(model) for model in candidates) or
+            len(candidates) != len(set(candidates)) or not key or '\n' in key or '\r' in key):
         return {'status': 'configuration_missing'}
     headers = {'Content-Type': 'application/json'}
+    if provider == 'openai':
+        headers['Authorization'] = 'Bearer ' + key
+    else:
+        headers.update({'x-api-key': key, 'anthropic-version': '2023-06-01'})
+    catalog = url.rsplit('/', 1)[0] + '/models/'
+    catalog_allowed = True
+    for model in candidates:
+        if catalog_allowed:
+            try:
+                metadata = transport.request(catalog + model, method='GET', headers=headers)
+            except TransportError:
+                return {'status': 'catalog_unavailable'}
+            if model_missing(provider, metadata):
+                continue
+            if provider == 'openai' and catalog_scope_denied(metadata):
+                # A Responses-only key can verify models by explicit inference rejection.
+                catalog_allowed = False
+            elif metadata.status != 200:
+                return {'status': 'catalog_rejected', 'http_status': metadata.status}
+            else:
+                try:
+                    description = json.loads(metadata.body)
+                    if not matches_model(model, description['id']):
+                        return {'status': 'invalid_catalog_receipt'}
+                except (KeyError, TypeError, ValueError):
+                    return {'status': 'invalid_catalog_receipt'}
+        result = infer(provider, model, evidence, tier, transport, headers, probe=probe)
+        if result['status'] != 'model_unavailable':
+            result['selection'] = 'account_catalog' if catalog_allowed else 'inference_only'
+            return result
+    return {'status': 'no_available_candidate'}
+
+
+def infer(provider, model, evidence, tier, transport, headers, *, probe):
+    url = PROVIDERS[provider][0]
     limit = 512 if probe else 2048
     instructions = 'If the observed count is below the expected count, reply exactly AUDIT_PROBE_OK.' if probe else INSTRUCTIONS
     if provider == 'openai':
-        headers['Authorization'] = 'Bearer ' + key
         request = {'model': model, 'instructions': instructions, 'input': evidence,
                    'max_output_tokens': limit, 'store': False}
     else:
-        headers.update({'x-api-key': key, 'anthropic-version': '2023-06-01'})
         request = {'model': model, 'system': instructions,
                    'messages': [{'role': 'user', 'content': evidence}], 'max_tokens': limit}
         if probe:
@@ -44,16 +118,22 @@ def review(provider, evidence, env, transport, *, probe=False):
                 'type': 'object', 'properties': {field: {'type': 'integer'} for field in ('expected', 'observed')},
                 'required': ['expected', 'observed'], 'additionalProperties': False,
             }}}
+        if model in ('claude-sonnet-5', 'claude-sonnet-5-5'):
+            request.setdefault('output_config', {})['effort'] = 'low' if probe else {
+                'simple': 'low', 'standard': 'medium', 'complex': 'high',
+            }[tier]
     try:
         response = transport.request(url, headers=headers, body=json_body(request))
     except TransportError:
         return {'status': 'transport_failed'}
+    if model_missing(provider, response, inference_model=model):
+        return {'status': 'model_unavailable'}
     if response.status != 200:
         return {'status': 'provider_rejected', 'http_status': response.status}
     try:
         reply = json.loads(response.body)
         actual = reply['model']
-        if actual != model and not re.fullmatch(re.escape(model) + r'-(?:\d{4}-\d{2}-\d{2}|\d{8})', actual):
+        if not matches_model(model, actual):
             return {'status': 'model_mismatch'}
         if provider == 'openai':
             if reply['status'] != 'completed':
@@ -99,9 +179,12 @@ def main(argv=None):
     if len(evidence.encode()) > 65536:
         parser.error('monthly evidence exceeds the configured input limit')
     transport = PublicHTTPS(timeout=90)
-    results = {name: review(name, evidence, os.environ, transport, probe=args.probe) for name in providers}
+    tier = evidence_tier(evidence)
+    policy = json.loads(POLICY_PATH.read_text(encoding='utf-8'))
+    results = {name: review(name, evidence, os.environ, transport, candidates=policy[tier].get(name),
+                            tier=tier, probe=args.probe) for name in providers}
     complete = all(result['status'] == 'completed' for result in results.values())
-    args.output.write_text(json.dumps({'probe': args.probe, 'complete': complete, 'quality_accepted': False,
+    args.output.write_text(json.dumps({'probe': args.probe, 'tier': tier, 'complete': complete, 'quality_accepted': False,
                                        'reviews': results}, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
     # Provider output belongs in the review artifact, never in logs or an issue.
     print(json.dumps({name: result['status'] for name, result in results.items()}))

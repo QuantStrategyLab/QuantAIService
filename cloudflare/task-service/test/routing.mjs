@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {readFileSync} from 'node:fs';
-import {executeAPI} from '../src/api.mjs';
+import {apiConfiguration,apiModelCandidates,executeAPI,selectAPIModel} from '../src/api.mjs';
 import {decideRoute,maskProject,providerReadiness,resolveComplexity,validateRoutingConfig} from '../src/routing.mjs';
 
 // Quant-shaped fixtures (not Personal example_* / gemini-text catalogs).
@@ -222,4 +222,58 @@ for (const [model, effort, thinkingConfig] of [
   assert.equal(receipt.model_verification, 'provider_reported');
   assert.equal(receipt.status, 'completed');
   assert.equal(JSON.stringify(receipt).includes('thoughtSignature'), false);
+});
+
+test('available model selection stays inside the project, provider and complexity tier', async (t) => {
+  const item = {type: 'gemini_api', enabled: true, api_usage_authorized: true, model: 'old',
+    key_env: 'TEST_KEY', tier_models: {simple: ['unapproved', 'old', 'image', 'current'], complex: ['strong']}};
+  const env = {API_PROVIDERS: {api: item}, TEST_KEY: 'synthetic-only'};
+  const decision = {model: 'old', tier: 'simple'};
+  const models = ['old', 'image', 'current', 'strong'];
+  const visited = [];
+  const fetch = t.mock.method(globalThis, 'fetch', async (url, options) => {
+    assert.equal(options.redirect, 'manual');
+    assert.equal(options.headers['x-goog-api-key'], env.TEST_KEY);
+    const id = new URL(url).pathname.split('/').at(-1);
+    visited.push(id);
+    if (id === 'old') return new Response(null, {status: 404});
+    return Response.json({name: 'models/' + id, supportedGenerationMethods: id === 'image' ? [] : ['generateContent']});
+  });
+  assert.equal(await selectAPIModel(env, 'api', {}, decision, models), 'current');
+  assert.deepEqual(visited, ['old', 'image', 'current']);
+  visited.length = 0;
+  assert.equal(await selectAPIModel(env, 'api', {}, {...decision, model: 'current'}, models), 'current');
+  assert.deepEqual(visited, ['current']);
+  await assert.rejects(selectAPIModel(env, 'api', {model: 'old'}, decision, models));
+  fetch.mock.mockImplementation(() => new Response(null, {status: 403}));
+  const count = fetch.mock.callCount();
+  await assert.rejects(selectAPIModel(env, 'api', {}, decision, models));
+  assert.equal(fetch.mock.callCount(), count + 1);
+});
+
+test('explicit API pins allow approved replacements after rotation', async (t) => {
+  const name = 'gemini';
+  const item = {type: 'gemini_api', enabled: true, api_usage_authorized: true,
+    model: 'current', key_env: 'KEY', tier_models: {simple: ['unapproved', 'current']}};
+  const env = {API_PROVIDERS: {[name]: item}, KEY: 'synthetic'};
+  const admitted = ['retired', 'current'];
+  const routing = {...ROUTING, scenarios: {...ROUTING.scenarios, rotation: {
+    mode: 'api', providers: [name], matching: {default_complexity: 'simple'},
+    tier_overrides: {simple: {[name]: {model: 'retired', reasoning_effort: 'low'}}},
+  }}};
+  t.mock.method(globalThis, 'fetch', async () =>
+    Response.json({name: 'models/current', supportedGenerationMethods: ['generateContent']}));
+  for (const pin of [{}, {model: 'current'}]) {
+    const request = {mode: 'api', scenario: 'rotation', ...pin};
+    const decision = decideRoute(routing, request, {
+      providerReady: () => [true, 'ready'],
+      entryReady(provider, entry, tier) {
+        const models = apiModelCandidates(env, provider, request, {model: entry.model, tier}, admitted);
+        return [true, 'ready', apiConfiguration(env, provider, {model: models[0], complexity: tier}).model];
+      },
+      log: {info(){}},
+    });
+    assert.equal(await selectAPIModel(env, name, request, decision, admitted), 'current');
+  }
+  assert.deepEqual(apiModelCandidates(env, name, {model: 'retired'}, {model: 'retired', tier: 'simple'}, admitted), []);
 });
