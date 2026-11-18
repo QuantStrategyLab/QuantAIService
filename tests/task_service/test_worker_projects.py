@@ -82,7 +82,7 @@ class WorkerProjectAuthTests(unittest.TestCase):
     def test_unadmitted_list_member_is_rejected_before_state_is_opened(self):
         config = {'enabled': True, 'resource': self.authorizer.resource,
                   'issuers': self.authorizer.issuers, 'grants': [self.grant],
-                  'state_path': '/unused/state.sqlite', 'providers': {'dot': {'type': 'dot_events'}},
+                  'state_path': '/unused/state.sqlite', 'providers': {'dot': {'type': 'dot_events', 'enabled': True}},
                   'projects': {'owner/repo': {'providers': {'agent': 'dot'}, 'models': {'dot': ['configured']}}}}
         with self.assertRaises(ValueError):
             validate_configuration(config)

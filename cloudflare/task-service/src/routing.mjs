@@ -220,7 +220,7 @@ export function providerReadiness(name,{env={},configuredProviders={},hasDotSubs
   if(!item)return [false,'not_configured'];
   const kind=item.type;
   if(kind==='dot_events'){
-    if(item.enabled===false)return [false,'disabled'];
+    if(item.enabled!==true)return [false,'disabled'];
     return hasDotSubscription?[true,'ready']:[false,'no_subscription'];
   }
   if(kind==='grok_webhook'||kind==='claude_routine'){
@@ -229,7 +229,7 @@ export function providerReadiness(name,{env={},configuredProviders={},hasDotSubs
     if(typeof item.key_env!=='string'||!env[item.key_env])return [false,'missing_credential'];
     return [true,'ready'];
   }
-  if(kind==='gemini_api'){
+  if(['gemini_api','openai_api','anthropic_api'].includes(kind)){
     if(item.enabled!==true||item.api_usage_authorized!==true)return [false,'disabled'];
     if(typeof item.key_env!=='string'||!env[item.key_env])return [false,'missing_credential'];
     return [true,'ready'];

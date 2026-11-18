@@ -140,9 +140,6 @@ export class TaskStore extends DurableObject {
 
   #providerReady(name, owner, hasDotSubscription, hasMuseSubscription) {
     const configured = {...(this.env.AGENT_PROVIDERS ?? {}), ...(this.env.API_PROVIDERS ?? {})};
-    if (this.env.DOT_PROVIDER_NAME || Object.values(this.#policy(owner).providers).includes('dot')) {
-      configured.dot = configured.dot ?? {type: 'dot_events'};
-    }
     return providerReadiness(name, {
       env: this.env,
       configuredProviders: configured,
@@ -267,12 +264,10 @@ export class TaskStore extends DurableObject {
     if (request.mode === "api") {
       try { apiConfiguration(this.env,provider,request); } catch { denied("execution mode is unavailable"); }
     }
-    if (request.mode === 'agent' && provider === 'dot' && this.env.AGENT_PROVIDERS?.dot?.enabled === false) {
-      denied('execution mode is unavailable');
-    }
-    if (request.mode === 'agent' && EVENT_AGENTS.has(provider) && provider !== 'dot') {
+    if (request.mode === 'agent' && EVENT_AGENTS.has(provider)) {
       const item = this.env.AGENT_PROVIDERS?.[provider];
-      if (!item || item.type !== 'muse' || item.enabled !== true) denied('execution mode is unavailable');
+      const expectedType = provider === 'dot' ? 'dot_events' : 'muse';
+      if (!item || item.type !== expectedType || item.enabled !== true) denied('execution mode is unavailable');
     }
     if (request.mode === 'agent' && !EVENT_AGENTS.has(provider)) {
       try { nativeConfiguration(this.env,provider); } catch { denied('execution mode is unavailable'); }
@@ -372,7 +367,7 @@ export class TaskStore extends DurableObject {
       const row = this.#agentRow(owner, taskId, providerName);
       if (row.attempt && (row.worker !== worker || row.attempt !== attemptId)) conflict("task already belongs to another execution attempt");
       if (!row.attempt) {
-        if (this.env.AGENT_PROVIDERS?.[providerName]?.enabled === false) denied("worker is not assigned to this task");
+        if (this.env.AGENT_PROVIDERS?.[providerName]?.enabled !== true) denied("worker is not assigned to this task");
         if (!["submitting", "running", "outcome_unknown"].includes(row.status)) conflict("task cannot be claimed in its current state");
         if (now() >= row.deadline) conflict("task deadline passed");
         this.#state(taskId, "running", { worker, attempt: attemptId, error: null, claimed_at: now() });
@@ -461,7 +456,7 @@ export class TaskStore extends DurableObject {
   async #eventAccess(owner,identity,scopes=['events:subscribe']) {
     if(!EVENT_AGENTS.has(identity.provider)||typeof identity.grantId!=='string'||!identity.grantId||!scopes.every(scope=>identity.scopes?.includes(scope)))return false;
     if(!Object.hasOwn(this.policies,owner) || !admittedProviders(this.policies[owner]).has(identity.provider) ||
-      this.env.AGENT_PROVIDERS?.[identity.provider]?.enabled===false) return false;
+      this.env.AGENT_PROVIDERS?.[identity.provider]?.enabled!==true) return false;
     // Provider 1.2.4 persists grants under this key. No bearer token is stored.
     // Do not cache authority across admissions, sends, retries or restarts.
     let grant;

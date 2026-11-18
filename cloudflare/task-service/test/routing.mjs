@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {readFileSync} from 'node:fs';
 import {apiConfiguration,apiModelCandidates,executeAPI,selectAPIModel} from '../src/api.mjs';
+import {valueOf} from '../src/canonical.mjs';
 import {decideRoute,maskProject,providerReadiness,resolveComplexity,validateRoutingConfig} from '../src/routing.mjs';
 
 // Quant-shaped fixtures (not Personal example_* / gemini-text catalogs).
@@ -113,8 +114,13 @@ test('maskProject and readiness gates',()=>{
   assert.equal(masked.includes('ExampleOrg'),false);
   assert.equal(masked.includes('ExampleRepo'),false);
   assert.deepEqual(providerReadiness('grokbot',{env:{},configuredProviders:{grokbot:{type:'grok_webhook',enabled:true,key_env:'AI_SERVICE_GROKBOT_WEBHOOK_KEY'}}}),[false,'grok_not_ready']);
-  assert.deepEqual(providerReadiness('dot',{configuredProviders:{dot:{type:'dot_events'}},hasDotSubscription:false}),[false,'no_subscription']);
-  assert.deepEqual(providerReadiness('dot',{configuredProviders:{dot:{type:'dot_events'}},hasDotSubscription:true}),[true,'ready']);
+  assert.deepEqual(providerReadiness('dot',{configuredProviders:{dot:{type:'dot_events'}},hasDotSubscription:true}),[false,'disabled']);
+  assert.deepEqual(providerReadiness('dot',{configuredProviders:{dot:{type:'dot_events',enabled:false}},hasDotSubscription:true}),[false,'disabled']);
+  assert.deepEqual(providerReadiness('dot',{configuredProviders:{dot:{type:'dot_events',enabled:true}},hasDotSubscription:false}),[false,'no_subscription']);
+  assert.deepEqual(providerReadiness('dot',{configuredProviders:{dot:{type:'dot_events',enabled:true}},hasDotSubscription:true}),[true,'ready']);
+  assert.deepEqual(providerReadiness('openai',{env:{},configuredProviders:{openai:{type:'openai_api',enabled:true,api_usage_authorized:true,key_env:'OPENAI_KEY'}}}),[false,'missing_credential']);
+  assert.deepEqual(providerReadiness('openai',{env:{OPENAI_KEY:'k'},configuredProviders:{openai:{type:'openai_api',enabled:true,api_usage_authorized:true,key_env:'OPENAI_KEY'}}}),[true,'ready']);
+  assert.deepEqual(providerReadiness('claude',{env:{CLAUDE_KEY:'k'},configuredProviders:{claude:{type:'anthropic_api',enabled:true,api_usage_authorized:true,key_env:'CLAUDE_KEY'}}}),[true,'ready']);
   assert.deepEqual(providerReadiness('chatgpt-plan',{
     env:{},configuredProviders:{'chatgpt-plan':{type:'chatgpt_plan_oauth',plan_usage_authorized:true,token_env:'AI_SERVICE_CHATGPT_PLAN_TOKEN'}},
   }),[false,'missing_credential']);
@@ -276,4 +282,80 @@ test('explicit API pins allow approved replacements after rotation', async (t) =
     assert.equal(await selectAPIModel(env, name, request, decision, admitted), 'current');
   }
   assert.deepEqual(apiModelCandidates(env, name, {model: 'retired'}, {model: 'retired', tier: 'simple'}, admitted), []);
+});
+
+const PNG_1X1='iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jrN8AAAAASUVORK5CYII=';
+
+test('executeAPI supports openai_api and anthropic_api with relaxed bounds', async (t) => {
+  const seen = [];
+  t.mock.method(globalThis, 'fetch', async (url, options) => {
+    seen.push({url, headers: options.headers, body: JSON.parse(options.body)});
+    if (url.includes('openai.com')) {
+      return Response.json({
+        id: 'resp_1', status: 'completed', model: 'gpt-5-mini-test',
+        output: [{type: 'message', content: [{type: 'output_text', text: '{"summary":"ok"}'}]}],
+        usage: {input_tokens: 10, output_tokens: 4, total_tokens: 14},
+      });
+    }
+    return Response.json({
+      model: 'claude-sonnet-test',
+      stop_reason: 'tool_use',
+      content: [{type: 'tool_use', id: 'toolu_1', name: 'record_result', input: {translated: 'bonjour'}}],
+      usage: {input_tokens: 9, output_tokens: 5},
+    });
+  });
+  const env = {
+    API_PROVIDERS: {
+      openai: {
+        type: 'openai_api', enabled: true, api_usage_authorized: true,
+        model: 'gpt-5-mini-test', key_env: 'OPENAI_KEY', max_output_tokens: 32768, timeout_seconds: 180,
+      },
+      claude: {
+        type: 'anthropic_api', enabled: true, api_usage_authorized: true,
+        model: 'claude-sonnet-test', key_env: 'ANTHROPIC_KEY', max_output_tokens: 32768, timeout_seconds: 180,
+      },
+    },
+    OPENAI_KEY: 'synthetic-openai',
+    ANTHROPIC_KEY: 'synthetic-anthropic',
+  };
+  const oSchema = {type: 'object', properties: {summary: {type: 'string'}}, required: ['summary'], additionalProperties: false};
+  const aSchema = {type: 'object', properties: {translated: {type: 'string'}}, required: ['translated'], additionalProperties: false};
+
+  const oRes = await executeAPI(env, 'openai', {
+    model: 'gpt-5-mini-test', objective: 'Audit', reasoning_effort: 'medium',
+    materials: [{type: 'image', mime_type: 'image/png', base64: PNG_1X1}], output_schema: oSchema,
+  }, 180);
+  assert.equal(oRes.status, 'completed');
+  assert.deepEqual(valueOf(oRes.output), {summary: 'ok'});
+  assert.equal(seen[0].body.store, false);
+  assert.equal(seen[0].body.input[0].content[1].type, 'input_image');
+
+  const aRes = await executeAPI(env, 'claude', {
+    model: 'claude-sonnet-test', objective: 'Translate', reasoning_effort: 'high',
+    materials: [{type: 'image', mime_type: 'image/png', base64: PNG_1X1}], output_schema: aSchema,
+  }, 180);
+  assert.equal(aRes.status, 'completed');
+  assert.deepEqual(valueOf(aRes.output), {translated: 'bonjour'});
+  assert.equal(seen[1].headers['anthropic-version'], '2023-06-01');
+  assert.deepEqual(seen[1].body.output_config, {effort: 'high'});
+  assert.equal(seen[1].body.messages[0].content[1].type, 'image');
+
+  await assert.rejects(() => executeAPI(env, 'claude', {
+    model: 'claude-sonnet-test', objective: 'Translate', reasoning_effort: 'xhigh', output_schema: aSchema,
+  }, 60), /inference rejected/);
+});
+
+test('executeAPI preserves non-object Gemini JSON outputs permitted by output_schema', async (t) => {
+  t.mock.method(globalThis, 'fetch', async () => Response.json({
+    modelVersion: 'gemini-2.5-flash',
+    candidates: [{finishReason: 'STOP', content: {parts: [{text: '[1,2]'}]}}],
+  }));
+  const env = {API_PROVIDERS: {gemini: {
+    type: 'gemini_api', enabled: true, api_usage_authorized: true, model: 'gemini-2.5-flash', key_env: 'GEMINI_KEY',
+  }}, GEMINI_KEY: 'synthetic-gemini'};
+  const res = await executeAPI(env, 'gemini', {
+    model: 'gemini-2.5-flash', objective: 'List', output_schema: {type: 'array', items: {type: 'integer'}},
+  }, 60);
+  assert.equal(res.status, 'completed');
+  assert.deepEqual(valueOf(res.output), [1, 2]);
 });

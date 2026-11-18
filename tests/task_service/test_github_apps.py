@@ -23,7 +23,7 @@ def config(owner='owner'):
     return {'enabled': True, 'owner': owner, 'resource': 'https://service.example/mcp',
             'issuers': {}, 'state_path': 'unused.sqlite',
             'projects': {owner + '/repo': {'providers': {'agent': 'dot'}, 'models': {'dot': ['model']}}},
-            'providers': {'dot': {'type': 'dot_events'}},
+            'providers': {'dot': {'type': 'dot_events', 'enabled': True}},
             'grants': [{'identity': 'dot-worker', 'issuer': 'https://issuer.example', 'subject': 'synthetic',
                         'project': owner + '/repo', 'provider': 'dot', 'scopes': ['tasks:work']}],
             'github_apps': {'dot-worker': {'provider': 'dot', 'app_id': 101, 'installation_id': 201,
@@ -108,7 +108,8 @@ class AppRoutesTests(unittest.TestCase):
                 with self.subTest(owner=owner, provider=provider):
                     c = config(owner)
                     identity = provider + '-worker'
-                    c['providers'] = {provider: {'type': 'dot_events' if provider == 'dot' else 'grok_webhook'}}
+                    c['providers'] = {provider: {'type': 'dot_events' if provider == 'dot' else 'grok_webhook',
+                                                 'enabled': True}}
                     c['grants'][0].update(identity=identity, provider=provider)
                     route = {'provider': provider, 'app_id': 101 if provider == 'dot' else 102,
                              'installation_id': 201 if provider == 'dot' else 202, 'private_key_ref': 'synthetic:' + provider}

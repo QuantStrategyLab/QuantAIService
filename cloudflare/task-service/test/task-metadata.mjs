@@ -36,6 +36,7 @@ before(async()=>{
   mf=new Miniflare({cf:false,workers:[{name:'metadata',modules:true,script,compatibilityDate:'2026-07-30',compatibilityFlags:['global_fetch_strictly_public'],
     bindings:{ORGANIZATION:organization,ORGANIZATION_ID:organization==='quant'?'Quant':'Pigbibi',PUBLIC_ORIGIN:origin,
       PROJECT_ID:'synthetic-project',TASK_STORE_NAME:'synthetic-store',AUTH_CLIENTS:{},ADMISSIONS_JSON:'[]',
+      AGENT_PROVIDERS:{dot:{type:'dot_events',enabled:true}},
       GITHUB_WORKLOAD_AUDIENCE:origin+'/v1/tasks',GITHUB_WORKLOAD_GRANTS_JSON:JSON.stringify(grants),
       PROJECT_CONTEXTS:{'synthetic-project':{organization,ownerId:owner,project,providers:['dot']},
         'other-project':{organization,ownerId:owner,project:otherProject,providers:['dot']}},

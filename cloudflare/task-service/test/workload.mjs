@@ -29,6 +29,7 @@ async function organizationFixture(organization, ownerId, internalOwnerId = owne
     claims: {repository: project, workflow_ref: `${project}/.github/workflows/ai-task.yml@${ref}`, ref}};
   const bindings = {ORGANIZATION: organization, ORGANIZATION_ID: organization === 'quant' ? 'Quant' : 'Pigbibi', PUBLIC_ORIGIN: origin,
     PROJECT_ID: projectId, TASK_STORE_NAME: 'synthetic-tasks', AUTH_CLIENTS: {}, ADMISSIONS_JSON: '[]',
+    AGENT_PROVIDERS: {dot: {type: 'dot_events', enabled: true}},
     GITHUB_WORKLOAD_AUDIENCE: origin + '/v1/tasks',
     GITHUB_WORKLOAD_GRANTS_JSON: JSON.stringify([grant]),
     PROJECT_CONTEXTS: {[projectId]: {organization, ownerId: internalOwnerId, project, providers: ['dot']}},
