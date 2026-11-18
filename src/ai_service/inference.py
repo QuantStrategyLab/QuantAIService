@@ -12,6 +12,7 @@ from .transport import PublicHTTPS, json_body
 _MODEL_PATTERN = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,127}')
 _VALID_IMAGE_MIMES = {'image/png', 'image/jpeg', 'image/webp'}
 _VALID_REASONING_EFFORTS = {'none', 'minimal', 'low', 'medium', 'high', 'xhigh'}
+_ANTHROPIC_REASONING_EFFORTS = {'low', 'medium', 'high'}
 _MAX_IMAGE_MATERIALS = 3
 _MAX_IMAGE_BASE64_CHARS = 300_000
 
@@ -95,12 +96,12 @@ def _extract_usage(usage, field_names):
     }
 
 
-def _validate_request_model_and_effort(request, expected_model):
+def _validate_request_model_and_effort(request, expected_model, *, allowed_efforts=_VALID_REASONING_EFFORTS):
     if request['model'] != expected_model:
         raise SubmissionRejected('model is not configured for this provider')
     if 'reasoning_effort' in request:
         effort = request['reasoning_effort']
-        if not isinstance(effort, str) or effort not in _VALID_REASONING_EFFORTS:
+        if not isinstance(effort, str) or effort not in allowed_efforts:
             raise SubmissionRejected('unsupported reasoning_effort')
 
 
@@ -310,7 +311,7 @@ class AnthropicAPIProvider:
         self._transport = transport or PublicHTTPS(timeout=timeout_seconds, max_response_bytes=4_000_000)
 
     def submit(self, request, *, task_id, owner):
-        _validate_request_model_and_effort(request, self._model)
+        _validate_request_model_and_effort(request, self._model, allowed_efforts=_ANTHROPIC_REASONING_EFFORTS)
         content = _build_content(
             request,
             image_part=lambda m: {'type': 'image', 'source': {'type': 'base64', 'media_type': m['mime_type'], 'data': m['base64']}},
@@ -329,6 +330,8 @@ class AnthropicAPIProvider:
             }],
             'tool_choice': {'type': 'tool', 'name': 'record_result'},
         }
+        if 'reasoning_effort' in request:
+            body['output_config'] = {'effort': request['reasoning_effort']}
         timeout = min(self._timeout_seconds, request.get('timeout_seconds', self._timeout_seconds))
         reply = self._transport.request(
             'https://api.anthropic.com/v1/messages',

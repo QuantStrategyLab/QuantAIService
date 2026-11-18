@@ -337,5 +337,25 @@ test('executeAPI supports openai_api and anthropic_api with relaxed bounds', asy
   assert.equal(aRes.status, 'completed');
   assert.deepEqual(valueOf(aRes.output), {translated: 'bonjour'});
   assert.equal(seen[1].headers['anthropic-version'], '2023-06-01');
+  assert.deepEqual(seen[1].body.output_config, {effort: 'high'});
   assert.equal(seen[1].body.messages[0].content[1].type, 'image');
+
+  await assert.rejects(() => executeAPI(env, 'claude', {
+    model: 'claude-sonnet-test', objective: 'Translate', reasoning_effort: 'xhigh', output_schema: aSchema,
+  }, 60), /inference rejected/);
+});
+
+test('executeAPI preserves non-object Gemini JSON outputs permitted by output_schema', async (t) => {
+  t.mock.method(globalThis, 'fetch', async () => Response.json({
+    modelVersion: 'gemini-2.5-flash',
+    candidates: [{finishReason: 'STOP', content: {parts: [{text: '[1,2]'}]}}],
+  }));
+  const env = {API_PROVIDERS: {gemini: {
+    type: 'gemini_api', enabled: true, api_usage_authorized: true, model: 'gemini-2.5-flash', key_env: 'GEMINI_KEY',
+  }}, GEMINI_KEY: 'synthetic-gemini'};
+  const res = await executeAPI(env, 'gemini', {
+    model: 'gemini-2.5-flash', objective: 'List', output_schema: {type: 'array', items: {type: 'integer'}},
+  }, 60);
+  assert.equal(res.status, 'completed');
+  assert.deepEqual(valueOf(res.output), [1, 2]);
 });

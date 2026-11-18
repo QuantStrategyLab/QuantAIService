@@ -190,6 +190,17 @@ class AnthropicAPIProviderTests(unittest.TestCase):
         self.assertEqual(url, 'https://api.anthropic.com/v1/messages')
         self.assertEqual(kwargs['headers']['x-api-key'], 'synthetic-anthropic-key')
         self.assertEqual(kwargs['headers']['anthropic-version'], '2023-06-01')
+        self.assertNotIn('output_config', json.loads(kwargs['body']))
+
+        routed_reply = runtime.providers['claude'].submit(
+            {**req, 'reasoning_effort': 'high'}, task_id='t-effort', owner='owner/repo',
+        )
+        self.assertEqual(routed_reply['status'], 'completed')
+        self.assertEqual(json.loads(self.calls[1][1]['body'])['output_config'], {'effort': 'high'})
+        with self.assertRaises(SubmissionRejected):
+            runtime.providers['claude'].submit(
+                {**req, 'reasoning_effort': 'xhigh'}, task_id='t-bad-effort', owner='owner/repo',
+            )
 
         with tempfile.TemporaryDirectory() as d:
             cfg = {

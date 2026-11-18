@@ -11,6 +11,7 @@ const API_PROVIDER_DEFAULTS = {
   anthropic_api: {maxOutput: 4096, timeout: 90},
 };
 const REASONING_EFFORTS = new Set(['none', 'minimal', 'low', 'medium', 'high', 'xhigh']);
+const ANTHROPIC_EFFORTS = new Set(['low', 'medium', 'high']);
 const THINKING_BUDGET = {low: 0, medium: 1024, high: 8192};
 
 function tierCandidates(item, tier) {
@@ -68,7 +69,11 @@ export function apiConfiguration(env,name,request){
     try{imageMaterials(materials);}catch{rejected();}
   }
   if(Object.hasOwn(request,'reasoning_effort')){
-    const allowed=item.type==='gemini_api'?Object.hasOwn(THINKING_BUDGET,request.reasoning_effort):REASONING_EFFORTS.has(request.reasoning_effort);
+    const allowed=item.type==='gemini_api'
+      ?Object.hasOwn(THINKING_BUDGET,request.reasoning_effort)
+      :item.type==='openai_api'
+        ?REASONING_EFFORTS.has(request.reasoning_effort)
+        :ANTHROPIC_EFFORTS.has(request.reasoning_effort);
     if(!allowed)rejected();
   }
   return {type:item.type,model:request.model,key,maxOutput,timeout};
@@ -147,7 +152,6 @@ async function executeGemini(config,request,timeoutMs){
   const fragments=[];
   for(const part of resultParts){if(!object(part)||typeof part.text!=='string'||Object.keys(part).some(k=>!['text','thought','thoughtSignature'].includes(k)))return failed('provider_reported');if(part.thought!==true)fragments.push(part.text);}
   let output;try{output=parseJson(fragments.join(''));}catch{return failed('provider_reported');}
-  if(output.kind!=='object')return failed('provider_reported');
   const usage=extractUsage(receipt.usageMetadata,[['promptTokenCount','input_tokens'],['candidatesTokenCount','output_tokens'],['totalTokenCount','total_tokens']]);
   return {status:'completed',output,model:config.model,model_verification:'provider_reported',usage};
 }
@@ -193,6 +197,7 @@ async function executeAnthropic(config,request,timeoutMs){
   const body={model:config.model,max_tokens:config.maxOutput,messages:[{role:'user',content}],
     tools:[{name:'record_result',description:'Emit structured JSON output matching the schema.',input_schema:request.output_schema}],
     tool_choice:{type:'tool',name:'record_result'}};
+  if(Object.hasOwn(request,'reasoning_effort'))body.output_config={effort:request.reasoning_effort};
   const raw=await postProviderJSON('https://api.anthropic.com/v1/messages',
     {'Content-Type':'application/json','x-api-key':config.key,'anthropic-version':'2023-06-01'},body,timeoutMs);
   const receiptNode=parseJson(raw);
