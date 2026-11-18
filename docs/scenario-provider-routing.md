@@ -8,12 +8,7 @@ each project policy:
 
 `projects[<id>].routing` / Worker `PROJECT_POLICIES[project].routing`
 
-Python in this repository validates the document and inherits category
-defaults. It does not hard-code business scenario ids. Live fail-closed
-provider selection runs in the Cloudflare task-service Worker
-(`cloudflare/task-service/src/routing.mjs`) when a project policy includes
-`routing` and the submit body carries `scenario`. Without `routing` on the
-policy, `scenario` / `complexity` / `reasoning_effort` remain rejected.
+Python validates the document, inherits category defaults, and runs scenario routing when a project policy defines `routing`. It does not hard-code business scenario ids. Live fail-closed provider selection runs identically in Python (`ai_service.routing`) and the Cloudflare task-service Worker (`cloudflare/task-service/src/routing.mjs`) when a project policy includes `routing` and the submit body carries `scenario`. Without `routing` on the policy, `scenario` / `complexity` / `reasoning_effort` remain rejected.
 
 ## Files
 
@@ -40,42 +35,39 @@ policy, `scenario` / `complexity` / `reasoning_effort` remain rejected.
 | Scenario | Category | Mode | Providers | Matching hints (examples) |
 | --- | --- | --- | --- | --- |
 | `pr_code_review` | quant_review | agent | muse | pull-request, code-review, architecture-audit |
-| `strategy_research_summary` | quant_research | agent | muse | research-summary, strategy-brief, portfolio-note |
+| `strategy_backtest_review` | quant_review | agent | muse | strategy-backtest, backtest-review |
+| `strategy_research_summary` | quant_research | auto | openai, claude, gemini, muse | research-summary, strategy-brief, portfolio-note |
 | `reconciliation_anomaly` | quant_ops | agent | muse | recon-diff, ops-anomaly, ledger-mismatch |
-| `signal_context` | quant_signals | agent | muse | signal-context, feature-note |
-| `quick_notification` | quant_notify | api | chatgpt-plan | short-alert, status-ping |
+| `signal_context` | quant_signals | auto | openai, claude, gemini, muse | signal-context, feature-note |
+| `report_audit` | quant_notify | api | openai, claude | report-audit, audit-summary |
+| `document_translation` | quant_notify | api | openai, claude | document-translation, translate |
+| `quick_notification` | quant_notify | api | openai, claude, gemini | short-alert, status-ping |
 
 The example explicitly sets `matching.default_complexity` to `complex` for
-`pr_code_review` and `reconciliation_anomaly`, `standard` for
-`strategy_research_summary` and `signal_context`, and `simple` for
-`quick_notification`. Omit `matching.default_complexity` to inherit from the
+`pr_code_review`, `strategy_backtest_review`, and `reconciliation_anomaly`, `standard` for
+`strategy_research_summary`, `signal_context`, and `report_audit`, and `simple` for
+`document_translation` and `quick_notification`. Omit `matching.default_complexity` to inherit from the
 category chain; an explicit `null` is invalid. Image / size floors use
 `matching.min_with_image`, `matching.size_thresholds` and global `heuristics` with raise-only semantics from the shared contract.
 
-Quant scenarios are **not** PersonalAIService scenarios; only the
-`task.routing.v1` contract is shared. Personal’s short API example is Gemini;
-Quant’s Python short API example is `chatgpt-plan`. Historical OpenAI and Claude
-dual-audit configuration sits outside this registry.
+Quant scenarios are independent of PersonalAIService's business scenarios; only the
+`task.routing.v1` contract is shared. Separate scheduled Dual-API audits
+(`scripts/monthly_api_audit.py`) invoke OpenAI and Anthropic independently in `api`
+mode using their own frozen evidence pipeline.
 
-Agent and API modes stay separate:
+Execution modes resolve cleanly per scenario and complexity tier:
 
-- **Agent** scenarios route to Muse. A configured Muse worker claims tasks through the existing Agent interface. Other Agent adapters can be configured explicitly when needed.
-- **API** scenarios bind **one** provider. `quick_notification` maps to
-  `chatgpt-plan` (OpenAI plan OAuth / Responses); complexity tiers choose
-  model and reasoning effort. There is no API fallback chain — Gemini stays
-  on legacy `api:gemini` (or another scenario), not a second preference.
-  On Cloudflare, configure a supported Worker API backend such as Gemini under
-  `API_PROVIDERS`. The Python ChatGPT plan adapter requires separate OAuth
-  authorization. The scheduled monthly report aggregates source evidence. Its
-  historical GPT and Claude audit settings do not configure Worker inference.
+- **`agent` scenarios** (`pr_code_review`, `strategy_backtest_review`, `reconciliation_anomaly`): route exclusively to Muse (`muse`). Other agent slots (`grokbot`, `claudeduet`, `dot`) remain disabled in configuration while keeping the adapter framework intact.
+- **`api` scenarios** (`quick_notification`, `report_audit`, `document_translation`): route through `openai` (`openai_api`), `claude` (`anthropic_api`), and `gemini` (`gemini_api`) according to preference order. When `tier_models` is set on an API provider, Python and Worker runtimes verify candidate model availability with provider credentials and accept exact or provider-dated snapshots. See [`config/api-tier-models.json`](../config/api-tier-models.json) and `scripts/refresh_api_models.py` for pricing-bounded tier roster updates.
+- **`auto` scenarios** (`strategy_research_summary`, `signal_context`): accept omitted or `"auto"` `mode` at submit time (with optional `mode_by_tier`); `simple` and `standard` tiers select an `api` backend, while `complex` payloads escalate to `muse` (`agent`).
 
 ## Complexity tier table
 
 | Tier | Provider | Model (example alias) | Reasoning effort |
 | --- | --- | --- | --- |
-| simple | muse / chatgpt-plan / gemini | `*-fast` / `configured-chatgpt-plan-fast` / `configured-api-fast` | low |
-| standard | muse / chatgpt-plan / gemini | `configured-*` / `configured-chatgpt-plan` / `configured-api` | medium |
-| complex | muse / chatgpt-plan / gemini | `*-strong` / `configured-chatgpt-plan-strong` / `configured-api` | high |
+| simple | muse / openai / claude / gemini | `configured-muse-fast` / `CONFIGURE_APPROVED_*` / `configured-api` | low |
+| standard | muse / openai / claude / gemini | `configured-muse` / `CONFIGURE_APPROVED_*` / `configured-api` | medium |
+| complex | muse / openai / claude / gemini | `configured-muse-strong` / `CONFIGURE_APPROVED_*` / `configured-api` | high |
 
 `pr_code_review` sets `tier_overrides.complex` to the strong models explicitly
 (including `muse`). Aliases are synthetic; production names stay in private
@@ -111,7 +103,7 @@ No Python scenario table update is required.
 
 ## Readiness and operations
 
-Unready providers are skipped at submit; if none remain, submit is denied.
+Unready providers (and providers whose mode disagrees with the resolved tier mode) are skipped at submit; if none remain, submit is denied.
 Muse requires a live subscription or an eligible polling worker. Set the API provider and approved model for the selected runtime.
 
 Worker routing unit tests under `cloudflare/task-service/test/routing.mjs` use

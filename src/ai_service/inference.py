@@ -3,13 +3,11 @@ from __future__ import annotations
 
 import base64
 import json
-import re
 
-from .gemini import _strict_json
+from .gemini import MODEL_PATTERN, _strict_json, matches_model, validate_tier_models
 from .runtime import ProviderReply, SubmissionRejected
 from .transport import PublicHTTPS, json_body
 
-_MODEL_PATTERN = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,127}')
 _VALID_IMAGE_MIMES = {'image/png', 'image/jpeg', 'image/webp'}
 _VALID_REASONING_EFFORTS = {'none', 'minimal', 'low', 'medium', 'high', 'xhigh'}
 _ANTHROPIC_REASONING_EFFORTS = {'low', 'medium', 'high'}
@@ -17,15 +15,17 @@ _MAX_IMAGE_MATERIALS = 3
 _MAX_IMAGE_BASE64_CHARS = 300_000
 
 
-def _validate_api_settings(label, *, model, api_usage_authorized, max_output_tokens, timeout_seconds):
+def _validate_api_settings(label, *, model, api_usage_authorized, max_output_tokens,
+                           timeout_seconds, tier_models=None):
     if api_usage_authorized is not True:
         raise ValueError(f'explicit {label} API usage authorization is required')
-    if not isinstance(model, str) or not _MODEL_PATTERN.fullmatch(model):
+    if not isinstance(model, str) or not MODEL_PATTERN.fullmatch(model):
         raise ValueError(f'a fixed {label} model identifier is required')
     if type(max_output_tokens) is not int or not 1 <= max_output_tokens <= 32768:
         raise ValueError('invalid inference output limit')
     if type(timeout_seconds) is not int or not 1 <= timeout_seconds <= 180:
         raise ValueError('invalid inference timeout')
+    return validate_tier_models(tier_models, label=label)
 
 
 def _require_secret(client, message):
@@ -96,13 +96,97 @@ def _extract_usage(usage, field_names):
     }
 
 
-def _validate_request_model_and_effort(request, expected_model, *, allowed_efforts=_VALID_REASONING_EFFORTS):
-    if request['model'] != expected_model:
+def _validate_request_model_and_effort(request, expected_model, *,
+                                       tier_models=None,
+                                       allowed_efforts=_VALID_REASONING_EFFORTS):
+    requested_model = request['model']
+    tier = request.get('complexity')
+    tier_ok = bool(tier_models and tier in tier_models and requested_model in tier_models[tier])
+    if requested_model != expected_model and not tier_ok:
         raise SubmissionRejected('model is not configured for this provider')
     if 'reasoning_effort' in request:
         effort = request['reasoning_effort']
         if not isinstance(effort, str) or effort not in allowed_efforts:
             raise SubmissionRejected('unsupported reasoning_effort')
+    return requested_model
+
+
+def api_model_candidates(tier_models, tier, decision_model, request, admitted):
+    """Return ordered, project-admitted API model candidates for a routing tier."""
+    if tier_models is None:
+        return [decision_model]
+    approved = tier_models.get(tier)
+    if not approved:
+        return []
+    ordered = (
+        [decision_model, *[m for m in approved if m != decision_model]]
+        if decision_model in approved else list(approved)
+    )
+    pinned = request.get('model') if 'model' in request else None
+    return [
+        model for model in ordered
+        if model in admitted and (pinned is None or pinned == model)
+    ]
+
+
+def _is_missing_model_read_scope(raw_body):
+    try:
+        payload = _strict_json(raw_body)
+    except (ValueError, TypeError, UnicodeError):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    error = payload.get('error')
+    if not isinstance(error, dict):
+        return False
+    text = f"{error.get('code', '')} {error.get('message', '')}"
+    return 'api.model.read' in text
+
+
+def select_api_model(provider_type, key_client, *, tier_models, tier, decision_model,
+                     request, admitted, transport=None):
+    """Probe live provider model availability within admitted tier candidates."""
+    if tier_models is None:
+        return decision_model
+    if provider_type not in {'gemini_api', 'openai_api', 'anthropic_api'}:
+        return decision_model
+    candidates = api_model_candidates(tier_models, tier, decision_model, request, admitted)
+    if not candidates:
+        raise SubmissionRejected('no approved tier model is available')
+    key = _require_secret(key_client, 'configured API key is unavailable')
+    http = transport or PublicHTTPS(timeout=8, max_response_bytes=4_000_000)
+    for model in candidates:
+        if provider_type == 'gemini_api':
+            url = 'https://generativelanguage.googleapis.com/v1beta/models/' + model
+            headers = {'x-goog-api-key': key}
+        elif provider_type == 'openai_api':
+            url = 'https://api.openai.com/v1/models/' + model
+            headers = {'Authorization': 'Bearer ' + key}
+        else:
+            url = 'https://api.anthropic.com/v1/models/' + model
+            headers = {'x-api-key': key, 'anthropic-version': '2023-06-01'}
+        reply = http.request(url, method='GET', headers=headers, timeout=8)
+        if reply.status == 404:
+            continue
+        if provider_type == 'openai_api' and reply.status in {401, 403} and _is_missing_model_read_scope(reply.body):
+            return model
+        if reply.status != 200:
+            raise SubmissionRejected('model availability check was rejected')
+        try:
+            metadata = _strict_json(reply.body)
+        except (ValueError, TypeError, UnicodeError):
+            raise SubmissionRejected('invalid model metadata receipt') from None
+        if not isinstance(metadata, dict):
+            raise SubmissionRejected('invalid model metadata receipt')
+        if provider_type == 'gemini_api':
+            methods = metadata.get('supportedGenerationMethods')
+            if metadata.get('name') != 'models/' + model or not isinstance(methods, list):
+                raise SubmissionRejected('invalid model metadata receipt')
+            if 'generateContent' in methods:
+                return model
+        elif matches_model(model, metadata.get('id')):
+            return model
+    raise SubmissionRejected('no approved tier model is available')
 
 
 def _parse_openai_response(raw_body):
@@ -176,7 +260,7 @@ class ChatGPTPlanProvider:
         ok, response = _parse_openai_response(reply.body)
         if not ok or response.get('status') != 'completed':
             return _failed_reply(task_id)
-        if response.get('model') != request['model']:
+        if not matches_model(request['model'], response.get('model')):
             return _failed_reply(task_id, 'mismatch' if response.get('model') else 'unavailable')
         fragments = []
         for item in response.get('output', []):
@@ -204,19 +288,24 @@ class ChatGPTPlanProvider:
 
 class OpenAIAPIProvider:
     mode = 'api'
+    provider_kind = 'openai_api'
 
     def __init__(self, key_client, *, model, api_usage_authorized=False,
-                 max_output_tokens=4096, timeout_seconds=90, transport=None):
-        _validate_api_settings(
+                 max_output_tokens=4096, timeout_seconds=90, transport=None,
+                 tier_models=None):
+        self._tier_models = _validate_api_settings(
             'OpenAI', model=model, api_usage_authorized=api_usage_authorized,
             max_output_tokens=max_output_tokens, timeout_seconds=timeout_seconds,
+            tier_models=tier_models,
         )
         self._key_client, self._model = key_client, model
         self._max_output_tokens, self._timeout_seconds = max_output_tokens, timeout_seconds
         self._transport = transport or PublicHTTPS(timeout=timeout_seconds, max_response_bytes=4_000_000)
 
     def submit(self, request, *, task_id, owner):
-        _validate_request_model_and_effort(request, self._model)
+        expected_model = _validate_request_model_and_effort(
+            request, self._model, tier_models=self._tier_models,
+        )
         content = _build_content(
             request,
             image_part=lambda m: {'type': 'input_image', 'image_url': 'data:' + m['mime_type'] + ';base64,' + m['base64']},
@@ -225,7 +314,7 @@ class OpenAIAPIProvider:
         )
         key = _require_secret(self._key_client, 'configured OpenAI API key is unavailable')
         body = {
-            'model': self._model,
+            'model': expected_model,
             'input': [{'role': 'user', 'content': content}],
             'store': False,
             'max_output_tokens': self._max_output_tokens,
@@ -247,7 +336,7 @@ class OpenAIAPIProvider:
         ok, response = _parse_openai_response(reply.body)
         if not ok or response.get('status') != 'completed':
             return _failed_reply(task_id)
-        if response.get('model') != self._model:
+        if not matches_model(expected_model, response.get('model')):
             return _failed_reply(task_id, 'mismatch' if response.get('model') else 'unavailable')
         output_items = response.get('output', [])
         if not isinstance(output_items, list):
@@ -282,7 +371,7 @@ class OpenAIAPIProvider:
             'task_id': task_id,
             'status': 'completed',
             'output': output,
-            'model': self._model,
+            'model': expected_model,
             'model_verification': 'provider_reported',
             'usage': safe_usage,
         }
@@ -299,19 +388,25 @@ class OpenAIAPIProvider:
 
 class AnthropicAPIProvider:
     mode = 'api'
+    provider_kind = 'anthropic_api'
 
     def __init__(self, key_client, *, model, api_usage_authorized=False,
-                 max_output_tokens=4096, timeout_seconds=90, transport=None):
-        _validate_api_settings(
+                 max_output_tokens=4096, timeout_seconds=90, transport=None,
+                 tier_models=None):
+        self._tier_models = _validate_api_settings(
             'Anthropic', model=model, api_usage_authorized=api_usage_authorized,
             max_output_tokens=max_output_tokens, timeout_seconds=timeout_seconds,
+            tier_models=tier_models,
         )
         self._key_client, self._model = key_client, model
         self._max_output_tokens, self._timeout_seconds = max_output_tokens, timeout_seconds
         self._transport = transport or PublicHTTPS(timeout=timeout_seconds, max_response_bytes=4_000_000)
 
     def submit(self, request, *, task_id, owner):
-        _validate_request_model_and_effort(request, self._model, allowed_efforts=_ANTHROPIC_REASONING_EFFORTS)
+        expected_model = _validate_request_model_and_effort(
+            request, self._model, tier_models=self._tier_models,
+            allowed_efforts=_ANTHROPIC_REASONING_EFFORTS,
+        )
         content = _build_content(
             request,
             image_part=lambda m: {'type': 'image', 'source': {'type': 'base64', 'media_type': m['mime_type'], 'data': m['base64']}},
@@ -320,7 +415,7 @@ class AnthropicAPIProvider:
         )
         key = _require_secret(self._key_client, 'configured Anthropic API key is unavailable')
         body = {
-            'model': self._model,
+            'model': expected_model,
             'max_tokens': self._max_output_tokens,
             'messages': [{'role': 'user', 'content': content}],
             'tools': [{
@@ -348,7 +443,7 @@ class AnthropicAPIProvider:
             raise RuntimeError('invalid inference receipt') from None
         if not isinstance(response, dict):
             raise RuntimeError('invalid inference receipt')
-        if response.get('model') != self._model:
+        if not matches_model(expected_model, response.get('model')):
             return _failed_reply(task_id, 'mismatch' if response.get('model') else 'unavailable')
         if response.get('stop_reason') != 'tool_use':
             return _failed_reply(task_id, 'provider_reported')
@@ -369,7 +464,7 @@ class AnthropicAPIProvider:
             'task_id': task_id,
             'status': 'completed',
             'output': tool_uses[0]['input'],
-            'model': self._model,
+            'model': expected_model,
             'model_verification': 'provider_reported',
             'usage': safe_usage,
         }

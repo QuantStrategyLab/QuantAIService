@@ -83,8 +83,11 @@ strategy backtest and review (`strategy_backtest_review`, `pr_code_review`),
 keep dormant `grokbot`, `claudeduet`, and `dot` slots at `enabled: false` with
 no URLs or secrets, and configure disabled `openai` (`openai_api`), `claude`
 (`anthropic_api`), `gemini` (`gemini_api`), and `chatgpt-plan`
-(`chatgpt_plan_oauth`) API entries alongside `report_audit` and
-`document_translation` API scenarios.
+(`chatgpt_plan_oauth`) API entries alongside `report_audit`,
+`document_translation`, `quick_notification` (`mode: "api"`), and adaptive
+`strategy_research_summary` / `signal_context` (`mode: "auto"`) scenarios.
+See [`config/api-tier-models.json`](config/api-tier-models.json) and
+`scripts/refresh_api_models.py` for curated per-tier API model policy updates.
 
 ## Repository layout
 

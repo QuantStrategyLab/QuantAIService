@@ -12,6 +12,34 @@ import re
 from .runtime import ProviderReply, SubmissionRejected
 from .transport import PublicHTTPS, json_body
 
+MODEL_PATTERN = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,127}')
+TIER_KEYS = frozenset({'simple', 'standard', 'complex'})
+_DATED_SUFFIX = r'-(?:\d{4}-\d{2}-\d{2}|\d{8})'
+
+
+def matches_model(configured: str, reported: object) -> bool:
+    """Accept an exact model identifier or a provider-dated snapshot of it."""
+    if not isinstance(configured, str) or not isinstance(reported, str) or not configured:
+        return False
+    if reported == configured:
+        return True
+    return re.fullmatch(re.escape(configured) + _DATED_SUFFIX, reported) is not None
+
+
+def validate_tier_models(tier_models: object, *, label: str = 'provider') -> dict[str, list[str]] | None:
+    """Validate optional per-tier API model candidate lists."""
+    if tier_models is None:
+        return None
+    if not isinstance(tier_models, dict) or not tier_models or set(tier_models) - TIER_KEYS:
+        raise ValueError(f'invalid {label} tier_models mapping')
+    normalized: dict[str, list[str]] = {}
+    for tier, models in tier_models.items():
+        if (not isinstance(models, list) or not 1 <= len(models) <= 8
+                or any(not isinstance(m, str) or not MODEL_PATTERN.fullmatch(m) for m in models)):
+            raise ValueError(f'invalid {label} tier_models entries')
+        normalized[tier] = list(models)
+    return normalized
+
 
 def _strict_json(data):
     def object_pairs(pairs):
@@ -30,20 +58,32 @@ def _strict_json(data):
 
 class GeminiProvider:
     mode = 'api'
+    provider_kind = 'gemini_api'
 
     def __init__(self, key_client, *, model, api_usage_authorized=False,
-                 max_output_tokens=1024, timeout_seconds=60, transport=None):
+                 max_output_tokens=1024, timeout_seconds=60, transport=None,
+                 tier_models=None):
         if api_usage_authorized is not True:
             raise ValueError('explicit Gemini API usage authorization is required')
-        if not isinstance(model, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,127}', model):
+        if not isinstance(model, str) or not MODEL_PATTERN.fullmatch(model):
             raise ValueError('a fixed Gemini model identifier is required')
         if type(max_output_tokens) is not int or not 1 <= max_output_tokens <= 32768:
             raise ValueError('invalid inference output limit')
         if type(timeout_seconds) is not int or not 1 <= timeout_seconds <= 180:
             raise ValueError('invalid inference timeout')
         self._key_client, self._model = key_client, model
+        self._tier_models = validate_tier_models(tier_models, label='Gemini')
         self._max_output_tokens, self._timeout_seconds = max_output_tokens, timeout_seconds
         self._transport = transport or PublicHTTPS(timeout=timeout_seconds, max_response_bytes=4_000_000)
+
+    def _expected_model(self, request):
+        model = request['model']
+        if model == self._model:
+            return model
+        tier = request.get('complexity')
+        if self._tier_models and tier in self._tier_models and model in self._tier_models[tier]:
+            return model
+        raise SubmissionRejected('model is not configured for this provider')
 
     @staticmethod
     def _failed(task_id, verification='unavailable'):
@@ -51,8 +91,7 @@ class GeminiProvider:
                 'model_verification': verification}
 
     def submit(self, request, *, task_id, owner):
-        if request['model'] != self._model:
-            raise SubmissionRejected('model is not configured for this provider')
+        expected_model = self._expected_model(request)
         parts = [{'text': request['objective']}]
         for material in request.get('materials', []):
             if isinstance(material, dict) and material.get('type') == 'image':
@@ -61,13 +100,27 @@ class GeminiProvider:
         key = self._key_client()
         if not isinstance(key, str) or not key or '\r' in key or '\n' in key:
             raise SubmissionRejected('configured Gemini API key is unavailable')
+        generation_config = {
+            'candidateCount': 1, 'maxOutputTokens': self._max_output_tokens,
+            'responseMimeType': 'application/json',
+            'responseJsonSchema': request['output_schema'],
+        }
+        effort = request.get('reasoning_effort')
+        budgets = {'low': 0, 'medium': 1024, 'high': 8192}
+        if isinstance(effort, str) and effort in budgets:
+            if re.match(r'^gemini-[34][.-]', expected_model):
+                named = ('LOW' if effort == 'medium' and re.match(r'^gemini-3-pro(?:-|$)', expected_model)
+                         else effort.upper())
+                generation_config['thinkingConfig'] = {'thinkingLevel': named}
+            else:
+                budget = (128 if effort == 'low' and re.match(r'^gemini-2\.5-pro(?:-|$)', expected_model)
+                          else budgets[effort])
+                generation_config['thinkingConfig'] = {'thinkingBudget': budget}
         body = {'contents': [{'role': 'user', 'parts': parts}],
-                'generationConfig': {'candidateCount': 1, 'maxOutputTokens': self._max_output_tokens,
-                                     'responseMimeType': 'application/json',
-                                     'responseJsonSchema': request['output_schema']}}
+                'generationConfig': generation_config}
         timeout = min(self._timeout_seconds, request.get('timeout_seconds', self._timeout_seconds))
         reply = self._transport.request(
-            'https://generativelanguage.googleapis.com/v1beta/models/' + self._model + ':generateContent',
+            'https://generativelanguage.googleapis.com/v1beta/models/' + expected_model + ':generateContent',
             headers={'Content-Type': 'application/json', 'x-goog-api-key': key},
             body=json_body(body), timeout=timeout)
         if reply.status in {400, 401, 403, 404, 422, 429}:
@@ -82,7 +135,7 @@ class GeminiProvider:
             raise RuntimeError('invalid inference receipt')
         if response.get('promptFeedback', {}).get('blockReason'):
             return self._failed(task_id)
-        if response.get('modelVersion') != self._model:
+        if not matches_model(expected_model, response.get('modelVersion')):
             return self._failed(task_id, 'mismatch' if response.get('modelVersion') else 'unavailable')
         candidates = response.get('candidates', [])
         if not isinstance(candidates, list) or len(candidates) != 1 or not isinstance(candidates[0], dict):
@@ -113,7 +166,7 @@ class GeminiProvider:
                 if type(value) is int and value >= 0:
                     safe_usage[safe_name] = value
         return {'task_id': task_id, 'status': 'completed', 'output': output,
-                'model': self._model, 'model_verification': 'provider_reported', 'usage': safe_usage}
+                'model': expected_model, 'model_verification': 'provider_reported', 'usage': safe_usage}
 
     def poll(self, handle):
         return ProviderReply(handle['status'], handle.get('output'))

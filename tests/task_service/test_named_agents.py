@@ -36,15 +36,18 @@ class NamedAgentTests(unittest.TestCase):
         for project in config['projects'].values():
             self.assertEqual(project['providers'], {
                 'agent': 'muse', 'agent:muse': 'muse',
-                'api': 'chatgpt-plan', 'api:openai': 'openai', 'api:claude': 'claude', 'api:gemini': 'gemini',
+                'api': 'openai', 'api:openai': 'openai', 'api:claude': 'claude',
+                'api:gemini': 'gemini', 'api:chatgpt-plan': 'chatgpt-plan',
             })
             for name, scenario in project['routing']['scenarios'].items():
                 if scenario['mode'] == 'agent':
                     self.assertEqual(scenario['providers'], ['muse'])
+                elif scenario['mode'] == 'auto':
+                    self.assertEqual(scenario['providers'], ['openai', 'claude', 'gemini', 'muse'])
                 elif name in {'report_audit', 'document_translation'}:
                     self.assertEqual(scenario['providers'], ['openai', 'claude'])
                 else:
-                    self.assertEqual(scenario['providers'], ['chatgpt-plan'])
+                    self.assertEqual(scenario['providers'], ['openai', 'claude', 'gemini'])
 
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()

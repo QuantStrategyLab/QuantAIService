@@ -5,6 +5,14 @@ const object=v=>v!==null&&typeof v==='object'&&!Array.isArray(v);
 const rejected=()=>{throw Object.assign(new Error('inference rejected'),{name:'SubmissionRejected'});};
 const modelId = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const modelsURL = 'https://generativelanguage.googleapis.com/v1beta/models/';
+const openaiModelsURL = 'https://api.openai.com/v1/models/';
+const anthropicModelsURL = 'https://api.anthropic.com/v1/models/';
+const escapeRegExp = value => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+export function matchesModel(configured, reported) {
+  if (typeof configured !== 'string' || !configured || typeof reported !== 'string') return false;
+  return reported === configured ||
+    new RegExp('^' + escapeRegExp(configured) + '-(?:\\d{4}-\\d{2}-\\d{2}|\\d{8})$').test(reported);
+}
 const API_PROVIDER_DEFAULTS = {
   gemini_api: {maxOutput: 1024, timeout: 60},
   openai_api: {maxOutput: 4096, timeout: 90},
@@ -33,21 +41,54 @@ export function apiModelCandidates(env, provider, request, decision, admitted) {
     (!Object.hasOwn(request, 'model') || request.model === model));
 }
 
+function isMissingModelReadScope(raw) {
+  try {
+    const parsed = JSON.parse(raw);
+    const err = parsed?.error;
+    if (!object(err)) return false;
+    return `${err.code ?? ''} ${err.message ?? ''}`.includes('api.model.read');
+  } catch {
+    return false;
+  }
+}
+
 export async function selectAPIModel(env, provider, request, decision, admitted) {
   const item = env.API_PROVIDERS?.[provider];
-  if (!item || !Object.hasOwn(item, 'tier_models') || item.type !== 'gemini_api') return decision.model;
+  if (!item || !Object.hasOwn(item, 'tier_models')) return decision.model;
+  if (!Object.hasOwn(API_PROVIDER_DEFAULTS, item.type)) return decision.model;
   const candidates = apiModelCandidates(env, provider, request, decision, admitted);
   const signal = AbortSignal.timeout(8000);
   for (const model of candidates) {
-    const {key} = apiConfiguration(env, provider, {...request, model, complexity: decision.tier});
-    const response = await fetch(modelsURL + model, {
-      headers: {'x-goog-api-key': key}, redirect: 'manual', signal,
-    });
+    const {type, key} = apiConfiguration(env, provider, {...request, model, complexity: decision.tier});
+    let response;
+    if (type === 'gemini_api') {
+      response = await fetch(modelsURL + model, {
+        headers: {'x-goog-api-key': key}, redirect: 'manual', signal,
+      });
+    } else if (type === 'openai_api') {
+      response = await fetch(openaiModelsURL + model, {
+        headers: {'Authorization': 'Bearer ' + key}, redirect: 'manual', signal,
+      });
+    } else {
+      response = await fetch(anthropicModelsURL + model, {
+        headers: {'x-api-key': key, 'anthropic-version': '2023-06-01'}, redirect: 'manual', signal,
+      });
+    }
     if (response.status === 404) { await response.body?.cancel(); continue; }
+    if (type === 'openai_api' && (response.status === 401 || response.status === 403)) {
+      const errBody = await boundedBody(response);
+      if (isMissingModelReadScope(errBody)) return model;
+      rejected();
+    }
     if (!response.ok) { await response.body?.cancel(); rejected(); }
     const metadata = JSON.parse(await boundedBody(response));
-    if (metadata.name !== 'models/' + model || !Array.isArray(metadata.supportedGenerationMethods)) rejected();
-    if (metadata.supportedGenerationMethods.includes('generateContent')) return model;
+    if (type === 'gemini_api') {
+      if (metadata.name !== 'models/' + model || !Array.isArray(metadata.supportedGenerationMethods)) rejected();
+      if (metadata.supportedGenerationMethods.includes('generateContent')) return model;
+    } else {
+      if (!object(metadata) || !matchesModel(model, metadata.id)) rejected();
+      return model;
+    }
   }
   rejected();
 }
@@ -145,7 +186,7 @@ async function executeGemini(config,request,timeoutMs){
   const receipt=valueOf(parseJson(raw));
   if(!object(receipt))throw Error('invalid inference receipt');
   if(receipt.promptFeedback?.blockReason)return failed();
-  if(receipt.modelVersion!==config.model)return failed(receipt.modelVersion?'mismatch':'unavailable');
+  if(!matchesModel(config.model,receipt.modelVersion))return failed(receipt.modelVersion?'mismatch':'unavailable');
   if(!Array.isArray(receipt.candidates)||receipt.candidates.length!==1||!object(receipt.candidates[0]))return failed('provider_reported');
   const candidate=receipt.candidates[0],resultParts=candidate.content?.parts;
   if(candidate.finishReason!=='STOP'||!Array.isArray(resultParts)||!resultParts.length)return failed('provider_reported');
@@ -169,7 +210,7 @@ async function executeOpenAI(config,request,timeoutMs){
     {'Content-Type':'application/json','Authorization':'Bearer '+config.key},body,timeoutMs);
   const {completed,receipt}=parseOpenAIReceipt(raw);
   if(!completed||receipt.status!=='completed')return failed();
-  if(receipt.model!==config.model)return failed(receipt.model?'mismatch':'unavailable');
+  if(!matchesModel(config.model,receipt.model))return failed(receipt.model?'mismatch':'unavailable');
   if(!Array.isArray(receipt.output))return failed('provider_reported');
   const fragments=[];
   for(const item of receipt.output){
@@ -203,7 +244,7 @@ async function executeAnthropic(config,request,timeoutMs){
   const receiptNode=parseJson(raw);
   if(receiptNode.kind!=='object')throw Error('invalid inference receipt');
   const receipt=valueOf(receiptNode);
-  if(receipt.model!==config.model)return failed(receipt.model?'mismatch':'unavailable');
+  if(!matchesModel(config.model,receipt.model))return failed(receipt.model?'mismatch':'unavailable');
   const contentNode=field(receiptNode,'content');
   if(receipt.stop_reason!=='tool_use'||contentNode?.kind!=='array')return failed('provider_reported');
   const toolUses=contentNode.entries.filter(block=>block.kind==='object'&&field(block,'type')?.value==='tool_use'&&field(block,'name')?.value==='record_result');

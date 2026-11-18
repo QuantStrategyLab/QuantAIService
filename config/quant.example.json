@@ -67,10 +67,11 @@
       "providers": {
         "agent": "muse",
         "agent:muse": "muse",
-        "api": "chatgpt-plan",
+        "api": "openai",
         "api:openai": "openai",
         "api:claude": "claude",
-        "api:gemini": "gemini"
+        "api:gemini": "gemini",
+        "api:chatgpt-plan": "chatgpt-plan"
       },
       "models": {
         "muse": [
@@ -168,8 +169,11 @@
           },
           "strategy_research_summary": {
             "category": "quant_research",
-            "mode": "agent",
+            "mode": "auto",
             "providers": [
+              "openai",
+              "claude",
+              "gemini",
               "muse"
             ],
             "matching": {
@@ -199,8 +203,11 @@
           },
           "signal_context": {
             "category": "quant_signals",
-            "mode": "agent",
+            "mode": "auto",
             "providers": [
+              "openai",
+              "claude",
+              "gemini",
               "muse"
             ],
             "matching": {
@@ -245,7 +252,9 @@
             "category": "quant_notify",
             "mode": "api",
             "providers": [
-              "chatgpt-plan"
+              "openai",
+              "claude",
+              "gemini"
             ],
             "matching": {
               "hints": [

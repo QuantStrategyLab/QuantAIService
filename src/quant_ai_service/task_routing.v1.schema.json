@@ -78,7 +78,17 @@
           "type": "string",
           "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,63}$"
         },
-        "mode": {"enum": ["agent", "api"]},
+        "mode": {"enum": ["agent", "api", "auto"]},
+        "mode_by_tier": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": false,
+          "properties": {
+            "simple": {"enum": ["agent", "api"]},
+            "standard": {"enum": ["agent", "api"]},
+            "complex": {"enum": ["agent", "api"]}
+          }
+        },
         "providers": {
           "type": "array",
           "minItems": 1,
@@ -100,7 +110,9 @@
             "complex": {"$ref": "#/$defs/tier_map"}
           }
         }
-      }
+      },
+      "if": {"required": ["mode_by_tier"]},
+      "then": {"properties": {"mode": {"const": "auto"}}}
     },
     "matching": {
       "type": "object",

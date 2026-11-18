@@ -2,6 +2,11 @@
 // Scenarios and categories are config data; this file never hard-codes business ids.
 const SCHEMA_VERSION='task.routing.v1';
 const TIERS=new Set(['simple','standard','complex']);
+const MODES=new Set(['api','agent','auto']);
+const CONCRETE_MODES=new Set(['api','agent']);
+const DEFAULT_MODE_BY_TIER={simple:'api',standard:'api',complex:'agent'};
+const API_PROVIDER_TYPES=new Set(['gemini_api','openai_api','anthropic_api','chatgpt_plan_oauth']);
+const AGENT_PROVIDER_TYPES=new Set(['muse','dot_events','grok_webhook','claude_routine','claudeduet']);
 const EFFORTS=new Set(['low','medium','high']);
 const PROVIDER=/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const REGISTRY_ID=/^[A-Za-z][A-Za-z0-9_-]{0,63}$/;
@@ -11,6 +16,18 @@ const object=v=>v!==null&&typeof v==='object'&&!Array.isArray(v);
 const fail=message=>{throw Object.assign(new Error(message),{name:'RoutingError'});};
 const requireId=(value,label)=>{if(typeof value!=='string'||!REGISTRY_ID.test(value))fail(`invalid ${label}`);return value;};
 const raiseTier=(current,floor)=>floor&&TIER_RANK[floor]>TIER_RANK[current]?floor:current;
+
+export function configuredProviderMode(item){
+  if(!object(item))return null;
+  if(API_PROVIDER_TYPES.has(item.type))return 'api';
+  if(AGENT_PROVIDER_TYPES.has(item.type))return 'agent';
+  return null;
+}
+
+export function resolveScenarioMode(scenario,tier){
+  if(scenario.mode!=='auto')return scenario.mode;
+  return scenario.mode_by_tier?.[tier]??DEFAULT_MODE_BY_TIER[tier];
+}
 
 export function maskProject(project){
   if(typeof project!=='string'||!project.includes('/'))return '[redacted]';
@@ -66,7 +83,7 @@ function validateHeuristics(heuristics){
   return merged;
 }
 
-export function validateRoutingConfig(routing,models,providers){
+export function validateRoutingConfig(routing,models,providers,providerModes){
   if(routing==null)return {};
   if(!object(routing))fail('routing must be an object');
   if(Object.keys(routing).some(k=>!['schema_version','categories','scenarios','complexity_tiers','heuristics'].includes(k)))fail('unknown routing fields');
@@ -92,9 +109,16 @@ export function validateRoutingConfig(routing,models,providers){
   for(const [name,scenario] of Object.entries(scenarios)){
     requireId(name,'scenario id');
     if(!object(scenario)||!Object.hasOwn(scenario,'mode')||!Object.hasOwn(scenario,'providers'))fail('scenario requires mode and providers');
-    if(Object.keys(scenario).some(k=>!['category','mode','providers','matching','tier_overrides'].includes(k)))fail('unknown scenario fields');
+    if(Object.keys(scenario).some(k=>!['category','mode','mode_by_tier','providers','matching','tier_overrides'].includes(k)))fail('unknown scenario fields');
     if(scenario.category!=null){requireId(scenario.category,'scenario category');if(!Object.hasOwn(categories,scenario.category))fail('scenario category is not registered');}
-    if(!['api','agent'].includes(scenario.mode)||!Array.isArray(scenario.providers)||!scenario.providers.length)fail('scenario providers must be a nonempty ordered list');
+    if(!MODES.has(scenario.mode)||!Array.isArray(scenario.providers)||!scenario.providers.length)fail('scenario providers must be a nonempty ordered list');
+    if(Object.hasOwn(scenario,'mode_by_tier')){
+      if(scenario.mode!=='auto')fail('mode_by_tier requires scenario mode auto');
+      if(!object(scenario.mode_by_tier)||!Object.keys(scenario.mode_by_tier).length)fail('mode_by_tier must be a nonempty tier mapping');
+      for(const [tName,tMode] of Object.entries(scenario.mode_by_tier)){
+        if(!TIERS.has(tName)||!CONCRETE_MODES.has(tMode))fail('mode_by_tier must map tiers to api or agent');
+      }
+    }
     if(new Set(scenario.providers).size!==scenario.providers.length)fail('scenario providers must be unique');
     if(scenario.providers.some(p=>typeof p!=='string'||!PROVIDER.test(p)))fail('invalid provider preference');
     validateMatching(scenario.matching);
@@ -118,6 +142,21 @@ export function validateRoutingConfig(routing,models,providers){
     for(const scenario of Object.values(scenarios)){
       for(const provider of scenario.providers){
         if(!admitted.has(provider))fail('scenario provider is not admitted');
+      }
+    }
+  }
+  if(providerModes&&object(providerModes)){
+    for(const scenario of Object.values(scenarios)){
+      if(scenario.mode!=='auto'){
+        for(const provider of scenario.providers){
+          const pm=providerModes[provider];
+          if(pm!=null&&pm!==scenario.mode)fail('scenario provider mode does not match scenario mode');
+        }
+      }else if(scenario.providers.every(p=>providerModes[p]!=null)){
+        for(const tierName of TIERS){
+          const target=resolveScenarioMode(scenario,tierName);
+          if(!scenario.providers.some(p=>providerModes[p]===target))fail('auto scenario has no provider for resolved tier mode');
+        }
       }
     }
   }
@@ -178,16 +217,21 @@ function tierEntry(routing,scenarioId,tier,provider){
   return entry;
 }
 
-export function decideRoute(routing,request,{project,providerReady,entryReady,log}={}){
+export function decideRoute(routing,request,{project,providerReady,providerMode,entryReady,log}={}){
   routing=validateRoutingConfig(routing);
   const scenarioId=request.scenario;
   if(typeof scenarioId!=='string'||!Object.hasOwn(routing.scenarios,scenarioId))fail('scenario is not configured for this project');
   const configured=routing.scenarios[scenarioId];
-  if(request.mode!==configured.mode)fail('request mode does not match scenario mode');
   const tier=resolveComplexity(request,scenarioId,routing);
+  const effectiveMode=resolveScenarioMode(configured,tier);
+  if(request.mode!=null && request.mode!=='auto' && request.mode!==effectiveMode)fail('request mode does not match scenario mode');
   const category=configured.category??null;
   const skips=[];
   for(const provider of configured.providers){
+    if(typeof providerMode==='function'){
+      const pm=providerMode(provider);
+      if(pm!=null&&pm!==effectiveMode){skips.push(`skip:${provider}:mode_mismatch`);continue;}
+    }
     const [ready,detail]=providerReady(provider);
     if(!ready){skips.push(`skip:${provider}:${detail}`);continue;}
     let entry;
@@ -195,16 +239,16 @@ export function decideRoute(routing,request,{project,providerReady,entryReady,lo
     catch(e){skips.push(`skip:${provider}:${e.message}`);continue;}
     let model=entry.model;
     if(typeof entryReady==='function'){
-      const [ok,why,configuredModel]=entryReady(provider,entry,tier);
+      const [ok,why,configuredModel]=entryReady(provider,entry,tier,effectiveMode);
       if(!ok){skips.push(`skip:${provider}:${why}`);continue;}
       model=configuredModel??model;
     }
     if(Object.hasOwn(request,'model')&&request.model!==model)fail('model does not match complexity tier');
-    let reason=`scenario:${scenarioId};tier:${tier}`;
+    let reason=`scenario:${scenarioId};tier:${tier};mode:${effectiveMode}`;
     if(category)reason=`category:${category};`+reason;
     if(skips.length)reason+=';'+skips.join(';');
-    const decision={provider,scenario:scenarioId,category,tier,model,reasoning_effort:entry.reasoning_effort,mode:configured.mode,reason};
-    const payload={event:'task_routing',project_masked:maskProject(project),provider:decision.provider,category:decision.category,
+    const decision={provider,scenario:scenarioId,category,tier,model,reasoning_effort:entry.reasoning_effort,mode:effectiveMode,reason};
+    const payload={event:'task_routing',project_masked:maskProject(project),provider:decision.provider,mode:decision.mode,category:decision.category,
       tier:decision.tier,model:decision.model,effort:decision.reasoning_effort,reason:decision.reason,scenario:decision.scenario};
     (log??console).info?.(JSON.stringify(payload));
     return decision;

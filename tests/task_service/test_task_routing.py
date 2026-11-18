@@ -148,5 +148,133 @@ class TaskRoutingDataTests(unittest.TestCase):
             self.assertNotIn(f'"{name}"', source)
 
 
+class RuntimeAdaptiveRoutingTests(unittest.TestCase):
+    def test_auto_mode_and_runtime_parity(self):
+        import os
+        import tempfile
+        from unittest.mock import patch
+
+        from ai_service.gemini import matches_model
+        from ai_service.server import build_application
+        from ai_service.transport import HttpReply
+
+        self.assertTrue(matches_model('gpt-5.4-mini', 'gpt-5.4-mini-2026-03-17'))
+        self.assertTrue(matches_model('claude-sonnet-4-6', 'claude-sonnet-4-6-20260514'))
+
+        schema = {
+            'type': 'object',
+            'properties': {'summary': {'type': 'string'}},
+            'required': ['summary'],
+            'additionalProperties': False,
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = {
+                'enabled': True,
+                'owner': 'example-org',
+                'resource': 'https://service.example/mcp',
+                'issuers': {},
+                'grants': [],
+                'state_path': str(Path(tmp) / 'tasks.sqlite'),
+                'providers': {
+                    'muse': {'type': 'muse', 'enabled': True},
+                    'openai': {
+                        'type': 'openai_api', 'enabled': True, 'api_usage_authorized': True,
+                        'model': 'gpt-5.4-mini', 'key_env': 'OPENAI_KEY',
+                        'tier_models': {'simple': ['gpt-5.4-mini'], 'standard': ['gpt-5.4-mini', 'gpt-5.4-mini-alt']},
+                    },
+                    'claude': {
+                        'type': 'anthropic_api', 'enabled': True, 'api_usage_authorized': True,
+                        'model': 'claude-sonnet-4-6', 'key_env': 'ANTHROPIC_KEY',
+                    },
+                },
+                'projects': {
+                    'example-org/QuantRepo': {
+                        'providers': {'agent': 'muse', 'api': 'openai', 'api:claude': 'claude'},
+                        'models': {
+                            'muse': ['configured-muse-fast', 'configured-muse', 'configured-muse-strong'],
+                            'openai': ['gpt-5.4-mini', 'gpt-5.4-mini-alt', 'gpt-5.4'],
+                            'claude': ['claude-haiku-4-5', 'claude-sonnet-4-6', 'claude-opus-4-6'],
+                        },
+                        'routing': {
+                            'schema_version': 'task.routing.v1',
+                            'categories': {'quant_research': {'parent': None, 'default_complexity': 'standard'}},
+                            'scenarios': {
+                                'strategy_research_summary': {
+                                    'category': 'quant_research',
+                                    'mode': 'auto',
+                                    'providers': ['openai', 'claude', 'muse'],
+                                },
+                            },
+                            'complexity_tiers': {
+                                'simple': {
+                                    'openai': {'model': 'gpt-5.4-mini', 'reasoning_effort': 'low'},
+                                    'claude': {'model': 'claude-haiku-4-5', 'reasoning_effort': 'low'},
+                                    'muse': {'model': 'configured-muse-fast', 'reasoning_effort': 'low'},
+                                },
+                                'standard': {
+                                    'openai': {'model': 'gpt-5.4-mini', 'reasoning_effort': 'medium'},
+                                    'claude': {'model': 'claude-sonnet-4-6', 'reasoning_effort': 'medium'},
+                                    'muse': {'model': 'configured-muse', 'reasoning_effort': 'medium'},
+                                },
+                                'complex': {
+                                    'openai': {'model': 'gpt-5.4', 'reasoning_effort': 'high'},
+                                    'claude': {'model': 'claude-opus-4-6', 'reasoning_effort': 'high'},
+                                    'muse': {'model': 'configured-muse-strong', 'reasoning_effort': 'high'},
+                                },
+                            },
+                        },
+                    },
+                },
+            }
+
+            class MockTransport:
+                def request(self, url, **_kwargs):
+                    if url.endswith('/gpt-5.4-mini'):
+                        return HttpReply(404, b'')
+                    if url.endswith('/gpt-5.4-mini-alt'):
+                        return HttpReply(200, json.dumps({'id': 'gpt-5.4-mini-alt'}).encode())
+                    return HttpReply(200, json.dumps({
+                        'id': 'resp_q', 'status': 'completed', 'model': 'gpt-5.4-mini-alt-2026-03-17',
+                        'output': [{'type': 'message', 'content': [{'type': 'output_text', 'text': '{"summary":"ok"}'}]}],
+                    }).encode())
+
+            with patch.dict(os.environ, {'OPENAI_KEY': 'sk-test', 'ANTHROPIC_KEY': 'ak-test'}):
+                app = build_application(cfg)
+                app.runtime.providers['openai']._transport = MockTransport()
+                app.event_buses['muse'].has_active = lambda owner: owner == 'example-org/QuantRepo'
+
+                api_task = app.runtime.submit('example-org/QuantRepo', 'q-api', {
+                    'scenario': 'strategy_research_summary',
+                    'objective': 'summarize daily drift',
+                    'output_schema': schema,
+                })
+                self.assertEqual(api_task['provider'], 'openai')
+                self.assertEqual(api_task['request']['mode'], 'api')
+                self.assertEqual(api_task['request']['model'], 'gpt-5.4-mini-alt')
+                app.runtime.tick()
+                app.runtime.tick()
+                self.assertEqual(app.runtime.get('example-org/QuantRepo', api_task['id'])['status'], 'completed')
+
+                agent_task = app.runtime.submit('example-org/QuantRepo', 'q-agent', {
+                    'mode': 'auto',
+                    'scenario': 'strategy_research_summary',
+                    'complexity': 'complex',
+                    'objective': 'deep backtest review',
+                    'output_schema': schema,
+                })
+                self.assertEqual(agent_task['provider'], 'muse')
+                self.assertEqual(agent_task['request']['mode'], 'agent')
+                self.assertEqual(agent_task['request']['model'], 'configured-muse-strong')
+
+                with self.assertRaises(PermissionError):
+                    app.runtime.submit('example-org/QuantRepo', 'q-bad', {
+                        'mode': 'api',
+                        'scenario': 'strategy_research_summary',
+                        'complexity': 'complex',
+                        'objective': 'mismatch mode',
+                        'output_schema': schema,
+                    })
+
+
 if __name__ == '__main__':
     unittest.main()

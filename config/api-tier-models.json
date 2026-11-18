@@ -1,0 +1,78 @@
+{
+  "schema_version": "api.tier-models.v1",
+  "tier_models": {
+    "openai": {
+      "simple": [
+        "gpt-5.4-mini",
+        "gpt-5.4-mini-2026-03-17"
+      ],
+      "standard": [
+        "gpt-5.4-mini",
+        "gpt-5.4-mini-2026-03-17"
+      ],
+      "complex": [
+        "gpt-5.4",
+        "gpt-5.4-mini"
+      ]
+    },
+    "anthropic": {
+      "simple": [
+        "claude-haiku-4-5"
+      ],
+      "standard": [
+        "claude-sonnet-4-6"
+      ],
+      "complex": [
+        "claude-opus-4-6",
+        "claude-sonnet-4-6"
+      ]
+    },
+    "gemini": {
+      "simple": [
+        "gemini-2.5-flash-lite",
+        "gemini-2.5-flash"
+      ],
+      "standard": [
+        "gemini-2.5-flash"
+      ],
+      "complex": [
+        "gemini-2.5-pro",
+        "gemini-2.5-flash"
+      ]
+    }
+  },
+  "tier_families": {
+    "openai": {
+      "simple": "gpt-(\\d+(?:\\.\\d+)*)-(?:nano|mini)",
+      "standard": "gpt-(\\d+(?:\\.\\d+)*)-mini",
+      "complex": "gpt-(\\d+(?:\\.\\d+)*)"
+    },
+    "anthropic": {
+      "simple": "claude-haiku-(\\d+(?:-\\d+)*)",
+      "standard": "claude-sonnet-(\\d+(?:-\\d+)*)",
+      "complex": "claude-opus-(\\d+(?:-\\d+)*)"
+    },
+    "gemini": {
+      "simple": "gemini-(\\d+(?:\\.\\d+)*)-flash-lite",
+      "standard": "gemini-(\\d+(?:\\.\\d+)*)-flash",
+      "complex": "gemini-(\\d+(?:\\.\\d+)*)-pro"
+    }
+  },
+  "rate_caps": {
+    "openai": {
+      "simple": [0.75, 4.5],
+      "standard": [0.75, 4.5],
+      "complex": [5.0, 20.0]
+    },
+    "anthropic": {
+      "simple": [2.0, 10.0],
+      "standard": [4.0, 20.0],
+      "complex": [16.0, 80.0]
+    },
+    "gemini": {
+      "simple": [0.3, 1.2],
+      "standard": [0.6, 3.5],
+      "complex": [3.5, 20.0]
+    }
+  }
+}

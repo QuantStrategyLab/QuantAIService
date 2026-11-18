@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {readFileSync} from 'node:fs';
-import {apiConfiguration,apiModelCandidates,executeAPI,selectAPIModel} from '../src/api.mjs';
+import {apiConfiguration,apiModelCandidates,executeAPI,matchesModel,selectAPIModel} from '../src/api.mjs';
 import {valueOf} from '../src/canonical.mjs';
-import {decideRoute,maskProject,providerReadiness,resolveComplexity,validateRoutingConfig} from '../src/routing.mjs';
+import {configuredProviderMode,decideRoute,maskProject,providerReadiness,resolveComplexity,resolveScenarioMode,validateRoutingConfig} from '../src/routing.mjs';
 
 // Quant-shaped fixtures (not Personal example_* / gemini-text catalogs).
 const TIERS={
@@ -358,4 +358,109 @@ test('executeAPI preserves non-object Gemini JSON outputs permitted by output_sc
   }, 60);
   assert.equal(res.status, 'completed');
   assert.deepEqual(valueOf(res.output), [1, 2]);
+});
+
+test('selectAPIModel and matchesModel handle openai/anthropic probes, scope fallback and dated snapshots', async (t) => {
+  assert.equal(matchesModel('gpt-5.4-mini', 'gpt-5.4-mini-2026-03-17'), true);
+  assert.equal(matchesModel('claude-sonnet-4-6', 'claude-sonnet-4-6-20260514'), true);
+
+  let mode = 'models';
+  t.mock.method(globalThis, 'fetch', async (url) => {
+    if (url.startsWith('https://api.openai.com/v1/models/')) {
+      if (mode === 'scope') {
+        return new Response(JSON.stringify({error: {code: 'insufficient_scope', message: 'Missing api.model.read'}}), {status: 403});
+      }
+      if (url.endsWith('/gpt-5.4-mini')) return new Response(null, {status: 404});
+      return Response.json({id: 'gpt-5.4-mini-alt-2026-03-17'});
+    }
+    if (url.startsWith('https://api.anthropic.com/v1/models/')) {
+      return Response.json({id: 'claude-sonnet-4-6-20260514'});
+    }
+    if (url.includes('openai.com')) {
+      return Response.json({
+        id: 'resp_1', status: 'completed', model: 'gpt-5.4-mini-2026-03-17',
+        output: [{type: 'message', content: [{type: 'output_text', text: '{"summary":"ok"}'}]}],
+      });
+    }
+    return Response.json({
+      model: 'claude-sonnet-4-6-20260514', stop_reason: 'tool_use',
+      content: [{type: 'tool_use', id: 't1', name: 'record_result', input: {summary: 'ok'}}],
+    });
+  });
+
+  const env = {
+    API_PROVIDERS: {
+      openai: {
+        type: 'openai_api', enabled: true, api_usage_authorized: true,
+        model: 'gpt-5.4-mini', key_env: 'OK',
+        tier_models: {standard: ['gpt-5.4-mini', 'gpt-5.4-mini-alt']},
+      },
+      claude: {
+        type: 'anthropic_api', enabled: true, api_usage_authorized: true,
+        model: 'claude-sonnet-4-6', key_env: 'AK',
+        tier_models: {standard: ['claude-sonnet-4-6']},
+      },
+    },
+    OK: 'o', AK: 'a',
+  };
+  assert.equal(await selectAPIModel(env, 'openai', {}, {model: 'gpt-5.4-mini', tier: 'standard'}, ['gpt-5.4-mini', 'gpt-5.4-mini-alt']),
+    'gpt-5.4-mini-alt');
+  mode = 'scope';
+  assert.equal(await selectAPIModel(env, 'openai', {}, {model: 'gpt-5.4-mini', tier: 'standard'}, ['gpt-5.4-mini']),
+    'gpt-5.4-mini');
+  assert.equal(await selectAPIModel(env, 'claude', {}, {model: 'claude-sonnet-4-6', tier: 'standard'}, ['claude-sonnet-4-6']),
+    'claude-sonnet-4-6');
+
+  const schema = {type: 'object', properties: {summary: {type: 'string'}}, required: ['summary'], additionalProperties: false};
+  assert.equal((await executeAPI(env, 'openai', {model: 'gpt-5.4-mini', objective: 'x', output_schema: schema}, 60)).model, 'gpt-5.4-mini');
+  assert.equal((await executeAPI(env, 'claude', {model: 'claude-sonnet-4-6', objective: 'x', output_schema: schema}, 60)).model, 'claude-sonnet-4-6');
+});
+
+test('auto mode and mode_by_tier route simple/standard to api and escalate complex to muse', () => {
+  const autoRouting = validateRoutingConfig({
+    ...ROUTING,
+    scenarios: {
+      strategy_research_summary: {
+        category: 'quant_signals', mode: 'auto', providers: ['gemini', 'muse'],
+        matching: {default_complexity: 'standard'},
+      },
+      strict_std_agent: {
+        category: 'quant_signals', mode: 'auto', mode_by_tier: {simple: 'api', standard: 'agent', complex: 'agent'},
+        providers: ['gemini', 'muse'],
+      },
+    },
+  }, undefined, undefined, {gemini: 'api', muse: 'agent'});
+
+  assert.equal(resolveScenarioMode(autoRouting.scenarios.strategy_research_summary, 'standard'), 'api');
+  assert.equal(resolveScenarioMode(autoRouting.scenarios.strategy_research_summary, 'complex'), 'agent');
+  assert.equal(configuredProviderMode({type: 'anthropic_api'}), 'api');
+  assert.equal(configuredProviderMode({type: 'muse'}), 'agent');
+
+  const dApi = decideRoute(autoRouting, {scenario: 'strategy_research_summary', objective: 'brief', materials: [], output_schema: {}}, {
+    project: 'example-org/ExampleResearch',
+    providerReady: () => [true, 'ready'],
+    providerMode: name => (name === 'muse' ? 'agent' : 'api'),
+    log: {info(){}},
+  });
+  assert.equal(dApi.mode, 'api');
+  assert.equal(dApi.provider, 'gemini');
+
+  const dAgent = decideRoute(autoRouting, {mode: 'auto', scenario: 'strategy_research_summary', complexity: 'complex', objective: 'deep', materials: [], output_schema: {}}, {
+    project: 'example-org/ExampleResearch',
+    providerReady: () => [true, 'ready'],
+    providerMode: name => (name === 'muse' ? 'agent' : 'api'),
+    log: {info(){}},
+  });
+  assert.equal(dAgent.mode, 'agent');
+  assert.equal(dAgent.provider, 'muse');
+  assert.match(dAgent.reason, /skip:gemini:mode_mismatch/);
+
+  const dShift = decideRoute(autoRouting, {scenario: 'strict_std_agent', complexity: 'standard', objective: 'x', materials: [], output_schema: {}}, {
+    project: 'example-org/ExampleResearch',
+    providerReady: () => [true, 'ready'],
+    providerMode: name => (name === 'muse' ? 'agent' : 'api'),
+    log: {info(){}},
+  });
+  assert.equal(dShift.mode, 'agent');
+  assert.equal(dShift.provider, 'muse');
 });
