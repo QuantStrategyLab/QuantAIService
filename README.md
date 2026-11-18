@@ -1,6 +1,6 @@
 # QuantAIService
 
-Reference configurations route Agent tasks to Muse. API tasks use the organization’s separately configured backend, independently of Muse. Enable the API provider after configuring its approved model and credentials.
+Reference configurations route Agent tasks to the configured primary agent provider. API tasks use the organization’s separately configured backend, independently of any agent provider subscription. Enable the API provider after configuring its approved model and credentials.
 
 [Documentation index](docs/README.md) — current task runtime, V2 configuration, monitoring and historical architecture.
 
@@ -78,9 +78,9 @@ Server configuration lives in a JSON file based on
 listening resource, the SQLite state path, accepted token issuers, and the
 provider backends. Replace every `CONFIGURE_*` placeholder with your own value.
 
-The reference configurations enable `muse` (`enabled: true`) for long-running
+The reference configurations enable the primary agent provider slot (`enabled: true`) for long-running
 strategy backtest and review (`strategy_backtest_review`, `pr_code_review`),
-keep dormant `grokbot`, `claudeduet`, and `dot` slots at `enabled: false` with
+keep dormant secondary agent slots at `enabled: false` with
 no URLs or secrets, and configure disabled `openai` (`openai_api`), `claude`
 (`anthropic_api`), `gemini` (`gemini_api`), and `chatgpt-plan`
 (`chatgpt_plan_oauth`) API entries alongside `report_audit`,
@@ -125,7 +125,7 @@ and result binding keep their existing format. `python -m ai_service.image_comma
 existing read-only prompt/image/schema commands to explicitly configured task
 routes. Unknown submissions retain their state and use read-only lookup.
 
-Provider names `grokbot`, `claudeduet` and `muse`, enablement and admission requirements are documented in [agent providers](docs/agent-providers.md).
+Agent provider slot names, enablement, and admission requirements are documented in [agent providers](docs/agent-providers.md).
 
 ## License
 

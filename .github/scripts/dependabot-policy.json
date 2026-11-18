@@ -1,0 +1,7 @@
+{
+  "action_files": [
+    ".github/workflows/ai-unit-alert-tests.yml",
+    ".github/workflows/ci.yml",
+    ".github/workflows/docs-check.yml"
+  ]
+}

@@ -1,6 +1,6 @@
 # QuantAIService
 
-示例配置的 Agent 任务由 Muse 执行。API 任务走组织单独配置的后端，无需 Muse 订阅。启用 API 后端前先配置已批准的模型与凭据。
+示例配置的 Agent 任务由已启用的主 Agent provider 执行。API 任务走组织单独配置的后端，不依赖 Agent provider 订阅。启用 API 后端前先配置已批准的模型与凭据。
 
 [文档索引](docs/README.md)：当前任务运行时、V2 配置、监控与历史架构。
 
@@ -47,7 +47,7 @@ python -m unittest discover -s tests/task_service -v
 
 服务端配置存放在以 [`config/quant.example.json`](config/quant.example.json) 为模板的 JSON 文件中，定义监听地址、SQLite 状态路径、接受的 token 签发方以及 provider 后端。请把所有 `CONFIGURE_*` 占位符替换为你自己的值。
 
-参考配置默认启用 `muse`（`enabled: true`）用于策略回测与代码审查（`strategy_backtest_review`、`pr_code_review`），将未接通的 `grokbot`、`claudeduet` 与 `dot` 槽位保持 `enabled: false` 且不填 URL/Secret，并在 `API_PROVIDERS` / `providers` 中提供默认关闭的 `openai`（`openai_api`）、`claude`（`anthropic_api`）、`gemini`（`gemini_api`）及 `chatgpt-plan` 占位条目，以及 `report_audit`、`document_translation`、`quick_notification`（`mode: "api"`）和复杂度自适应场景 `strategy_research_summary` / `signal_context`（`mode: "auto"`）。各复杂度档位的 API 候选型号配置与定期刷新见 [`config/api-tier-models.json`](config/api-tier-models.json) 与 `scripts/refresh_api_models.py`。
+参考配置默认启用主 Agent provider 槽位（`enabled: true`）用于策略回测与代码审查（`strategy_backtest_review`、`pr_code_review`），将未接通的其余 Agent 槽位保持 `enabled: false` 且不填 URL/Secret，并在 `API_PROVIDERS` / `providers` 中提供默认关闭的 `openai`（`openai_api`）、`claude`（`anthropic_api`）、`gemini`（`gemini_api`）及 `chatgpt-plan` 占位条目，以及 `report_audit`、`document_translation`、`quick_notification`（`mode: "api"`）和复杂度自适应场景 `strategy_research_summary` / `signal_context`（`mode: "auto"`）。各复杂度档位的 API 候选型号配置与定期刷新见 [`config/api-tier-models.json`](config/api-tier-models.json) 与 `scripts/refresh_api_models.py`。
 
 ## 仓库结构
 
@@ -72,4 +72,4 @@ tests/      单元与契约测试
 
 MIT，见 [LICENSE](LICENSE)。task-service 组件另有自己的 MIT 许可证，见 [`LICENSE.task-service`](LICENSE.task-service)。
 
-`grokbot`、`claudeduet` 和 `muse` 的启用与准入规则见 [agent providers](docs/agent-providers.md)。
+Agent provider 槽位的启用与准入规则见 [agent providers](docs/agent-providers.md)。
