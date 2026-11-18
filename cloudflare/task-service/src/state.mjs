@@ -7,7 +7,7 @@ import {apiConfiguration,apiModelCandidates,executeAPI,selectAPIModel} from './a
 import {nativeConfiguration,triggerNative} from './native.mjs';
 import {outputValid} from './validation.mjs';
 import {serialize,valueOf,objectNode,nodeFrom,parseJson,replaceFields} from './canonical.mjs';
-import {admittedProviders,decideRoute,EVENT_AGENTS,providerReadiness,validateRoutingConfig} from './routing.mjs';
+import {admittedProviders,configuredProviderMode,decideRoute,EVENT_AGENTS,providerReadiness,validateRoutingConfig} from './routing.mjs';
 import { DurableObject } from "cloudflare:workers";
 
 // M1 is a storage capability, not an HTTP API or an authentication layer.
@@ -134,7 +134,13 @@ export class TaskStore extends DurableObject {
   #policy(owner) {
     const policy = Object.hasOwn(this.policies, owner) ? this.policies[owner] : null;
     if (!policy) denied("project is not admitted");
-    if (policy.routing) validateRoutingConfig(policy.routing, policy.models, policy.providers);
+    if (policy.routing) {
+      const configured = {...(this.env.AGENT_PROVIDERS ?? {}), ...(this.env.API_PROVIDERS ?? {})};
+      const providerModes = Object.fromEntries(
+        Object.entries(configured).map(([name, item]) => [name, configuredProviderMode(item)]),
+      );
+      validateRoutingConfig(policy.routing, policy.models, policy.providers, providerModes);
+    }
     return policy;
   }
 
@@ -187,12 +193,12 @@ export class TaskStore extends DurableObject {
     const allowed = new Set(["mode", "profile", "objective", "model", "materials", "output_schema", "timeout_seconds", "issue", "scenario", "complexity", "reasoning_effort"]);
     if (!object(request) || Object.keys(request).some((name) => !allowed.has(name))) invalid("unknown task fields");
     const usesRouting = Boolean(policy.routing) && typeof request.scenario === "string";
-    const required = usesRouting ? ["mode", "objective", "output_schema"] : ["mode", "objective", "model", "output_schema"];
+    const required = usesRouting ? ["objective", "output_schema"] : ["mode", "objective", "model", "output_schema"];
     if (!required.every((name) => Object.hasOwn(request, name))) {
-      invalid(usesRouting ? "mode, objective and output_schema are required" : "mode, objective, model and output_schema are required");
+      invalid(usesRouting ? "objective and output_schema are required" : "mode, objective, model and output_schema are required");
     }
     if (typeof request.objective !== "string" || !request.objective.trim()) invalid("objective is required");
-    if (typeof request.mode !== "string") invalid("mode and model must be strings");
+    if (Object.hasOwn(request, "mode") && typeof request.mode !== "string") invalid("mode and model must be strings");
     if (bytes(canonicalRequest).length > policy.max_request_bytes) invalid("request too large");
     const requestDigest = await digest(canonicalRequest);
     const existing = this.sql.exec("SELECT * FROM tasks WHERE owner=? AND idem=?", owner, idempotencyKey).toArray()[0];
@@ -203,28 +209,33 @@ export class TaskStore extends DurableObject {
       await this.#wake();
       return this.#record(existing);
     }
+    const activeCount = this.sql.exec("SELECT COUNT(*) AS n FROM tasks WHERE owner=? AND status NOT IN ('completed','failed','invalid_output','cancelled')", owner).one().n;
+    if (activeCount >= policy.max_active) conflict("project active task quota exhausted");
     const timeout = Object.hasOwn(request, "timeout_seconds") ? request.timeout_seconds : policy.max_timeout_seconds;
     let provider;
     let body = canonicalRequest;
     if (usesRouting) {
-      const hasDotSubscription = request.mode === 'agent' && await this.#liveSubscription(owner, 'dot');
-      const hasMuseSubscription = request.mode === 'agent' && await this.#museReady(owner, timeout);
+      const configured = {...(this.env.AGENT_PROVIDERS ?? {}), ...(this.env.API_PROVIDERS ?? {})};
+      const mayUseAgent = !Object.hasOwn(request, "mode") || request.mode === "agent" || request.mode === "auto";
+      const hasDotSubscription = mayUseAgent && await this.#liveSubscription(owner, 'dot');
+      const hasMuseSubscription = mayUseAgent && await this.#museReady(owner, timeout);
       let decision;
       try {
         decision = decideRoute(policy.routing, request, {
           project: owner,
+          providerMode: (name) => configuredProviderMode(configured[name]),
           providerReady: (name) => this.#providerReady(name, owner, hasDotSubscription, hasMuseSubscription),
-          entryReady: (name, entry, tier) => {
-            if (request.mode === 'api') {
+          entryReady: (name, entry, tier, effectiveMode) => {
+            if (effectiveMode === 'api') {
               try {
                 const candidates = apiModelCandidates(this.env, name, request, {model: entry.model, tier}, policy.models[name]);
-                const config = apiConfiguration(this.env, name, {...request, model: candidates[0], complexity: tier});
+                const config = apiConfiguration(this.env, name, {...request, mode: effectiveMode, model: candidates[0], complexity: tier});
                 return [true, 'ready', config.model];
               } catch {
                 return [false, 'api_model_mismatch'];
               }
             }
-            if (request.mode === 'agent' && !EVENT_AGENTS.has(name)) {
+            if (effectiveMode === 'agent' && !EVENT_AGENTS.has(name)) {
               try {
                 nativeConfiguration(this.env, name);
                 return [true, 'ready'];
@@ -235,17 +246,17 @@ export class TaskStore extends DurableObject {
             return [true, 'ready'];
           },
         });
-        if (request.mode === 'api') {
+        if (decision.mode === 'api') {
           decision.model = await selectAPIModel(this.env, decision.provider, request, decision, policy.models[decision.provider]);
         }
       } catch (e) {
         if (e.name === "RoutingError" && e.message === "no ready provider for scenario") denied(e.message);
         denied("execution mode is unavailable");
       }
-      request = {...request, model: decision.model, complexity: decision.tier, reasoning_effort: decision.reasoning_effort};
+      request = {...request, mode: decision.mode, model: decision.model, complexity: decision.tier, reasoning_effort: decision.reasoning_effort};
       provider = decision.provider;
       body = serialize(replaceFields(parseJson(canonicalRequest), {
-        model: nodeFrom(decision.model), complexity: nodeFrom(decision.tier),
+        mode: nodeFrom(decision.mode), model: nodeFrom(decision.model), complexity: nodeFrom(decision.tier),
         reasoning_effort: nodeFrom(decision.reasoning_effort),
       }));
     } else {

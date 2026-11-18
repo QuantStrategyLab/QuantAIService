@@ -51,6 +51,13 @@ def check_routing_contract(routing):
         _default(category)
     for name, scenario in routing['scenarios'].items():
         _identifier(name)
+        _require(scenario.get('mode') in ('agent', 'api', 'auto'))
+        if 'mode_by_tier' in scenario:
+            _require(scenario['mode'] == 'auto')
+            by_tier = scenario['mode_by_tier']
+            _require(isinstance(by_tier, dict) and len(by_tier) > 0)
+            for tier_key, tier_mode in by_tier.items():
+                _require(tier_key in ('simple', 'standard', 'complex') and tier_mode in ('agent', 'api'))
         if 'category' in scenario:
             _identifier(scenario['category'])
         for provider in scenario['providers']:

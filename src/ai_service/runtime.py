@@ -17,6 +17,8 @@ from typing import Any
 from jsonschema import Draft202012Validator, ValidationError
 from referencing.exceptions import Unresolvable
 
+from .routing import RoutingDecision, RoutingError, decide_route
+
 
 class Conflict(ValueError):
     pass
@@ -37,6 +39,7 @@ class Policy:
     max_active: int = 4
     max_timeout_seconds: int = 3600
     max_request_bytes: int = 2_000_000
+    routing: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -71,7 +74,9 @@ def _check_schema(schema):
 
 
 class TaskRuntime:
-    def __init__(self, path: Path, providers: dict, policies: dict[str, Policy]):
+    def __init__(self, path: Path, providers: dict, policies: dict[str, Policy],
+                 *, provider_ready=None, provider_mode=None,
+                 allows_tier_model=None, any_tier_model=None, select_api_model=None):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         if self.path.is_symlink():
@@ -82,6 +87,11 @@ class TaskRuntime:
         self.github_comments = None
         self.providers = providers
         self.policies = policies
+        self.provider_ready = provider_ready
+        self.provider_mode = provider_mode
+        self.allows_tier_model = allows_tier_model
+        self.any_tier_model = any_tier_model
+        self.select_api_model = select_api_model
         # A private state directory is required; never use a public temp directory.
         with self.connection() as db:
             db.executescript('''
@@ -135,26 +145,37 @@ class TaskRuntime:
             raise PermissionError('project is not admitted')
         if not isinstance(idempotency_key, str) or not 1 <= len(idempotency_key) <= 200:
             raise ValueError('Idempotency-Key is required (1..200 characters)')
-        allowed = {'mode', 'profile', 'objective', 'model', 'materials', 'output_schema', 'timeout_seconds', 'issue'}
+        allowed = {'mode', 'profile', 'objective', 'model', 'materials', 'output_schema',
+                   'timeout_seconds', 'issue', 'scenario', 'complexity', 'reasoning_effort'}
         if not isinstance(request, dict) or set(request) - allowed:
             raise ValueError('unknown task fields')
-        if not {'mode', 'objective', 'model', 'output_schema'} <= set(request):
-            raise ValueError('mode, objective, model and output_schema are required')
+        uses_routing = bool(policy.routing) and isinstance(request.get('scenario'), str)
+        required = {'objective', 'output_schema'} if uses_routing else {'mode', 'objective', 'model', 'output_schema'}
+        if not required <= set(request):
+            raise ValueError('mode, objective, model and output_schema are required'
+                             if not uses_routing else
+                             'objective and output_schema are required')
         if not isinstance(request['objective'], str) or not request['objective'].strip():
             raise ValueError('objective is required')
-        mode, model = request['mode'], request['model']
-        if not isinstance(mode, str) or not isinstance(model, str):
+        mode = request.get('mode')
+        if mode is not None and not isinstance(mode, str):
             raise ValueError('mode and model must be strings')
-        profile = request.get('profile', 'default')
-        if not isinstance(profile, str) or not profile or len(profile) > 100 or ':' in profile:
-            raise ValueError('profile must be a nonempty configured profile name')
-        route = mode if profile == 'default' else mode + ':' + profile
-        provider_name = policy.providers.get(route)
-        provider = self.providers.get(provider_name)
-        if mode not in {'api', 'agent'} or provider is None or provider.mode != mode:
-            raise PermissionError('execution mode is unavailable')
-        if model not in policy.models.get(provider_name, set()):
-            raise PermissionError('model is not admitted')
+        if not uses_routing and not isinstance(mode, str):
+            raise ValueError('mode and model must be strings')
+        original_body = _json(request)
+        if len(original_body.encode()) > policy.max_request_bytes:
+            raise ValueError('request too large')
+        digest = hashlib.sha256(original_body.encode()).hexdigest()
+        with self.connection() as db:
+            old = db.execute('SELECT * FROM tasks WHERE owner=? AND idem=?', (owner, idempotency_key)).fetchone()
+            if old:
+                if old['digest'] != digest:
+                    raise Conflict('idempotency key already binds a different request')
+                return self._record(old)
+            active = db.execute("SELECT COUNT(*) FROM tasks WHERE owner=? AND status NOT IN ('completed','failed','invalid_output','cancelled')", (owner,)).fetchone()[0]
+            if active >= policy.max_active:
+                raise Conflict('project active task quota exhausted')
+        request = dict(request)
         timeout = request.get('timeout_seconds', policy.max_timeout_seconds)
         if type(timeout) is not int or not 1 <= timeout <= policy.max_timeout_seconds:
             raise ValueError('timeout_seconds exceeds project policy')
@@ -165,10 +186,68 @@ class TaskRuntime:
                 raise PermissionError('App comments are not configured')
             self.github_comments.validate_issue(owner, request)
         _check_schema(request['output_schema'])
+        if uses_routing:
+            if self.provider_ready is None:
+                raise PermissionError('execution mode is unavailable')
+            pm_fn = self.provider_mode or (lambda name: self.providers[name].mode if name in self.providers else None)
+            def _select_api_model(name, selected_tier, fallback_model):
+                temp_decision = RoutingDecision(
+                    provider=name, scenario=request['scenario'], category=None, tier=selected_tier,
+                    model=fallback_model, reasoning_effort='medium', mode='api', reason='',
+                )
+                try:
+                    return self.select_api_model(
+                        name, request, temp_decision, policy.models.get(name, set()),
+                    )
+                except SubmissionRejected as exc:
+                    if str(exc) == 'no approved tier model is available':
+                        raise LookupError(str(exc)) from exc
+                    raise
+
+            try:
+                decision = decide_route(
+                    policy.routing, request, project=owner,
+                    provider_ready=lambda name: self.provider_ready(name, owner),
+                    provider_mode=pm_fn,
+                    allows_tier_model=(
+                        (lambda name, tier, model: self.allows_tier_model(name, owner, tier, model))
+                        if self.allows_tier_model is not None else None
+                    ),
+                    any_tier_model=(
+                        (lambda name, tier, fallback: self.any_tier_model(name, owner, tier, fallback))
+                        if self.any_tier_model is not None else None
+                    ),
+                    select_api_model=_select_api_model if self.select_api_model is not None else None,
+                )
+                chosen_model = decision.model
+            except (RoutingError, SubmissionRejected) as exc:
+                raise PermissionError(str(exc) if str(exc) == 'no ready provider for scenario'
+                                      else 'execution mode is unavailable') from exc
+            mode = decision.mode
+            request['mode'] = decision.mode
+            request['model'] = chosen_model
+            request['complexity'] = decision.tier
+            request['reasoning_effort'] = decision.reasoning_effort
+            provider_name = decision.provider
+        else:
+            if 'scenario' in request or 'complexity' in request or 'reasoning_effort' in request:
+                raise ValueError('scenario routing fields require project routing configuration')
+            model = request['model']
+            if not isinstance(model, str):
+                raise ValueError('mode and model must be strings')
+            profile = request.get('profile', 'default')
+            if not isinstance(profile, str) or not profile or len(profile) > 100 or ':' in profile:
+                raise ValueError('profile must be a nonempty configured profile name')
+            route = mode if profile == 'default' else mode + ':' + profile
+            provider_name = policy.providers.get(route)
+        provider = self.providers.get(provider_name)
+        if mode not in {'api', 'agent'} or provider is None or provider.mode != mode:
+            raise PermissionError('execution mode is unavailable')
+        if request['model'] not in policy.models.get(provider_name, set()):
+            raise PermissionError('model is not admitted')
         body = _json(request)
         if len(body.encode()) > policy.max_request_bytes:
             raise ValueError('request too large')
-        digest = hashlib.sha256(body.encode()).hexdigest()
         now, task_id = time.time(), str(uuid.uuid4())
         with self.connection() as db:
             db.execute('BEGIN IMMEDIATE')
@@ -205,8 +284,10 @@ class TaskRuntime:
             row = rows[0]
             try:
                 request = json.loads(row['request'])
-                if (not isinstance(request, dict)
-                        or hashlib.sha256(_json(request).encode()).hexdigest() != request_sha256):
+                if not isinstance(request, dict):
+                    raise NotFound('task not found')
+                if (hashlib.sha256(_json(request).encode()).hexdigest() != request_sha256
+                        and not isinstance(request.get('scenario'), str)):
                     raise NotFound('task not found')
                 return self._record(row)
             except (ValueError, TypeError, RecursionError):

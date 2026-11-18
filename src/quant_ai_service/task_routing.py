@@ -21,6 +21,7 @@ from jsonschema import Draft202012Validator, ValidationError
 SCHEMA_VERSION = 'task.routing.v1'
 COMPLEXITY_TIERS = ('simple', 'standard', 'complex')
 COMPLEXITY_RANK = {name: index for index, name in enumerate(COMPLEXITY_TIERS)}
+DEFAULT_MODE_BY_TIER = {'simple': 'api', 'standard': 'api', 'complex': 'agent'}
 DEFAULT_HEURISTICS = {
     'size_simple_max': 1500,
     'size_standard': 4000,
@@ -28,6 +29,15 @@ DEFAULT_HEURISTICS = {
     'image_complex_size': 20000,
     'materials_complex_count': 8,
 }
+
+
+def resolve_scenario_mode(scenario: Mapping[str, Any], tier: str) -> str:
+    """Resolve concrete execution mode ('api' or 'agent') for a scenario and tier."""
+    mode = scenario['mode']
+    if mode != 'auto':
+        return mode
+    by_tier = scenario.get('mode_by_tier') or {}
+    return by_tier.get(tier, DEFAULT_MODE_BY_TIER[tier])
 
 _ACCOUNT_PATTERNS = (
     re.compile(r'\bacct_[A-Za-z0-9_-]+\b'),
@@ -87,6 +97,8 @@ def validate_routing(document: Mapping[str, Any]) -> dict[str, Any]:
         _assert_acyclic(name, categories)
 
     for name, scenario in data['scenarios'].items():
+        if 'mode_by_tier' in scenario and scenario['mode'] != 'auto':
+            raise RoutingError(f'scenario {name} mode_by_tier requires mode auto')
         category = scenario.get('category')
         if category is not None and category not in categories:
             raise RoutingError(f'scenario {name} category is unknown')
@@ -243,7 +255,7 @@ def effective_route(
         'schema_version': SCHEMA_VERSION,
         'scenario': scenario_id,
         'category': scenario.get('category'),
-        'mode': scenario['mode'],
+        'mode': resolve_scenario_mode(scenario, tier),
         'providers': list(scenario['providers']),
         'tier': tier,
         'selections': {

@@ -6,11 +6,7 @@ QuantAIService 使用与私有路由服务共享的 `task.routing.v1` 注册契�
 
 `projects[<id>].routing` / Worker `PROJECT_POLICIES[project].routing`
 
-本仓库 Python 做文档校验与类别默认值继承，不硬编码业务场景 id。线上
-fail-closed provider 选择由 Cloudflare task-service Worker
-（`cloudflare/task-service/src/routing.mjs`）在项目策略含 `routing` 且提交体
-带 `scenario` 时执行。策略无 `routing` 时仍拒绝 `scenario` /
-`complexity` / `reasoning_effort`。
+本仓库 Python 同样执行注册表校验、类别默认值继承与场景路由，且不硬编码业务场景 id。当项目策略含 `routing` 且提交体带 `scenario` 时，Python（`ai_service.routing`）与 Cloudflare task-service Worker（`cloudflare/task-service/src/routing.mjs`）均会按同一契约完成复杂度评估与 fail-closed provider 选择；策略无 `routing` 时仍拒绝 `scenario` / `complexity` / `reasoning_effort`。
 
 ## 文件
 
@@ -37,34 +33,32 @@ fail-closed provider 选择由 Cloudflare task-service Worker
 | 场景 | 类别 | Mode | providers | 匹配提示（示例） |
 | --- | --- | --- | --- | --- |
 | `pr_code_review` | quant_review | agent | muse | pull-request, code-review, architecture-audit |
-| `strategy_research_summary` | quant_research | agent | muse | research-summary, strategy-brief, portfolio-note |
+| `strategy_backtest_review` | quant_review | agent | muse | strategy-backtest, backtest-review |
+| `strategy_research_summary` | quant_research | auto | openai, claude, gemini, muse | research-summary, strategy-brief, portfolio-note |
 | `reconciliation_anomaly` | quant_ops | agent | muse | recon-diff, ops-anomaly, ledger-mismatch |
-| `signal_context` | quant_signals | agent | muse | signal-context, feature-note |
-| `quick_notification` | quant_notify | api | chatgpt-plan | short-alert, status-ping |
+| `signal_context` | quant_signals | auto | openai, claude, gemini, muse | signal-context, feature-note |
+| `report_audit` | quant_notify | api | openai, claude | report-audit, audit-summary |
+| `document_translation` | quant_notify | api | openai, claude | document-translation, translate |
+| `quick_notification` | quant_notify | api | openai, claude, gemini | short-alert, status-ping |
 
-示例显式设置 `matching.default_complexity`：`pr_code_review` 和
-`reconciliation_anomaly` 为 `complex`，`strategy_research_summary` 和
-`signal_context` 为 `standard`，`quick_notification` 为 `simple`。
-省略该字段时沿类别链继承；显式 `null` 无效。图片 / 体积下限使用
-`matching.min_with_image`、`matching.size_thresholds` 与全局 `heuristics`，语义为
-共享契约中的只升不降。
+示例显式设置 `matching.default_complexity`：`pr_code_review`、`strategy_backtest_review` 和 `reconciliation_anomaly` 为 `complex`，`strategy_research_summary`、`signal_context` 和 `report_audit` 为 `standard`，`document_translation` 与 `quick_notification` 为 `simple`。
+省略该字段时沿类别链继承；显式 `null` 无效。图片 / 体积下限使用 `matching.min_with_image`、`matching.size_thresholds` 与全局 `heuristics`，语义为共享契约中的只升不降。
 
-Quant 与 PersonalAIService 共用 `task.routing.v1` 合同，各自维护场景目录。Personal 短 API 示例为 Gemini，Quant 的 Python 短 API 示例为 `chatgpt-plan`。历史 GPT / Claude 双审计配置独立于该注册表。
+Quant 与 PersonalAIService 共用 `task.routing.v1` 契约，各自维护场景目录。独立的定期双 API 审计（`scripts/monthly_api_audit.py`）基于冻结证据分别调用 OpenAI 和 Anthropic（`api` 模式）生成独立结论。
 
-Agent 与 API 模式分离：
+各场景按配置与复杂度档位解析执行模式：
 
-- **Agent** 场景由 Muse 执行，继续沿用现有的领取与回报接口。其他 Agent 适配器按需显式配置。
-- **API** 场景只绑定**一个** provider。`quick_notification` 对应 `chatgpt-plan`（OpenAI plan OAuth / Responses）；模型与推理档位由复杂度分层智能填充。API **没有**后备链——Gemini 走遗留 `api:gemini`（或另开场景），不挂第二偏好。Quant 另外还有 **OpenAI API**、**Anthropic Claude API** 以及 **双 AI 审计**（Codex 主审 + 独立 GPT/Claude 复审）走 AiGateway / 审计路径；那不是 PersonalAIService 的场景目录，也不写成这里的 API 有序列表。
-
-Cloudflare Worker 在 `API_PROVIDERS` 配置其支持的 API 后端，例如 Gemini。Python 的 ChatGPT plan 适配器需要单独的 OAuth 授权。现行月报汇总来源证据。历史 GPT / Claude 双审计配置需要独立接入才可用于推理。
+- **`agent` 场景**（`pr_code_review`、`strategy_backtest_review`、`reconciliation_anomaly`）：由 Muse（`muse`）执行，`grokbot`、`claudeduet`、`dot` 等槽位默认停用并保留框架设计。
+- **`api` 场景**（`quick_notification`、`report_audit`、`document_translation`）：按优先级从 `openai`（`openai_api`）、`claude`（`anthropic_api`）、`gemini`（`gemini_api`）选择就绪后端。当 API provider 配置了 `tier_models` 时，Python 与 Worker 运行时会在提交阶段用项目凭据校验候选模型可用性，并接受精确模型 ID 或服务商日期快照。配合 [`config/api-tier-models.json`](../config/api-tier-models.json) 与 `scripts/refresh_api_models.py` 可定期依据官方定价更新各档候选清单。
+- **`auto` 场景**（`strategy_research_summary`、`signal_context`）：支持提交时省略 `mode` 或传 `mode: "auto"`（并支持可选 `mode_by_tier`）；默认 `simple` 与 `standard` 档选择 `api` 后端，`complex` 档升级至 `muse`（`agent`）。
 
 ## 复杂度档位表
 
 | 档位 | Provider | 模型（示例别名） | Reasoning effort |
 | --- | --- | --- | --- |
-| simple | muse / chatgpt-plan / gemini | `*-fast` / `configured-chatgpt-plan-fast` / `configured-api-fast` | low |
-| standard | muse / chatgpt-plan / gemini | `configured-*` / `configured-chatgpt-plan` / `configured-api` | medium |
-| complex | muse / chatgpt-plan / gemini | `*-strong` / `configured-chatgpt-plan-strong` / `configured-api` | high |
+| simple | muse / openai / claude / gemini | `configured-muse-fast` / `CONFIGURE_APPROVED_*` / `configured-api` | low |
+| standard | muse / openai / claude / gemini | `configured-muse` / `CONFIGURE_APPROVED_*` / `configured-api` | medium |
+| complex | muse / openai / claude / gemini | `configured-muse-strong` / `CONFIGURE_APPROVED_*` / `configured-api` | high |
 
 `pr_code_review` 在 `tier_overrides.complex` 中显式指定强模型（含 `muse`）。
 别名为合成占位；生产模型名保留在私有 `models` 白名单。注册表不得出现真实账户
@@ -96,12 +90,7 @@ provider 在各档位的完整配置以及项目 provider/model 白名单。兼�
 
 ## 就绪与运维
 
-提交时跳过未就绪 provider；若列表耗尽则拒绝提交。Dot 就绪仍要求有效的
-事件订阅。示例中 `gemini` 保持 `enabled: false` /
-`api_usage_authorized: false`，直至另行授权。`chatgpt-plan` 在
-`plan_usage_authorized` 且 token 环境已绑定时对路由就绪；**Python** 执行
-Responses，而 task-service Worker 目前仍只跑 `gemini_api`
-（见 `cloudflare/task-service/README.zh-CN.md`）。Muse 就绪依赖有效订阅或符合项目策略的轮询执行端。
+提交时跳过未就绪或与当前档位模式不匹配的 provider；若列表耗尽则拒绝提交。Dot 就绪仍要求有效的事件订阅；Muse 就绪依赖有效订阅或符合项目策略的轮询执行端。示例中 API 后端与停用的 Agent 槽位保持关闭，直至显式配置凭据与批准型号清单。
 
 Worker 路由单测 `cloudflare/task-service/test/routing.mjs` 使用 Quant 场景 id
 （`quick_notification`、`pr_code_review` 等），不用 Personal 的 `example_*` /
