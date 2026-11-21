@@ -665,7 +665,11 @@ export class TaskStore extends DurableObject {
   }
 
   async alarm() {
-    if(isFlagEnabled(this.env.DISPATCH_PAUSED))return;
+    if(isFlagEnabled(this.env.DISPATCH_PAUSED)){
+      const nextAt=this.#nextAlarmAt(5000);
+      if(nextAt!==null)await this.ctx.storage.setAlarm(nextAt);
+      return;
+    }
     const apiJobs=[],nativeJobs=[];
     await this.ctx.blockConcurrencyWhile(async()=>{
       const timestamp=now();
@@ -838,6 +842,22 @@ export class TaskStore extends DurableObject {
     }
   }
 
+  #nextAlarmAt(minDelayMs = 10) {
+    const hasImmediateTask = this.sql.exec("SELECT 1 FROM tasks WHERE status IN ('queued','submitting','cancel_requested') LIMIT 1").toArray().length > 0;
+    const hasPendingEvent = this.sql.exec(`SELECT 1 FROM events e JOIN tasks t ON t.id=e.task_id
+      LEFT JOIN native_notifications n ON n.seq=e.seq
+      WHERE e.status IN ('message','cancel_requested') AND t.status IN ('running','cancel_requested')
+        AND ((t.provider NOT IN ('dot','muse') AND json_extract(t.request,'$.mode')='agent' AND n.seq IS NULL)
+          OR (t.provider IN ('dot','muse') AND COALESCE(e.fanout_noted,0)=0 AND COALESCE(json_extract(t.handle,'$.acceptance'),'')<>'poll_pending'))
+      LIMIT 1`).toArray().length > 0;
+    if (hasImmediateTask || hasPendingEvent) return Date.now() + minDelayMs;
+    const delivery = this.sql.exec("SELECT MIN(next_attempt) AS n FROM event_deliveries WHERE status='pending'").one().n;
+    const deadline = this.sql.exec("SELECT MIN(deadline) AS d FROM tasks WHERE status IN ('queued','submitting','running') OR (status='cancel_requested' AND ((json_extract(request,'$.mode')='api' AND handle IS NULL) OR (provider IN ('dot','muse') AND json_extract(request,'$.mode')='agent' AND worker IS NULL AND attempt IS NULL)))").one().d;
+    const candidates = [delivery, deadline].filter((v) => v !== null);
+    if (!candidates.length) return null;
+    return Math.max(Date.now() + minDelayMs, Math.min(...candidates) * 1000);
+  }
+
   async drainStatus() {
     return await this.ctx.blockConcurrencyWhile(async () => {
       const counts = Object.fromEntries(
@@ -851,7 +871,7 @@ export class TaskStore extends DurableObject {
         write_frozen: isFlagEnabled(this.env.WRITE_FROZEN),
         dispatch_paused: isFlagEnabled(this.env.DISPATCH_PAUSED),
         task_counts: counts,
-        in_flight_count: (counts.submitting ?? 0) + (counts.running ?? 0),
+        in_flight_count: (counts.submitting ?? 0) + (counts.running ?? 0) + (counts.cancel_requested ?? 0),
         outcome_unknown: unknown,
         pending_deliveries: pendingDeliveries,
         active_subscriptions: activeSubscriptions,
@@ -913,7 +933,8 @@ export class TaskStore extends DurableObject {
         for (const r of t.events ?? []) {
           this.sql.exec("INSERT INTO events(seq,task_id,status,created,fanout_noted) VALUES(?,?,?,?,?)", r.seq, r.task_id, r.status, r.created, r.fanout_noted ?? 0);
         }
-        const maxSeq = Math.max(Number(snapshot.events_seq ?? 0), ...((t.events ?? []).map((e) => Number(e.seq ?? 0))));
+        const insertedMax = this.sql.exec("SELECT COALESCE(MAX(seq), 0) AS m FROM events").one().m;
+        const maxSeq = Math.max(Number(snapshot.events_seq ?? 0), insertedMax);
         if (maxSeq > 0) {
           this.sql.exec("DELETE FROM sqlite_sequence WHERE name='events'");
           this.sql.exec("INSERT INTO sqlite_sequence(name, seq) VALUES('events', ?)", maxSeq);
@@ -943,12 +964,7 @@ export class TaskStore extends DurableObject {
         for (const r of t.task_metadata_cursor_key ?? []) {
           this.sql.exec("INSERT OR REPLACE INTO task_metadata_cursor_key(id,material) VALUES(?,?)", r.id, base64ToBytes(r.material_b64));
         }
-        const hasImmediate = this.sql.exec("SELECT 1 FROM tasks WHERE status IN ('queued','submitting','cancel_requested') LIMIT 1").toArray().length > 0;
-        const delivery = this.sql.exec("SELECT MIN(next_attempt) AS n FROM event_deliveries WHERE status='pending'").one().n;
-        const taskDeadlines = this.sql.exec("SELECT deadline FROM tasks WHERE status IN ('queued','submitting','running') OR (status='cancel_requested' AND ((json_extract(request,'$.mode')='api' AND handle IS NULL) OR (provider IN ('dot','muse') AND json_extract(request,'$.mode')='agent' AND worker IS NULL AND attempt IS NULL)))").toArray().map((r) => r.deadline);
-        const candidates = [delivery, ...taskDeadlines].filter((v) => v !== null);
-        if (hasImmediate) nextAlarmAt = Date.now() + 10;
-        else if (candidates.length) nextAlarmAt = Math.max(Date.now() + 10, Math.min(...candidates) * 1000);
+        nextAlarmAt = this.#nextAlarmAt(10);
       });
       if (nextAlarmAt !== null) await this.ctx.storage.setAlarm(nextAlarmAt);
     });
