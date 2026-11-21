@@ -114,6 +114,10 @@ export class TaskStore extends DurableObject {
         PRIMARY KEY(task_id, idem));
     `);
     this.sql.exec('CREATE TABLE IF NOT EXISTS muse_polls (owner TEXT PRIMARY KEY, identity_json TEXT NOT NULL, seen REAL NOT NULL)');
+    this.sql.exec(`CREATE TABLE IF NOT EXISTS completion_deliveries (
+      route TEXT NOT NULL, seq INTEGER NOT NULL, owner TEXT NOT NULL, body TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0,
+      next_attempt REAL NOT NULL DEFAULT 0, PRIMARY KEY(route,seq));`);
     initializeTaskMetadata(this.sql);
     // Local M1 stores may predate canonical report preservation. Never invent a
     // report body for old rows: the lost numeric lexemes cannot be recovered.
@@ -439,6 +443,8 @@ export class TaskStore extends DurableObject {
       }, acceptedAt);
       return this.get(owner, taskId);
     });
+    if(this.completions.routes.size)await this.#wake();
+    return record;
   }
 
   async message(owner, taskId, idempotencyKey, canonicalMessage) {
@@ -477,9 +483,9 @@ export class TaskStore extends DurableObject {
     this.#row(owner, taskId);
     return this.sql.exec("SELECT seq,status,created FROM events WHERE task_id=? AND seq>? ORDER BY seq LIMIT 100", taskId, after).toArray();
   }
-  async #wake() {
+  async #wake(at=Date.now()+10) {
     const existing=await this.ctx.storage.getAlarm();
-    if(existing===null||existing>Date.now()+10)await this.ctx.storage.setAlarm(Date.now()+10);
+    if(existing===null||existing>at)await this.ctx.storage.setAlarm(at);
   }
 
   async #eventAccess(owner,identity,scopes=['events:subscribe']) {
@@ -733,11 +739,12 @@ export class TaskStore extends DurableObject {
         }
       });
       this.sql.exec("UPDATE native_notifications SET status='outcome_unknown' WHERE status='sending'");
+      const eventProviders=Object.keys(this.env.AGENT_PROVIDERS??{}).filter(name=>usesEventSubscription(this.env,name));
+      const excludeClause=eventProviders.length?`AND t.provider NOT IN (${eventProviders.map(()=>'?').join(',')})`:'';
       const notifications=this.sql.exec(`SELECT e.seq,e.status AS change,t.* FROM events e JOIN tasks t ON t.id=e.task_id
         LEFT JOIN native_notifications n ON n.seq=e.seq WHERE e.status IN ('message','cancel_requested')
-        AND n.seq IS NULL AND json_extract(t.request,'$.mode')='agent'
-        AND t.status IN ('running','cancel_requested') ORDER BY e.seq LIMIT 100`).toArray()
-        .filter(event=>!usesEventSubscription(this.env,event.provider));
+        AND n.seq IS NULL AND json_extract(t.request,'$.mode')='agent' ${excludeClause}
+        AND t.status IN ('running','cancel_requested') ORDER BY e.seq LIMIT 100`,...eventProviders).toArray();
       for(const event of notifications){
         this.sql.exec("INSERT INTO native_notifications(seq,status) VALUES(?,'sending')",event.seq);
         nativeJobs.push(event);
@@ -832,6 +839,7 @@ export class TaskStore extends DurableObject {
       });
       this.apiInFlight.delete(task.id);
     }
+    if(apiJobs.length||nativeJobs.length)await this.#startCompletionDelivery();
   }
 
   #nextAlarmAt(minDelayMs = 10) {
@@ -844,8 +852,9 @@ export class TaskStore extends DurableObject {
       LIMIT 1`).toArray().length > 0;
     if (hasImmediateTask || hasPendingEvent) return Date.now() + minDelayMs;
     const delivery = this.sql.exec("SELECT MIN(next_attempt) AS n FROM event_deliveries WHERE status='pending'").one().n;
-    const deadline = this.sql.exec("SELECT MIN(deadline) AS d FROM tasks WHERE status IN ('queued','submitting','running') OR (status='cancel_requested' AND ((json_extract(request,'$.mode')='api' AND handle IS NULL) OR (provider IN ('dot','muse') AND json_extract(request,'$.mode')='agent' AND worker IS NULL AND attempt IS NULL)))").one().d;
-    const candidates = [delivery, deadline].filter((v) => v !== null);
+    const completion = this.completions.nextAttempt();
+    const deadline = this.sql.exec("SELECT MIN(deadline) AS d FROM tasks WHERE status IN ('queued','submitting','running') OR (status='cancel_requested' AND ((json_extract(request,'$.mode')='api' AND handle IS NULL) OR (json_extract(request,'$.mode')='agent' AND worker IS NULL AND attempt IS NULL)))").one().d;
+    const candidates = [delivery, completion, deadline].filter((v) => v !== null);
     if (!candidates.length) return null;
     return Math.max(Date.now() + minDelayMs, Math.min(...candidates) * 1000);
   }
@@ -889,6 +898,7 @@ export class TaskStore extends DurableObject {
           muse_polls: this.sql.exec("SELECT * FROM muse_polls ORDER BY owner ASC").toArray(),
           subscriptions: this.sql.exec("SELECT * FROM subscriptions ORDER BY created ASC, id ASC").toArray(),
           event_deliveries: this.sql.exec("SELECT * FROM event_deliveries ORDER BY seq ASC, subscription ASC").toArray(),
+          completion_deliveries: this.sql.exec("SELECT * FROM completion_deliveries ORDER BY seq ASC, route ASC").toArray(),
           task_metadata_cursor_key: cursorRows,
         },
       };
@@ -904,12 +914,12 @@ export class TaskStore extends DurableObject {
     let nextAlarmAt = null;
     await this.ctx.blockConcurrencyWhile(async () => {
       this.ctx.storage.transactionSync(() => {
-        const existing = this.sql.exec("SELECT (SELECT COUNT(*) FROM tasks) + (SELECT COUNT(*) FROM events) + (SELECT COUNT(*) FROM subscriptions) + (SELECT COUNT(*) FROM muse_polls) AS n").one().n;
+        const existing = this.sql.exec("SELECT (SELECT COUNT(*) FROM tasks) + (SELECT COUNT(*) FROM events) + (SELECT COUNT(*) FROM subscriptions) + (SELECT COUNT(*) FROM muse_polls) + (SELECT COUNT(*) FROM completion_deliveries) AS n").one().n;
         if (existing > 0 && !replace) {
           throw Object.assign(new Error("target store is not empty"), { name: "Conflict" });
         }
         if (replace) {
-          for (const table of ["event_deliveries", "subscriptions", "muse_polls", "messages", "native_notifications", "events", "tasks", "task_metadata_cursor_key"]) {
+          for (const table of ["completion_deliveries", "event_deliveries", "subscriptions", "muse_polls", "messages", "native_notifications", "events", "tasks", "task_metadata_cursor_key"]) {
             this.sql.exec(`DELETE FROM ${table}`);
           }
         }
@@ -954,6 +964,10 @@ export class TaskStore extends DurableObject {
         for (const r of t.event_deliveries ?? []) {
           this.sql.exec("INSERT INTO event_deliveries(subscription,seq,body,status,attempts,next_attempt) VALUES(?,?,?,?,?,?)",
             r.subscription, r.seq, r.body, r.status ?? "pending", r.attempts ?? 0, r.next_attempt ?? 0);
+        }
+        for (const r of t.completion_deliveries ?? []) {
+          this.sql.exec("INSERT INTO completion_deliveries(route,seq,owner,body,status,attempts,next_attempt) VALUES(?,?,?,?,?,?,?)",
+            r.route, r.seq, r.owner, r.body, r.status ?? "pending", r.attempts ?? 0, r.next_attempt ?? 0);
         }
         for (const r of t.task_metadata_cursor_key ?? []) {
           this.sql.exec("INSERT OR REPLACE INTO task_metadata_cursor_key(id,material) VALUES(?,?)", r.id, base64ToBytes(r.material_b64));
