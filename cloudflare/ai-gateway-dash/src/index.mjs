@@ -2,8 +2,8 @@
 
   GitHub OAuth 2.0 login — only QuantStrategyLab org members can access.
   Setup: create OAuth App at https://github.com/settings/developers
-    - Homepage: https://quantstrategylab-ai-gateway-dash.pigbibi.workers.dev
-    - Callback: https://quantstrategylab-ai-gateway-dash.pigbibi.workers.dev/callback
+    - Homepage: https://qsl-ai-gateway-dash.quantstrategylab.workers.dev
+    - Callback: https://qsl-ai-gateway-dash.quantstrategylab.workers.dev/callback
     - Set secrets: GITHUB_OAUTH_CLIENT_ID, GITHUB_OAUTH_CLIENT_SECRET
  */
 
