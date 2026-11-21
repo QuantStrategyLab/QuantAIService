@@ -509,9 +509,13 @@ def provider_readiness(name: str, *, env: dict[str, str] | None,
             return False, 'disabled'
         return (True, 'ready') if has_dot_subscription else (False, 'no_subscription')
     if kind == 'muse':
-        # Cloudflare event subscription wake; never Cursor Cloud Agents.
         if item.get('enabled') is not True:
             return False, 'disabled'
+        if isinstance(item.get('url'), str) and item.get('url'):
+            key_env = item.get('key_env')
+            if not isinstance(key_env, str) or not environment.get(key_env):
+                return False, 'missing_credential'
+            return True, 'ready'
         return (True, 'ready') if has_muse_subscription else (False, 'no_subscription')
     if kind in {'grok_webhook', 'claude_routine'}:
         if item.get('enabled') is not True:

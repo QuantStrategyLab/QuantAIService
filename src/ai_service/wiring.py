@@ -15,7 +15,7 @@ from .gemini import GeminiProvider
 from .github_apps import GitHubApps, GitHubComments, validate_apps
 from .inference import AnthropicAPIProvider, ChatGPTPlanProvider, OpenAIAPIProvider, select_api_model
 from .mcp_logging import log_level
-from .providers import ClaudeRoutineProvider, GrokWebhookProvider
+from .providers import ClaudeRoutineProvider, GrokWebhookProvider, MuseWebhookProvider
 from .routing import configured_provider_mode, provider_readiness, validate_routing_config
 from .runtime import Policy
 from .worker_tools import tools_schema_sha256, worker_tools
@@ -86,8 +86,11 @@ def validate_configuration(config):
             if item.get('enabled') is True:
                 raise ValueError('Claude Duet invocation is not configured')
         elif kind == 'muse':
-            # Muse Wonder wakes through Cloudflare event subscriptions; never
-            # Cursor Cloud Agents.
+            if item.get('enabled') is not True:
+                continue
+            if isinstance(item.get('url'), str) and item.get('url'):
+                item['key_env']
+                MuseWebhookProvider(item['url'], 'configuration-check', config['resource'])
             continue
         elif kind == 'chatgpt_plan_oauth':
             # Unauthorized entries stay as routing placeholders (same as disabled gemini).
@@ -238,6 +241,10 @@ def build_application(config, *, github_key_loader=None, github_transport=None):
             continue
         elif item['type'] == 'muse':
             if item.get('enabled') is not True:
+                continue
+            if isinstance(item.get('url'), str) and item.get('url'):
+                key = srv.os.environ.get(item['key_env'])
+                providers[name] = MuseWebhookProvider(item['url'], key, config['resource'])
                 continue
             if name in events_holder['buses']:
                 raise ValueError('one Muse event provider per service deployment')

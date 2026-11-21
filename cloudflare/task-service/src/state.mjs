@@ -4,7 +4,8 @@ import {workerContext} from './projects.mjs';
 import {callbackURL,signingKey,signedHeaders} from './webhooks.mjs';
 import {callbackHost,classifyDelivery,emitEventLog,shortSubscriptionId} from './delivery-log.mjs';
 import {apiConfiguration,apiModelCandidates,executeAPI,selectAPIModel} from './api.mjs';
-import {nativeConfiguration,triggerNative} from './native.mjs';
+import {CompletionWebhooks} from './completion-webhooks.mjs';
+import {usesEventSubscription,validateAgentTrigger,wakeAgent} from './agent-adapters.mjs';
 import {outputValid} from './validation.mjs';
 import {serialize,valueOf,objectNode,nodeFrom,parseJson,replaceFields} from './canonical.mjs';
 import {admittedProviders,configuredProviderMode,decideRoute,EVENT_AGENTS,providerReadiness,validateRoutingConfig} from './routing.mjs';
@@ -92,6 +93,8 @@ export class TaskStore extends DurableObject {
     this.env = env;
     this.apiInFlight = new Set();
     this.nativeInFlight = new Set();
+    this.completionWatchdog = null;
+    this.completions = new CompletionWebhooks(this.sql, env);
     this.sql.exec(`
       CREATE TABLE IF NOT EXISTS tasks (
         id TEXT PRIMARY KEY, owner TEXT NOT NULL, idem TEXT NOT NULL,
@@ -188,6 +191,10 @@ export class TaskStore extends DurableObject {
     this.sql.exec(`UPDATE tasks SET status=?,updated=?${names.map((name) => `,${name}=?`).join("")} WHERE id=?`,
       status, recordedAt, ...Object.values(fields), taskId);
     this.sql.exec("INSERT INTO events(task_id,status,created) VALUES(?,?,?)", taskId, status, recordedAt);
+    if (TERMINAL.has(status)) {
+      const eventId = this.sql.exec("SELECT last_insert_rowid() AS id").one().id;
+      this.completions.enqueue(this.sql.exec("SELECT id,owner,revision,COALESCE(json_extract(request,'$.profile'),'default') AS profile FROM tasks WHERE id=?", taskId).one(), status, eventId);
+    }
   }
 
   #agentRow(owner, taskId, providerName) {
@@ -229,8 +236,8 @@ export class TaskStore extends DurableObject {
     if (usesRouting) {
       const configured = {...(this.env.AGENT_PROVIDERS ?? {}), ...(this.env.API_PROVIDERS ?? {})};
       const mayUseAgent = !Object.hasOwn(request, "mode") || request.mode === "agent" || request.mode === "auto";
-      const hasDotSubscription = mayUseAgent && await this.#liveSubscription(owner, 'dot');
-      const hasMuseSubscription = mayUseAgent && await this.#museReady(owner, timeout);
+      const hasDotSubscription = mayUseAgent && usesEventSubscription(this.env, 'dot') && await this.#liveSubscription(owner, 'dot');
+      const hasMuseSubscription = mayUseAgent && usesEventSubscription(this.env, 'muse') && await this.#liveSubscription(owner, 'muse');
       let decision;
       try {
         decision = decideRoute(policy.routing, request, {
@@ -247,9 +254,9 @@ export class TaskStore extends DurableObject {
                 return [false, 'api_model_mismatch'];
               }
             }
-            if (effectiveMode === 'agent' && !EVENT_AGENTS.has(name)) {
+            if (effectiveMode === 'agent' && !usesEventSubscription(this.env, name)) {
               try {
-                nativeConfiguration(this.env, name);
+                validateAgentTrigger(this.env, name);
                 return [true, 'ready'];
               } catch {
                 return [false, 'native_not_executable'];
@@ -287,18 +294,17 @@ export class TaskStore extends DurableObject {
     if (request.mode === "api") {
       try { apiConfiguration(this.env,provider,request); } catch { denied("execution mode is unavailable"); }
     }
-    if (request.mode === 'agent' && EVENT_AGENTS.has(provider)) {
-      const item = this.env.AGENT_PROVIDERS?.[provider];
-      const expectedType = provider === 'dot' ? 'dot_events' : 'muse';
-      if (!item || item.type !== expectedType || item.enabled !== true) denied('execution mode is unavailable');
-    }
-    if (request.mode === 'agent' && !EVENT_AGENTS.has(provider)) {
-      try { nativeConfiguration(this.env,provider); } catch { denied('execution mode is unavailable'); }
+    if (request.mode === 'agent') {
+      if (usesEventSubscription(this.env, provider)) {
+        const item = this.env.AGENT_PROVIDERS?.[provider];
+        const expectedType = provider === 'dot' ? 'dot_events' : 'muse';
+        if (!item || item.type !== expectedType || item.enabled !== true) denied('execution mode is unavailable');
+      } else {
+        try { validateAgentTrigger(this.env, provider); } catch { denied('execution mode is unavailable'); }
+      }
     }
     if (!policy.models[provider]?.includes(request.model)) denied("model is not admitted");
     if (!Number.isSafeInteger(timeout) || timeout < 1 || timeout > policy.max_timeout_seconds) invalid("timeout_seconds exceeds project policy");
-    if (!usesRouting && request.mode === 'agent' && provider === 'muse' &&
-        this.#musePollWindow(owner) && !await this.#museReady(owner, timeout)) denied('execution mode is unavailable');
     if (!Array.isArray(Object.hasOwn(request, "materials") ? request.materials : [])) invalid("materials must be an array");
     if (Object.hasOwn(request, "issue")) denied("App comments are not configured");
     if (!object(request.output_schema)) invalid("output_schema must be an object");
@@ -495,42 +501,6 @@ export class TaskStore extends DurableObject {
     return admissions.some(a=>a.githubUserId===identity.githubUserId&&a.ownerId===project.ownerId&&a.clientIds.includes(identity.clientId)&&a.providers.includes(identity.provider)&&scopes.every(scope=>a.scopes.includes(scope)));
   }
 
-  #musePollWindow(owner) {
-    const policy = this.#policy(owner);
-    const seconds = policy.muse_poll_seconds;
-    return Number.isSafeInteger(seconds) && seconds > 0 && seconds < policy.max_timeout_seconds ? seconds : 0;
-  }
-
-  async #museReady(owner, timeout) {
-    const window = this.#musePollWindow(owner);
-    if (!window) return await this.#liveSubscription(owner, 'muse');
-    if (timeout <= window) return false;
-    const poll = this.sql.exec('SELECT identity_json, seen FROM muse_polls WHERE owner=?', owner).toArray()[0];
-    return Boolean(poll && now() - poll.seen < window &&
-      await this.#eventAccess(owner, JSON.parse(poll.identity_json), ['events:subscribe','tasks:work']) && now() - poll.seen < window);
-  }
-
-  async pollMuseTasks(owner, worker, identity) {
-    const provider = this.env.AGENT_PROVIDERS?.muse;
-    if (!this.#musePollWindow(owner) || provider?.type !== 'muse' || provider.enabled !== true ||
-        identity.provider !== 'muse' || !admittedProviders(this.#policy(owner)).has('muse') ||
-        !await this.#eventAccess(owner, identity, ['events:subscribe','tasks:work'])) {
-      denied('Muse polling is not admitted for this project');
-    }
-    return this.ctx.storage.transactionSync(() => {
-      const timestamp = now();
-      this.sql.exec(`INSERT INTO muse_polls(owner,identity_json,seen) VALUES(?,?,?)
-        ON CONFLICT(owner) DO UPDATE SET identity_json=excluded.identity_json,seen=excluded.seen`,
-        owner, JSON.stringify(identity), timestamp);
-      const tasks = this.sql.exec(`SELECT id AS task_id,status,attempt AS attempt_id,revision,deadline
-        FROM tasks WHERE owner=? AND provider='muse' AND json_extract(request,'$.mode')='agent'
-          AND ((status='running' AND deadline>? AND (worker IS NULL OR worker=?))
-            OR (status='cancel_requested' AND worker=?))
-        ORDER BY deadline,created,id LIMIT 8`, owner, timestamp, worker, worker).toArray();
-      return {tasks};
-    });
-  }
-
   async #liveSubscription(owner, provider='dot') {
     for(const sub of this.sql.exec('SELECT * FROM subscriptions WHERE owner=? AND deleted IS NULL AND (non_expiring=1 OR expires>?)',owner,now()).toArray()){
       const identity=JSON.parse(sub.identity_json);
@@ -654,7 +624,7 @@ export class TaskStore extends DurableObject {
   async cancel(owner,taskId) {
     const record=this.ctx.storage.transactionSync(()=>{
       const row=this.#row(owner,taskId);
-      const unclaimedEvent=EVENT_AGENTS.has(row.provider)&&JSON.parse(row.request).mode==='agent'&&!row.worker&&!row.attempt;
+      const unclaimedEvent=usesEventSubscription(this.env,row.provider)&&JSON.parse(row.request).mode==='agent'&&!row.worker&&!row.attempt;
       let acceptance=null;try{acceptance=row.handle?JSON.parse(row.handle).acceptance:null;}catch{}
       // Event-pending rows cancel locally; leftover Cloud Agent handles need a stop report.
       if(row.status==='queued'||(unclaimedEvent&&['running','cancel_requested'].includes(row.status)&&acceptance!=='agent_started'))this.#state(taskId,'cancelled');
@@ -662,6 +632,26 @@ export class TaskStore extends DurableObject {
       return this.get(owner,taskId);
     });
     await this.#wake();return record;
+  }
+
+  async #startCompletionDelivery() {
+    if(this.completionWatchdog){
+      await this.#wake(Math.max(Date.now()+1000,this.completionWatchdog));
+      return;
+    }
+    const next=this.completions.nextAttempt();
+    if(next===null)return;
+    if(next>now()){
+      await this.#wake(next*1000);
+      return;
+    }
+    this.completionWatchdog=Date.now()+30000;
+    try{await this.#wake(this.completionWatchdog);}
+    catch(error){this.completionWatchdog=null;throw error;}
+    this.ctx.waitUntil(this.completions.flush()
+      .then(due=>due===null?undefined:this.#wake(Math.max(Date.now()+10,due*1000)))
+      .catch(()=>console.warn('completion_delivery_failed'))
+      .finally(()=>{this.completionWatchdog=null;}));
   }
 
   async alarm() {
@@ -673,13 +663,14 @@ export class TaskStore extends DurableObject {
     const apiJobs=[],nativeJobs=[];
     await this.ctx.blockConcurrencyWhile(async()=>{
       const timestamp=now();
-      for(const candidate of this.sql.exec("SELECT * FROM tasks WHERE status IN ('queued','submitting','running') OR (status='cancel_requested' AND ((json_extract(request,'$.mode')='api' AND handle IS NULL) OR (provider IN ('dot','muse') AND json_extract(request,'$.mode')='agent' AND worker IS NULL AND attempt IS NULL)))").toArray()){
-        const polling = candidate.provider==='muse' && this.#musePollWindow(candidate.owner)>0;
-        const active=EVENT_AGENTS.has(candidate.provider)&&candidate.status==='queued'
-          ?polling || await this.#liveSubscription(candidate.owner,candidate.provider):false;
+      for(const candidate of this.sql.exec("SELECT * FROM tasks WHERE status IN ('queued','submitting','running') OR (status='cancel_requested' AND ((json_extract(request,'$.mode')='api' AND handle IS NULL) OR (json_extract(request,'$.mode')='agent' AND worker IS NULL AND attempt IS NULL)))").toArray()){
+        const eventDriven=usesEventSubscription(this.env,candidate.provider);
+        if(candidate.status==='cancel_requested'&&JSON.parse(candidate.request).mode==='agent'&&!eventDriven)continue;
+        const active=eventDriven&&candidate.status==='queued'
+          ?await this.#liveSubscription(candidate.owner,candidate.provider):false;
         this.ctx.storage.transactionSync(()=>{
           const task=this.#row(candidate.owner,candidate.id),timestamp=now();
-          const unclaimedEvent=EVENT_AGENTS.has(task.provider)&&JSON.parse(task.request).mode==='agent'&&!task.worker&&!task.attempt;
+          const unclaimedEvent=eventDriven&&JSON.parse(task.request).mode==='agent'&&!task.worker&&!task.attempt;
           if(task.status==='cancel_requested'&&unclaimedEvent){this.#state(task.id,'cancelled',{error:task.error});return;}
           if(task.status==='submitting'||task.status==='cancel_requested'){
             if(this.apiInFlight.has(task.id)||this.nativeInFlight.has(task.id))return;
@@ -690,11 +681,10 @@ export class TaskStore extends DurableObject {
           if(task.status!=='queued')return;
           this.#state(task.id,'submitting');
           if(JSON.parse(task.request).mode==='api'){this.apiInFlight.add(task.id);apiJobs.push(task);return;}
-          if(!EVENT_AGENTS.has(task.provider)){this.nativeInFlight.add(task.id);nativeJobs.push({...task,change:'requested'});return;}
+          if(!eventDriven){this.nativeInFlight.add(task.id);nativeJobs.push({...task,change:'requested'});return;}
           if(!active){this.#state(task.id,'failed',{error:'submission_rejected'});return;}
           // Pure durable event acceptance has no remote side effect between these writes.
-          const acceptance = polling ? 'poll_pending' : 'event_pending';
-          this.#state(task.id,'running',{handle:JSON.stringify({task_id:task.id,acceptance,model_verification:'unavailable'})});
+          this.#state(task.id,'running',{handle:JSON.stringify({task_id:task.id,acceptance:'event_pending',model_verification:'unavailable'})});
         });
       }
       const matchedOwners=new Set();
@@ -716,20 +706,19 @@ export class TaskStore extends DurableObject {
           matchedCounts.set(sub.owner,(matchedCounts.get(sub.owner)??0)+1);
           const identity=JSON.parse(sub.identity_json);
           const provider=identity.provider;
-          if(!EVENT_AGENTS.has(provider))return;
+          if(!usesEventSubscription(this.env,provider))return;
           const pending=this.sql.exec("SELECT COUNT(*) AS n FROM event_deliveries WHERE subscription=? AND status='pending'",sub.id).one().n;
           const rows=this.sql.exec(`SELECT e.seq,e.status,e.created,t.id,t.owner,t.revision FROM events e JOIN tasks t ON t.id=e.task_id
             WHERE t.owner=? AND t.provider=? AND e.seq>? AND e.status IN ('queued','message','cancel_requested')
-            AND COALESCE(json_extract(t.handle,'$.acceptance'),'')<>'poll_pending'
             AND t.status IN ('running','cancel_requested','outcome_unknown') ORDER BY e.seq LIMIT ?`,sub.owner,provider,sub.start_seq,Math.max(0,128-pending)).toArray();
           for(const e of rows){const body=JSON.stringify({eventId:'evt_'+e.seq,name:'task.requested',timestamp:new Date(e.created*1000).toISOString(),cursor:null,data:{task_id:e.id,project:e.owner,revision:e.revision,change:e.status}});this.sql.exec('INSERT OR IGNORE INTO event_deliveries(subscription,seq,body) VALUES(?,?,?)',sub.id,e.seq,body);}
           if(rows.length)this.sql.exec('UPDATE subscriptions SET start_seq=? WHERE id=?',rows.at(-1).seq,sub.id);
         });
       }
       this.ctx.storage.transactionSync(()=>{
-        const fresh=this.sql.exec(`SELECT e.seq,t.id AS task_id,t.owner FROM events e JOIN tasks t ON t.id=e.task_id
-          WHERE t.provider IN ('dot','muse') AND e.status IN ('queued','message','cancel_requested') AND COALESCE(e.fanout_noted,0)=0
-          AND COALESCE(json_extract(t.handle,'$.acceptance'),'')<>'poll_pending' AND e.created>=? LIMIT 32`,timestamp-3600).toArray();
+        const fresh=this.sql.exec(`SELECT e.seq,t.id AS task_id,t.owner,t.provider FROM events e JOIN tasks t ON t.id=e.task_id
+          WHERE json_extract(t.request,'$.mode')='agent' AND e.status IN ('queued','message','cancel_requested') AND COALESCE(e.fanout_noted,0)=0
+          AND e.created>=? LIMIT 32`,timestamp-3600).toArray().filter(event=>usesEventSubscription(this.env,event.provider));
         for(const event of fresh){
           const matches=matchedCounts.get(event.owner)??0;
           if(!matchedOwners.has(event.owner))this.#log({message:'event_unmatched',event:'task.requested',task_id:event.task_id,matching_subscriptions:0});
@@ -746,8 +735,9 @@ export class TaskStore extends DurableObject {
       this.sql.exec("UPDATE native_notifications SET status='outcome_unknown' WHERE status='sending'");
       const notifications=this.sql.exec(`SELECT e.seq,e.status AS change,t.* FROM events e JOIN tasks t ON t.id=e.task_id
         LEFT JOIN native_notifications n ON n.seq=e.seq WHERE e.status IN ('message','cancel_requested')
-        AND n.seq IS NULL AND t.provider NOT IN ('dot','muse') AND json_extract(t.request,'$.mode')='agent'
-        AND t.status IN ('running','cancel_requested') ORDER BY e.seq LIMIT 100`).toArray();
+        AND n.seq IS NULL AND json_extract(t.request,'$.mode')='agent'
+        AND t.status IN ('running','cancel_requested') ORDER BY e.seq LIMIT 100`).toArray()
+        .filter(event=>!usesEventSubscription(this.env,event.provider));
       for(const event of notifications){
         this.sql.exec("INSERT INTO native_notifications(seq,status) VALUES(?,'sending')",event.seq);
         nativeJobs.push(event);
@@ -776,11 +766,13 @@ export class TaskStore extends DurableObject {
       // An expired live API call can only finish or become unknown; inspect its
       // recovery state at most once per second instead of rearming every 10ms.
       const scheduledAt=now();
-      const taskDeadlines=this.sql.exec("SELECT id,deadline FROM tasks WHERE status IN ('queued','submitting','running') OR (status='cancel_requested' AND ((json_extract(request,'$.mode')='api' AND handle IS NULL) OR (provider IN ('dot','muse') AND json_extract(request,'$.mode')='agent' AND worker IS NULL AND attempt IS NULL)))").toArray()
+      const taskDeadlines=this.sql.exec("SELECT id,provider,status,request,deadline FROM tasks WHERE status IN ('queued','submitting','running') OR (status='cancel_requested' AND ((json_extract(request,'$.mode')='api' AND handle IS NULL) OR (json_extract(request,'$.mode')='agent' AND worker IS NULL AND attempt IS NULL)))").toArray()
+        .filter(task=>task.status!=='cancel_requested'||JSON.parse(task.request).mode!=='agent'||usesEventSubscription(this.env,task.provider))
         .map(task=>(this.apiInFlight.has(task.id)||this.nativeInFlight.has(task.id))&&task.deadline<=scheduledAt?scheduledAt+1:task.deadline);
       const next=[delivery,...taskDeadlines].filter(v=>v!==null);
       if(next.length)await this.ctx.storage.setAlarm(Math.max(Date.now()+10,Math.min(...next)*1000));
     });
+    await this.#startCompletionDelivery();
     // Marked durably before sending. Lost receipts never cause a second routine run.
     for(const task of nativeJobs){
       let status='accepted',handle;
@@ -791,7 +783,7 @@ export class TaskStore extends DurableObject {
         }
         let prior=null;
         try{prior=current.handle?JSON.parse(current.handle):null;}catch{prior=null;}
-        handle=await triggerNative(this.env,task.provider,{task_id:task.id,project:task.owner,change:task.change,revision:task.revision},task.change==='requested'?task.deadline-now():30,prior);
+        handle=await wakeAgent(this.env,task.provider,{task_id:task.id,project:task.owner,change:task.change,revision:task.revision},task.change==='requested'?task.deadline-now():30,prior);
       }catch(e){status=e.name==='SubmissionRejected'?'rejected':'outcome_unknown';}
       finally{this.nativeInFlight.delete(task.id);}
       this.ctx.storage.transactionSync(()=>{

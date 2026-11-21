@@ -114,7 +114,6 @@ export class TaskService extends WorkerEntrypoint {
     if(!EVENT_AGENTS.has(c.provider))return TOOLS.map(scoped);
     const subscriptionId=schema({subscription_id:{type:'string',minLength:1,maxLength:200}});
     const eventTools=[['get_event_subscription','Read an owned subscription, including callback host and last delivery.',subscriptionId],['delete_event_subscription','Delete an owned subscription and stop delivery.',subscriptionId],['list_event_subscriptions','List the caller subscriptions for the selected project. Callback host and last delivery only.',schema({})]];
-    if(c.provider==='muse')eventTools.push(['poll_muse_tasks','List up to eight pending tasks for the selected Muse project and renew its polling readiness.',schema({})]);
     return [...TOOLS,...eventTools.map(([name,description,inputSchema])=>({name,description,inputSchema,securitySchemes:securitySchemes(EVENT_SCOPES)}))].map(scoped);
   }
   async mcp(request,c){
@@ -147,7 +146,7 @@ export class TaskService extends WorkerEntrypoint {
           const tool=this.tools(c).find(t=>t.name===params.name);if(!tool)bad();await check(tool.inputSchema,params.arguments);
           const a=params.arguments;
           c=this.context(c.identity,request,a.project??c.project);
-          if(this.writeFrozen()&&['delete_event_subscription','poll_muse_tasks','claim_task','report_task_result'].includes(params.name)){
+          if(this.writeFrozen()&&['delete_event_subscription','claim_task','report_task_result'].includes(params.name)){
             return ordinary({jsonrpc:'2.0',id:message.id,error:{code:-32000,message:'service_write_frozen'}});
           }
           if(['get_event_subscription','delete_event_subscription','list_event_subscriptions'].includes(params.name)){
@@ -159,11 +158,6 @@ export class TaskService extends WorkerEntrypoint {
             result=nodeFrom({content:[{type:'text',text:JSON.stringify(value)}],structuredContent:value,isError:false});break;
           }
           const store=this.store();
-          if(params.name==='poll_muse_tasks'){
-            this.scope(c,'events:subscribe');
-            const value=await store.pollMuseTasks(c.project,c.worker,c.identity);
-            result=nodeFrom({content:[{type:'text',text:JSON.stringify(value)}],structuredContent:value,isError:false});break;
-          }
           // Existing native-host tools may cache the single-project input schema.
           // Resolve an event task only inside the worker's explicit, server-controlled list.
           if(a.project===undefined){const project=await store.projectForTask(workerProjects(this.env,c.identity),a.task_id);c=this.context(c.identity,request,project);}
