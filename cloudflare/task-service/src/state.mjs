@@ -910,7 +910,7 @@ export class TaskStore extends DurableObject {
     let nextAlarmAt = null;
     await this.ctx.blockConcurrencyWhile(async () => {
       this.ctx.storage.transactionSync(() => {
-        const existing = this.sql.exec("SELECT (SELECT COUNT(*) FROM tasks) + (SELECT COUNT(*) FROM events) + (SELECT COUNT(*) FROM subscriptions) AS n").one().n;
+        const existing = this.sql.exec("SELECT (SELECT COUNT(*) FROM tasks) + (SELECT COUNT(*) FROM events) + (SELECT COUNT(*) FROM subscriptions) + (SELECT COUNT(*) FROM muse_polls) AS n").one().n;
         if (existing > 0 && !replace) {
           throw Object.assign(new Error("target store is not empty"), { name: "Conflict" });
         }
