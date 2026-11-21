@@ -904,7 +904,9 @@ export class TaskStore extends DurableObject {
   }
 
   async importState(snapshot, { replace = false } = {}) {
-    if (!snapshot || snapshot.version !== 1 || snapshot.organization_id !== this.env.ORGANIZATION_ID || !object(snapshot.tables)) {
+    const requiredTables = ["tasks", "events", "native_notifications", "messages", "muse_polls", "subscriptions", "event_deliveries", "task_metadata_cursor_key"];
+    if (!snapshot || snapshot.version !== 1 || snapshot.organization_id !== this.env.ORGANIZATION_ID || !object(snapshot.tables) ||
+        requiredTables.some((name) => !Array.isArray(snapshot.tables[name]))) {
       throw Object.assign(new Error("invalid migration snapshot"), { name: "ValueError" });
     }
     let nextAlarmAt = null;
