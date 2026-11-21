@@ -263,6 +263,36 @@ export function createAuthApplication(config, { taskHandler } = {}) {
       const url = new URL(request.url);
       if (url.origin !== config.origin) return deny('unexpected_origin', 421);
       try {
+        if (url.pathname.startsWith('/_admin/migration/')) {
+          const expected = env.MIGRATION_ADMIN_TOKEN;
+          if (typeof expected !== 'string' || expected.length < 32) return deny('not_found', 404);
+          const header = request.headers.get('Authorization') ?? '';
+          const match = header.match(/^Bearer\s+(.+)$/);
+          if (!match) return deny('unauthorized', 401);
+          const enc = new TextEncoder();
+          const [a, b] = await Promise.all([
+            crypto.subtle.digest('SHA-256', enc.encode(match[1])),
+            crypto.subtle.digest('SHA-256', enc.encode(expected)),
+          ]);
+          if (!crypto.subtle.timingSafeEqual(a, b)) return deny('unauthorized', 401);
+          if (url.pathname === '/_admin/migration/drain-status' && request.method === 'GET') {
+            return Response.json(await env.TASK_SERVICE.migrationDrainStatus(), { headers: { 'Cache-Control': 'no-store' } });
+          }
+          if (url.pathname === '/_admin/migration/export' && request.method === 'GET') {
+            return Response.json(await env.TASK_SERVICE.migrationExport(), { headers: { 'Cache-Control': 'no-store' } });
+          }
+          if (url.pathname === '/_admin/migration/import' && request.method === 'POST') {
+            try {
+              const payload = await request.json();
+              const replace = url.searchParams.get('replace') === '1';
+              return Response.json(await env.TASK_SERVICE.migrationImport(payload, replace), { headers: { 'Cache-Control': 'no-store' } });
+            } catch (err) {
+              const status = err?.name === 'Conflict' ? 409 : err?.name === 'ValueError' ? 400 : 500;
+              return Response.json({ error: err?.name ?? 'Error', message: err?.message ?? 'migration_import_failed' }, { status, headers: { 'Cache-Control': 'no-store' } });
+            }
+          }
+          return deny('not_found', 404);
+        }
         if (url.pathname === '/authorize') return await authorize(request, env);
         if (url.pathname === '/callback' && request.method==='GET') return callback(request,env);
         if (url.pathname === '/v1/tasks' || url.pathname.startsWith('/v1/tasks/')) {

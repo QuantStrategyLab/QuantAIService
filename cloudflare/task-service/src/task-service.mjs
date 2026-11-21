@@ -47,6 +47,10 @@ export class TaskService extends WorkerEntrypoint {
       worker:`github-${identity.githubUserId}:${identity.clientId}`};
   }
   store(){return this.env.TASK_STATE.get(this.env.TASK_STATE.idFromName(this.env.TASK_STORE_NAME));}
+  writeFrozen(){return this.env.WRITE_FROZEN===true||this.env.WRITE_FROZEN==='true'||this.env.WRITE_FROZEN==='1';}
+  async migrationDrainStatus(){return await this.store().drainStatus();}
+  async migrationExport(){return await this.store().exportState();}
+  async migrationImport(snapshot,replace=false){return await this.store().importState(snapshot,{replace});}
   scope(c,s){if(!c.scopes.includes(s))denied();}
   async snapshot(c,id,worker=false,withMessages=false){
     const snap=await this.store().getCanonical(c.project,id);
@@ -84,6 +88,7 @@ export class TaskService extends WorkerEntrypoint {
         return json(await this.snapshot(c,id,c.provider!==null,true));
       }
       if(request.method==='POST'){
+        if(this.writeFrozen())return ordinary({error:'service_write_frozen'},503);
         this.scope(c,'tasks:submit');const body=parseJson(await request.text()),value=valueOf(body);
         if(path==='/v1/tasks'){
           await check(REQUEST,value);
@@ -132,6 +137,7 @@ export class TaskService extends WorkerEntrypoint {
         case 'events/list':case 'events/subscribe':case 'events/unsubscribe':{
           if(!EVENT_AGENTS.has(c.provider))denied();
           if(!c.scopes.includes('events:subscribe'))return eventScopeChallenge(c);
+          if(message.method!=='events/list'&&this.writeFrozen())return ordinary({jsonrpc:'2.0',id:message.id,error:{code:-32000,message:'service_write_frozen'}});
           if(message.method!=='events/list')c=this.context(c.identity,request,params.arguments?.project);
           result=nodeFrom(message.method==='events/list'?eventCatalog():message.method==='events/subscribe'?await this.store().subscribe(c.project,c.worker,c.identity,params):await this.store().unsubscribeRequest(c.project,c.worker,params));break;
         }
@@ -141,6 +147,9 @@ export class TaskService extends WorkerEntrypoint {
           const tool=this.tools(c).find(t=>t.name===params.name);if(!tool)bad();await check(tool.inputSchema,params.arguments);
           const a=params.arguments;
           c=this.context(c.identity,request,a.project??c.project);
+          if(this.writeFrozen()&&['delete_event_subscription','poll_muse_tasks','claim_task','report_task_result'].includes(params.name)){
+            return ordinary({jsonrpc:'2.0',id:message.id,error:{code:-32000,message:'service_write_frozen'}});
+          }
           if(['get_event_subscription','delete_event_subscription','list_event_subscriptions'].includes(params.name)){
             if(!c.scopes.includes('events:subscribe')){
               result=nodeFrom({content:[{type:'text',text:'Authorize event subscription access to continue.'}],isError:true,_meta:{'mcp/www_authenticate':[eventScopeChallenge(c).headers.get('WWW-Authenticate')]}});break;
