@@ -70,6 +70,18 @@ function noExternalReferences(value) {
 // (including Draft 2020-12) BEFORE invoking this capability. Canonical JSON bytes
 // come from ai_service.runtime._json; JavaScript JSON.stringify is not equivalent
 // for Python floats such as 1.0. No external caller may prepare its own verdict.
+const isFlagEnabled=(v)=>v===true||v==='true'||v==='1';
+const bytesToBase64=(bytes)=>{
+  let bin='';
+  for(let i=0;i<bytes.length;i++)bin+=String.fromCharCode(bytes[i]);
+  return btoa(bin);
+};
+const base64ToBytes=(b64)=>{
+  const bin=atob(b64),out=new Uint8Array(bin.length);
+  for(let i=0;i<bin.length;i++)out[i]=bin.charCodeAt(i);
+  return out;
+};
+
 export class TaskStore extends DurableObject {
   constructor(ctx, env, organization) {
     super(ctx, env);
@@ -653,6 +665,11 @@ export class TaskStore extends DurableObject {
   }
 
   async alarm() {
+    if(isFlagEnabled(this.env.DISPATCH_PAUSED)){
+      const nextAt=this.#nextAlarmAt(5000);
+      if(nextAt!==null)await this.ctx.storage.setAlarm(nextAt);
+      return;
+    }
     const apiJobs=[],nativeJobs=[];
     await this.ctx.blockConcurrencyWhile(async()=>{
       const timestamp=now();
@@ -823,6 +840,137 @@ export class TaskStore extends DurableObject {
       });
       this.apiInFlight.delete(task.id);
     }
+  }
+
+  #nextAlarmAt(minDelayMs = 10) {
+    const hasImmediateTask = this.sql.exec("SELECT 1 FROM tasks WHERE status IN ('queued','submitting','cancel_requested') LIMIT 1").toArray().length > 0;
+    const hasPendingEvent = this.sql.exec(`SELECT 1 FROM events e JOIN tasks t ON t.id=e.task_id
+      LEFT JOIN native_notifications n ON n.seq=e.seq
+      WHERE e.status IN ('message','cancel_requested') AND t.status IN ('running','cancel_requested')
+        AND ((t.provider NOT IN ('dot','muse') AND json_extract(t.request,'$.mode')='agent' AND n.seq IS NULL)
+          OR (t.provider IN ('dot','muse') AND COALESCE(e.fanout_noted,0)=0 AND COALESCE(json_extract(t.handle,'$.acceptance'),'')<>'poll_pending'))
+      LIMIT 1`).toArray().length > 0;
+    if (hasImmediateTask || hasPendingEvent) return Date.now() + minDelayMs;
+    const delivery = this.sql.exec("SELECT MIN(next_attempt) AS n FROM event_deliveries WHERE status='pending'").one().n;
+    const deadline = this.sql.exec("SELECT MIN(deadline) AS d FROM tasks WHERE status IN ('queued','submitting','running') OR (status='cancel_requested' AND ((json_extract(request,'$.mode')='api' AND handle IS NULL) OR (provider IN ('dot','muse') AND json_extract(request,'$.mode')='agent' AND worker IS NULL AND attempt IS NULL)))").one().d;
+    const candidates = [delivery, deadline].filter((v) => v !== null);
+    if (!candidates.length) return null;
+    return Math.max(Date.now() + minDelayMs, Math.min(...candidates) * 1000);
+  }
+
+  async drainStatus() {
+    return await this.ctx.blockConcurrencyWhile(async () => {
+      const counts = Object.fromEntries(
+        this.sql.exec("SELECT status, COUNT(*) AS n FROM tasks GROUP BY status").toArray().map((r) => [r.status, r.n]),
+      );
+      const unknown = this.sql.exec("SELECT id, owner, provider, updated, attempt FROM tasks WHERE status='outcome_unknown' ORDER BY updated DESC").toArray();
+      const pendingDeliveries = this.sql.exec("SELECT COUNT(*) AS n FROM event_deliveries WHERE status='pending'").one().n;
+      const activeSubscriptions = this.sql.exec("SELECT COUNT(*) AS n FROM subscriptions WHERE deleted IS NULL").one().n;
+      return {
+        organization_id: this.env.ORGANIZATION_ID,
+        write_frozen: isFlagEnabled(this.env.WRITE_FROZEN),
+        dispatch_paused: isFlagEnabled(this.env.DISPATCH_PAUSED),
+        task_counts: counts,
+        in_flight_count: (counts.submitting ?? 0) + (counts.running ?? 0) + (counts.cancel_requested ?? 0),
+        outcome_unknown: unknown,
+        pending_deliveries: pendingDeliveries,
+        active_subscriptions: activeSubscriptions,
+      };
+    });
+  }
+
+  async exportState() {
+    return await this.ctx.blockConcurrencyWhile(async () => this.ctx.storage.transactionSync(() => {
+      const cursorRows = this.sql.exec("SELECT id, material FROM task_metadata_cursor_key").toArray()
+        .map((r) => ({ id: r.id, material_b64: bytesToBase64(new Uint8Array(r.material)) }));
+      const seqRow = this.sql.exec("SELECT seq FROM sqlite_sequence WHERE name='events'").toArray()[0];
+      return {
+        version: 1,
+        organization_id: this.env.ORGANIZATION_ID,
+        exported_at: now(),
+        events_seq: seqRow ? seqRow.seq : 0,
+        tables: {
+          tasks: this.sql.exec("SELECT * FROM tasks ORDER BY created ASC, id ASC").toArray(),
+          events: this.sql.exec("SELECT * FROM events ORDER BY seq ASC").toArray(),
+          native_notifications: this.sql.exec("SELECT * FROM native_notifications ORDER BY seq ASC").toArray(),
+          messages: this.sql.exec("SELECT * FROM messages ORDER BY created ASC, task_id ASC, idem ASC").toArray(),
+          muse_polls: this.sql.exec("SELECT * FROM muse_polls ORDER BY owner ASC").toArray(),
+          subscriptions: this.sql.exec("SELECT * FROM subscriptions ORDER BY created ASC, id ASC").toArray(),
+          event_deliveries: this.sql.exec("SELECT * FROM event_deliveries ORDER BY seq ASC, subscription ASC").toArray(),
+          task_metadata_cursor_key: cursorRows,
+        },
+      };
+    }));
+  }
+
+  async importState(snapshot, { replace = false } = {}) {
+    const requiredTables = ["tasks", "events", "native_notifications", "messages", "muse_polls", "subscriptions", "event_deliveries", "task_metadata_cursor_key"];
+    if (!snapshot || snapshot.version !== 1 || snapshot.organization_id !== this.env.ORGANIZATION_ID || !object(snapshot.tables) ||
+        requiredTables.some((name) => !Array.isArray(snapshot.tables[name]))) {
+      throw Object.assign(new Error("invalid migration snapshot"), { name: "ValueError" });
+    }
+    let nextAlarmAt = null;
+    await this.ctx.blockConcurrencyWhile(async () => {
+      this.ctx.storage.transactionSync(() => {
+        const existing = this.sql.exec("SELECT (SELECT COUNT(*) FROM tasks) + (SELECT COUNT(*) FROM events) + (SELECT COUNT(*) FROM subscriptions) + (SELECT COUNT(*) FROM muse_polls) AS n").one().n;
+        if (existing > 0 && !replace) {
+          throw Object.assign(new Error("target store is not empty"), { name: "Conflict" });
+        }
+        if (replace) {
+          for (const table of ["event_deliveries", "subscriptions", "muse_polls", "messages", "native_notifications", "events", "tasks", "task_metadata_cursor_key"]) {
+            this.sql.exec(`DELETE FROM ${table}`);
+          }
+        }
+        const t = snapshot.tables;
+        for (const r of t.tasks ?? []) {
+          this.sql.exec(
+            `INSERT INTO tasks(id,owner,idem,digest,provider,request,status,handle,output,artifacts,error,created,updated,deadline,cancel_sent,worker,attempt,revision,report_digest,report_json,claimed_at,completed_at)
+             VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+            r.id, r.owner, r.idem, r.digest, r.provider, r.request, r.status, r.handle ?? null, r.output ?? null,
+            r.artifacts ?? "[]", r.error ?? null, r.created, r.updated, r.deadline, r.cancel_sent ?? 0,
+            r.worker ?? null, r.attempt ?? null, r.revision ?? 1, r.report_digest ?? null, r.report_json ?? null,
+            r.claimed_at ?? null, r.completed_at ?? null,
+          );
+        }
+        for (const r of t.events ?? []) {
+          this.sql.exec("INSERT INTO events(seq,task_id,status,created,fanout_noted) VALUES(?,?,?,?,?)", r.seq, r.task_id, r.status, r.created, r.fanout_noted ?? 0);
+        }
+        const insertedMax = this.sql.exec("SELECT COALESCE(MAX(seq), 0) AS m FROM events").one().m;
+        const maxSeq = Math.max(Number(snapshot.events_seq ?? 0), insertedMax);
+        if (maxSeq > 0) {
+          this.sql.exec("DELETE FROM sqlite_sequence WHERE name='events'");
+          this.sql.exec("INSERT INTO sqlite_sequence(name, seq) VALUES('events', ?)", maxSeq);
+        }
+        for (const r of t.native_notifications ?? []) {
+          this.sql.exec("INSERT INTO native_notifications(seq,status) VALUES(?,?)", r.seq, r.status);
+        }
+        for (const r of t.messages ?? []) {
+          this.sql.exec("INSERT INTO messages(task_id,idem,body,revision,created) VALUES(?,?,?,?,?)", r.task_id, r.idem, r.body, r.revision, r.created);
+        }
+        for (const r of t.muse_polls ?? []) {
+          this.sql.exec("INSERT INTO muse_polls(owner,identity_json,seen) VALUES(?,?,?)", r.owner, r.identity_json, r.seen);
+        }
+        for (const r of t.subscriptions ?? []) {
+          this.sql.exec(
+            `INSERT INTO subscriptions(id,principal,owner,identity_json,url,secret,previous_secret,previous_expires,expires,start_seq,created,deleted,last_attempt_at,last_status,last_error_class,consecutive_failures,expiry_logged,ttl_seconds,non_expiring)
+             VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+            r.id, r.principal, r.owner, r.identity_json, r.url, r.secret, r.previous_secret ?? null, r.previous_expires ?? null,
+            r.expires, r.start_seq, r.created, r.deleted ?? null, r.last_attempt_at ?? null, r.last_status ?? null,
+            r.last_error_class ?? null, r.consecutive_failures ?? 0, r.expiry_logged ?? 0, r.ttl_seconds ?? null, r.non_expiring ?? 0,
+          );
+        }
+        for (const r of t.event_deliveries ?? []) {
+          this.sql.exec("INSERT INTO event_deliveries(subscription,seq,body,status,attempts,next_attempt) VALUES(?,?,?,?,?,?)",
+            r.subscription, r.seq, r.body, r.status ?? "pending", r.attempts ?? 0, r.next_attempt ?? 0);
+        }
+        for (const r of t.task_metadata_cursor_key ?? []) {
+          this.sql.exec("INSERT OR REPLACE INTO task_metadata_cursor_key(id,material) VALUES(?,?)", r.id, base64ToBytes(r.material_b64));
+        }
+        nextAlarmAt = this.#nextAlarmAt(10);
+      });
+      if (nextAlarmAt !== null) await this.ctx.storage.setAlarm(nextAlarmAt);
+    });
+    return { imported: true, alarm_scheduled_at: nextAlarmAt };
   }
 
 }
