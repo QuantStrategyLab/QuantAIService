@@ -193,11 +193,18 @@ jobs:
             ${{ runner.temp }}/monthly-audit-models.json
             ${{ runner.temp }}/monthly-report.json
           retention-days: 30
+      - name: Mint model-refresh GitHub App token
+        id: app_token
+        if: ${{ steps.refresh.outputs.changed == 'true' && github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || inputs.open_issue == true) && vars.MODEL_REFRESH_APP_ID != '' }}
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
+        with:
+          app-id: ${{ vars.MODEL_REFRESH_APP_ID }}
+          private-key: ${{ secrets.MODEL_REFRESH_APP_PRIVATE_KEY }}
       - name: Auto-create and enable auto-merge PR on model changes
         id: auto_pr
         if: ${{ steps.refresh.outputs.changed == 'true' && github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || inputs.open_issue == true) }}
         env:
-          PR_TOKEN: ${{ secrets.MODEL_REFRESH_PR_TOKEN }}
+          PR_TOKEN: ${{ steps.app_token.outputs.token || secrets.MODEL_REFRESH_PR_TOKEN }}
         run: |
           if [[ -z "${PR_TOKEN:-}" ]]; then
             echo "handled=false" >> "$GITHUB_OUTPUT"
