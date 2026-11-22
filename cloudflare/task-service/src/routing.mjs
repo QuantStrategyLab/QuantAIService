@@ -1,5 +1,6 @@
 // Abstract scenario routing registry mirrored from ai_service.routing.
 // Scenarios and categories are config data; this file never hard-codes business ids.
+import {agentReadiness} from './agent-adapters.mjs';
 const SCHEMA_VERSION='task.routing.v1';
 const TIERS=new Set(['simple','standard','complex']);
 const MODES=new Set(['api','agent','auto']);
@@ -256,22 +257,16 @@ export function decideRoute(routing,request,{project,providerReady,providerMode,
   fail('no ready provider for scenario');
 }
 
-// Dot and Muse wake through Cloudflare event subscriptions; never Cursor Cloud Agents.
+// Named agents that may register MCP event subscriptions (Dot always; Muse when not using webhook_trigger).
 export const EVENT_AGENTS=new Set(['dot','muse']);
 
 export function providerReadiness(name,{env={},configuredProviders={},hasDotSubscription=false,hasMuseSubscription=false}={}){
   const item=configuredProviders[name];
   if(!item)return [false,'not_configured'];
   const kind=item.type;
-  if(kind==='dot_events'){
-    if(item.enabled!==true)return [false,'disabled'];
-    return hasDotSubscription?[true,'ready']:[false,'no_subscription'];
-  }
-  if(kind==='grok_webhook'||kind==='claude_routine'){
-    if(item.enabled!==true)return [false,'disabled'];
-    if(name==='grokbot'&&!env.AI_SERVICE_GROK_READY)return [false,'grok_not_ready'];
-    if(typeof item.key_env!=='string'||!env[item.key_env])return [false,'missing_credential'];
-    return [true,'ready'];
+  if(AGENT_PROVIDER_TYPES.has(kind)){
+    const hasLiveSubscription=kind==='dot_events'?hasDotSubscription:kind==='muse'?hasMuseSubscription:false;
+    return agentReadiness(name,item,{env,hasLiveSubscription});
   }
   if(['gemini_api','openai_api','anthropic_api'].includes(kind)){
     if(item.enabled!==true||item.api_usage_authorized!==true)return [false,'disabled'];
@@ -283,11 +278,6 @@ export function providerReadiness(name,{env={},configuredProviders={},hasDotSubs
     if(typeof item.token_env!=='string'||!env[item.token_env])return [false,'missing_credential'];
     return [true,'ready'];
   }
-  if(kind==='muse'){
-    if(item.enabled!==true)return [false,'disabled'];
-    return hasMuseSubscription?[true,'ready']:[false,'no_subscription'];
-  }
-  if(kind==='claudeduet')return [false,'unavailable'];
   return [false,'unsupported'];
 }
 

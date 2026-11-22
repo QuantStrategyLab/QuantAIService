@@ -7,10 +7,10 @@ attestations. Agent mode stays separate from API mode (`gemini_api` and similar)
 
 | Provider | Configuration type | Example enablement | Invocation |
 | --- | --- | --- | --- |
-| `muse` | `muse` | `true` | Cloudflare event subscription or scheduled MCP polling |
-| `grokbot` | `grok_webhook` | `false` | Opt-in Grok Bot Routine webhook |
+| `muse` | `muse` | `true` | Asynchronous `webhook_trigger` (configured `url` + `key_env`) or `mcp_events` (`events/subscribe`) + OAuth MCP claim |
+| `grokbot` | `grok_webhook` | `false` | Opt-in Grok Bot Routine `webhook_trigger` (verified closed-loop; kept disabled by default) |
 | `claudeduet` | `claudeduet` | `false` | Scaffold only; disabled pending verified trigger protocol |
-| `dot` | `dot_events` | `false` | Opt-in Dot MCP event subscription + claim |
+| `dot` | `dot_events` | `false` | Opt-in Dot `mcp_events` subscription + OAuth MCP claim (verified closed-loop; kept disabled by default) |
 
 In `config/quant.example.json` and `cloudflare/task-service/wrangler.example.jsonc`, `muse` is `enabled: true` while `grokbot`, `claudeduet`, and `dot` remain `enabled: false` without URLs or secret bindings. The enclosing Python example service stays `enabled: false`. Synchronous API slots include `openai` (`openai_api`), `claude` (`anthropic_api`), `gemini` (`gemini_api`), and `chatgpt-plan` (`chatgpt_plan_oauth`), all disabled and unauthorized until configured; `max_output_tokens` supports `1..32768` and `timeout_seconds` supports `1..180`.
 
@@ -35,21 +35,11 @@ Shared surface with Dot / GrokBot / ClaudeDuet is the **Cloudflare Worker** task
 service (OAuth, queue, MCP claim/report). Each named agent keeps its own outbound
 wake channel; they must not share a Cursor Cloud Agents launch path.
 
-The Cloudflare Worker supports an independently scoped Muse webhook
-subscription and scheduled polling. Keep the example provider disabled until
-its project and worker grant pass end-to-end acceptance. Cloudflare does not
-use Cursor Cloud Agents or require a Muse API key.
+The Cloudflare Worker uses a shared asynchronous callback core (durable task state, OAuth MCP claim/report, and signed `COMPLETION_WEBHOOKS` terminal callbacks) with platform-specific wake adapters in `cloudflare/task-service/src/agent-adapters.mjs` and `src/ai_service/providers.py`. Scheduled polling (`poll_muse_tasks` / `muse_poll_seconds`) is retired so idle agents consume zero wakeups.
 
-### Scheduled polling
+### Muse asynchronous wake modes
 
-A personal Muse cloud schedule can call `poll_muse_tasks` using the project’s
-Muse OAuth grant. The response contains up to eight claimable tasks or pending
-tasks already claimed by that worker, ordered by deadline. Continue with the
-existing claim and report tools. Set `muse_poll_seconds` on an approved entry
-in `PROJECT_POLICIES` to select scheduled polling. The setting bounds the age
-of the last successful poll. New tasks need a deadline longer than this window.
-Enable it after measuring that the scheduling delay plus execution time fits
-the caller’s deadline.
+Configure `AGENT_PROVIDERS.muse` with `url` and `key_env` to wake Muse via `webhook_trigger` (direct Muse trigger endpoint or lightweight wake bridge), or omit `url` to wake via scoped `mcp_events` subscriptions (`events/subscribe`). Results return through OAuth MCP `claim_task` and `report_task_result`, and terminal callbacks can notify callers asynchronously via `COMPLETION_WEBHOOKS`. Keep the example provider disabled in production until its project and worker grant pass end-to-end acceptance. Cloudflare does not use Cursor Cloud Agents or require a Muse API key.
 
 ## Routing and admission
 
