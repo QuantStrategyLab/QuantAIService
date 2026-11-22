@@ -351,6 +351,9 @@ def refresh_tier_models(
     ]
     combined = list(dict.fromkeys(updates + approved))[:8]
     if not combined:
+        baseline_priced = any(_DATED_SUFFIX.sub('', model) in rates for model in baseline)
+        if baseline_priced:
+            return [], 'official_pricing'
         return baseline, 'approved_baseline'
     return combined, 'official_pricing'
 

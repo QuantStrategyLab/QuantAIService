@@ -249,6 +249,30 @@ class ModelPolicyTests(unittest.TestCase):
             written = json.loads(out_path.read_text(encoding='utf-8'))
             self.assertEqual(written['tier_models']['openai']['standard'][0], 'gpt-5.5-mini')
 
+    def test_explicit_over_cap_baseline_remains_excluded_and_fails_cli(self):
+        over_cap_openai = """
+### Standard pricing data
+| Model | Input | Output |
+| --- | --- | --- |
+| gpt-5.4-mini | $10.00 | $50.00 |
+| gpt-5.4 | $10.00 | $50.00 |
+"""
+        candidates, source = refresh_tier_models('openai', 'simple', BASELINE_POLICY, document=over_cap_openai)
+        self.assertEqual(source, 'official_pricing')
+        self.assertEqual(candidates, [])
+
+        fixture_policy = json.loads(json.dumps(BASELINE_POLICY))
+        with tempfile.TemporaryDirectory() as tmp:
+            policy_path = Path(tmp) / 'api-tier-models.json'
+            out_path = Path(tmp) / 'out.json'
+            policy_path.write_text(json.dumps(fixture_policy), encoding='utf-8')
+            code = refresh_api_models.main(
+                ['--policy', str(policy_path), '--output', str(out_path)],
+                fetch=lambda url: over_cap_openai if 'openai' in url else ANTHROPIC_DOC if 'claude' in url else GEMINI_DOC,
+            )
+            self.assertEqual(code, 1)
+            self.assertFalse(out_path.exists())
+
 
 if __name__ == '__main__':
     unittest.main()
