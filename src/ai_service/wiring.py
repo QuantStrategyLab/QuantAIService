@@ -15,7 +15,7 @@ from .gemini import GeminiProvider
 from .github_apps import GitHubApps, GitHubComments, validate_apps
 from .inference import AnthropicAPIProvider, ChatGPTPlanProvider, OpenAIAPIProvider, select_api_model
 from .mcp_logging import log_level
-from .providers import ClaudeRoutineProvider, GrokWebhookProvider, MuseWebhookProvider
+from .providers import ClaudeRoutineProvider, GrokWebhookProvider, JulesAPIProvider, MuseWebhookProvider
 from .routing import configured_provider_mode, provider_readiness, validate_routing_config
 from .runtime import Policy
 from .worker_tools import tools_schema_sha256, worker_tools
@@ -74,12 +74,12 @@ def validate_configuration(config):
         kind = item['type']
         if kind == 'dot_events':
             dot_count += 1
-        elif kind in {'grok_webhook', 'claude_routine'}:
+        elif kind in {'grok_webhook', 'claude_routine', 'jules_api'}:
             if item.get('enabled') is not True:
                 continue
             item['key_env']
             # A synthetic key validates static constructor arguments only.
-            provider_class = ClaudeRoutineProvider if kind == 'claude_routine' else GrokWebhookProvider
+            provider_class = ClaudeRoutineProvider if kind == 'claude_routine' else JulesAPIProvider if kind == 'jules_api' else GrokWebhookProvider
             provider_class(item['url'], 'configuration-check', config['resource'])
         elif kind == 'claudeduet':
             # Duet is not Claude Code Routines; no verified invocation protocol yet.
@@ -230,11 +230,11 @@ def build_application(config, *, github_key_loader=None, github_transport=None):
     )
     events = None
     for name, item in config['providers'].items():
-        if item['type'] in {'grok_webhook', 'claude_routine'}:
+        if item['type'] in {'grok_webhook', 'claude_routine', 'jules_api'}:
             if item.get('enabled') is not True:
                 continue
             key = srv.os.environ.get(item['key_env'])
-            provider_class = ClaudeRoutineProvider if item['type'] == 'claude_routine' else GrokWebhookProvider
+            provider_class = ClaudeRoutineProvider if item['type'] == 'claude_routine' else JulesAPIProvider if item['type'] == 'jules_api' else GrokWebhookProvider
             providers[name] = provider_class(item['url'], key, config['resource'])
         elif item['type'] == 'claudeduet':
             # validate_configuration rejects enablement before reading credentials.

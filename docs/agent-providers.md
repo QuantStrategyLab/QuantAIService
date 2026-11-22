@@ -11,6 +11,7 @@ attestations. Agent mode stays separate from API mode (`gemini_api` and similar)
 | `grokbot` | `grok_webhook` | `false` | Opt-in Grok Bot Routine `webhook_trigger` (verified closed-loop; kept disabled by default) |
 | `claudeduet` | `claudeduet` | `false` | Scaffold only; disabled pending verified trigger protocol |
 | `dot` | `dot_events` | `false` | Opt-in Dot `mcp_events` subscription + OAuth MCP claim (verified closed-loop; kept disabled by default) |
+| `jules` | `jules_api` | `false` | Opt-in Google Jules cloud session (`jules.googleapis.com/v1alpha/sessions`) + OAuth MCP claim (disabled by default) |
 
 In `config/quant.example.json` and `cloudflare/task-service/wrangler.example.jsonc`, `muse` is `enabled: true` while `grokbot`, `claudeduet`, and `dot` remain `enabled: false` without URLs or secret bindings. The enclosing Python example service stays `enabled: false`. Synchronous API slots include `openai` (`openai_api`), `claude` (`anthropic_api`), `gemini` (`gemini_api`), and `chatgpt-plan` (`chatgpt_plan_oauth`), all disabled and unauthorized until configured; `max_output_tokens` supports `1..32768` and `timeout_seconds` supports `1..180`.
 

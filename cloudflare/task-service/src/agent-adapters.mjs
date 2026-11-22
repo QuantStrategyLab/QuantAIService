@@ -4,6 +4,7 @@ import {callbackURL} from './webhooks.mjs';
 
 const ENV_KEY = /^[A-Z][A-Z0-9_]{0,127}$/;
 const CLAUDE_ROUTINE_PATH = /^\/v1\/claude_code\/routines\/trig_[A-Za-z0-9]+\/fire$/;
+const JULES_SESSION_PATH = /^\/v1alpha\/sessions$/;
 
 const rejected = (message = 'agent trigger rejected') => {
   throw Object.assign(new Error(message), {name: 'SubmissionRejected'});
@@ -19,6 +20,7 @@ export function agentDeliveryMode(env, name) {
   if (item.type === 'muse') return hasTriggerURL(item) ? 'webhook_trigger' : (EVENT_SLOTS.has(name) ? 'mcp_events' : 'unavailable');
   if (item.type === 'grok_webhook') return 'webhook_trigger';
   if (item.type === 'claude_routine') return 'claude_routine';
+  if (item.type === 'jules_api') return 'jules_api';
   return 'unavailable';
 }
 
@@ -28,13 +30,13 @@ export function usesEventSubscription(env, name) {
 
 export function usesOutboundTrigger(env, name) {
   const mode = agentDeliveryMode(env, name);
-  return mode === 'webhook_trigger' || mode === 'claude_routine';
+  return mode === 'webhook_trigger' || mode === 'claude_routine' || mode === 'jules_api';
 }
 
 export function validateAgentTrigger(env, name) {
   const item = env?.AGENT_PROVIDERS?.[name];
   const mode = agentDeliveryMode(env, name);
-  if (!item || item.enabled !== true || (mode !== 'webhook_trigger' && mode !== 'claude_routine')) {
+  if (!item || item.enabled !== true || (mode !== 'webhook_trigger' && mode !== 'claude_routine' && mode !== 'jules_api')) {
     rejected();
   }
   if (typeof item.key_env !== 'string' || !ENV_KEY.test(item.key_env)) rejected();
@@ -46,6 +48,10 @@ export function validateAgentTrigger(env, name) {
   }
   if (mode === 'claude_routine' && (url.origin !== 'https://api.anthropic.com' ||
       !CLAUDE_ROUTINE_PATH.test(url.pathname) || url.search)) {
+    rejected();
+  }
+  if (mode === 'jules_api' && (url.origin !== 'https://jules.googleapis.com' ||
+      !JULES_SESSION_PATH.test(url.pathname) || url.search)) {
     rejected();
   }
   const key = env[item.key_env];
@@ -82,10 +88,32 @@ export function agentReadiness(name, item, {env = {}, hasLiveSubscription = fals
     if (typeof item.key_env !== 'string' || !env[item.key_env]) return [false, 'missing_credential'];
     return [true, 'ready'];
   }
+  if (kind === 'jules_api') {
+    if (item.enabled !== true) return [false, 'disabled'];
+    if (typeof item.key_env !== 'string' || !ENV_KEY.test(item.key_env) || !env[item.key_env]) {
+      return [false, 'missing_credential'];
+    }
+    try {
+      const url = new URL(callbackURL(item.url));
+      if (url.origin !== 'https://jules.googleapis.com' || !JULES_SESSION_PATH.test(url.pathname) || url.search) {
+        return [false, 'invalid_trigger'];
+      }
+    } catch {
+      return [false, 'invalid_trigger'];
+    }
+    return [true, 'ready'];
+  }
   return [false, 'unsupported'];
 }
 
 function buildWakeRequest(config, envelope) {
+  if (config.mode === 'jules_api') {
+    return {
+      headers: {'Content-Type': 'application/json', 'X-Goog-Api-Key': config.key},
+      body: JSON.stringify({title: `${envelope.project}:${envelope.task_id}`, prompt: JSON.stringify(envelope)}),
+      acceptance: 'jules_started',
+    };
+  }
   const headers = {'Content-Type': 'application/json', 'Authorization': 'Bearer ' + config.key};
   if (config.mode === 'claude_routine') {
     headers['anthropic-version'] = '2026-10-21';

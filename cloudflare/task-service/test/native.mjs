@@ -16,12 +16,12 @@ const policy={ORGANIZATION:organization,ORGANIZATION_ID:organizationId,PUBLIC_OR
 policy.PROJECT_POLICIES[project].providers={agent:'dot','api:disabled':'disabled-api','api:no-authorization':'unapproved-api','api:no-key':'missing-key-api'};
 for(const name of ['disabled-api','unapproved-api','missing-key-api'])policy.PROJECT_POLICIES[project].models[name]=['synthetic-fixed'];
 policy.API_PROVIDERS={'disabled-api':{type:'gemini_api',enabled:false,api_usage_authorized:true,model:'synthetic-fixed',key_env:'SYNTHETIC_API_KEY'},'unapproved-api':{type:'gemini_api',enabled:true,api_usage_authorized:false,model:'synthetic-fixed',key_env:'SYNTHETIC_API_KEY'},'missing-key-api':{type:'gemini_api',enabled:true,api_usage_authorized:true,model:'synthetic-fixed',key_env:'MISSING_KEY'}};
-for(const name of ['grok','claude','grokbot','claudeduet','muse','duet-enabled','muse-enabled','disabled-bot','missing-bot-key']){
+for(const name of ['grok','claude','grokbot','claudeduet','muse','duet-enabled','muse-enabled','jules','jules-disabled','jules-bad-url','disabled-bot','missing-bot-key']){
  policy.PROJECT_POLICIES[project].providers['agent:'+name]=name;
  policy.PROJECT_POLICIES[project].models[name]=['configured-bot'];
 }
 policy.SYNTHETIC_ROUTINE_KEY='synthetic-routine-key';
-policy.AGENT_PROVIDERS={dot:{type:'dot_events',enabled:true},grok:{type:'grok_webhook',enabled:true,url:'https://routine.example/trigger',key_env:'SYNTHETIC_ROUTINE_KEY'},claude:{type:'claude_routine',enabled:true,url:'https://api.anthropic.com/v1/claude_code/routines/trig_SYNTHETIC/fire',key_env:'SYNTHETIC_ROUTINE_KEY'},'disabled-bot':{type:'grok_webhook',enabled:false,url:'https://routine.example/trigger',key_env:'SYNTHETIC_ROUTINE_KEY'},'missing-bot-key':{type:'grok_webhook',enabled:true,url:'https://routine.example/trigger',key_env:'ABSENT_KEY'}};
+policy.AGENT_PROVIDERS={dot:{type:'dot_events',enabled:true},grok:{type:'grok_webhook',enabled:true,url:'https://routine.example/trigger',key_env:'SYNTHETIC_ROUTINE_KEY'},claude:{type:'claude_routine',enabled:true,url:'https://api.anthropic.com/v1/claude_code/routines/trig_SYNTHETIC/fire',key_env:'SYNTHETIC_ROUTINE_KEY'},jules:{type:'jules_api',enabled:true,url:'https://jules.googleapis.com/v1alpha/sessions',key_env:'SYNTHETIC_ROUTINE_KEY'},'jules-disabled':{type:'jules_api',enabled:false},'jules-bad-url':{type:'jules_api',enabled:true,url:'https://routine.example/not-jules',key_env:'SYNTHETIC_ROUTINE_KEY'},'disabled-bot':{type:'grok_webhook',enabled:false,url:'https://routine.example/trigger',key_env:'SYNTHETIC_ROUTINE_KEY'},'missing-bot-key':{type:'grok_webhook',enabled:true,url:'https://routine.example/trigger',key_env:'ABSENT_KEY'}};
 policy.AGENT_PROVIDERS.grokbot={...policy.AGENT_PROVIDERS.grok};
 policy.AGENT_PROVIDERS.claudeduet={type:'claudeduet',enabled:false};
 policy.AGENT_PROVIDERS.muse={type:'muse',enabled:false};
@@ -38,10 +38,16 @@ const handleRuntimeStdio=(stdout,stderr)=>{
  for(const [stream,print] of [[stdout,console.log],[stderr,console.error]])createInterface({input:stream}).on('line',line=>{runtimeLogs.push(line);print(line);});
 };
 const apiCalls=[];let apiReply='success',releaseAPI;
-const outboundService=async request=>{outbound++;const url=new URL(request.url);if(url.hostname==='routine.example'||url.hostname==='api.anthropic.com'){
- const body=await request.json(),event=url.hostname==='api.anthropic.com'?JSON.parse(body.text):body;
- assert.equal(request.headers.get('authorization'),'Bearer synthetic-routine-key');
- if(url.hostname==='api.anthropic.com')assert.equal(request.headers.get('anthropic-version'),'2026-10-21');
+const outboundService=async request=>{outbound++;const url=new URL(request.url);if(url.hostname==='routine.example'||url.hostname==='api.anthropic.com'||url.hostname==='jules.googleapis.com'){
+ const body=await request.json(),event=url.hostname==='api.anthropic.com'?JSON.parse(body.text):url.hostname==='jules.googleapis.com'?JSON.parse(body.prompt):body;
+ if(url.hostname==='jules.googleapis.com'){
+  assert.equal(url.pathname,'/v1alpha/sessions');
+  assert.equal(request.headers.get('x-goog-api-key'),'synthetic-routine-key');
+  assert.ok(typeof body.title==='string'&&body.title.includes(event.task_id));
+ }else{
+  assert.equal(request.headers.get('authorization'),'Bearer synthetic-routine-key');
+  if(url.hostname==='api.anthropic.com')assert.equal(request.headers.get('anthropic-version'),'2026-10-21');
+ }
  assert.deepEqual(Object.keys(event).sort(),['change','project','resource','revision','task_id','type']);
  nativeCalls.push(event);if(nativeReply==='timeout')throw Error('private upstream error');return new Response('',{status:nativeReply});
 } if(url.hostname==='github.com')return Response.json({access_token:'synthetic-github-token'});if(url.hostname==='api.github.com')return Response.json({id:githubUser});
@@ -94,7 +100,7 @@ try{
   assert.deepEqual(config.AUTH_CLIENTS,{});assert.equal(config.ADMISSIONS_JSON,'[]');
   assert.deepEqual(config.PROJECT_CONTEXTS,{});assert.deepEqual(config.PROJECT_POLICIES,{});
   const agents=config.AGENT_PROVIDERS;
-  assert.deepEqual(agents,{muse:{type:'muse',enabled:true},grokbot:{type:'grok_webhook',enabled:false},claudeduet:{type:'claudeduet',enabled:false},dot:{type:'dot_events',enabled:false}});
+  assert.deepEqual(agents,{muse:{type:'muse',enabled:true},grokbot:{type:'grok_webhook',enabled:false},claudeduet:{type:'claudeduet',enabled:false},dot:{type:'dot_events',enabled:false},jules:{type:'jules_api',enabled:false}});
   assert.equal(config.API_PROVIDERS.openai.type,'openai_api');assert.equal(config.API_PROVIDERS.openai.enabled,false);
   assert.equal(config.API_PROVIDERS.claude.type,'anthropic_api');assert.equal(config.API_PROVIDERS.claude.enabled,false);
   assert.equal(config.API_PROVIDERS['gemini'].type,'gemini_api');
@@ -351,10 +357,10 @@ try{
   assert.equal((await call('report_task_result',{task_id:t.id,attempt_id:'grokbot-oauth',revision:1,status:'completed',output})).body.result.structuredContent.status,'completed');
   assert.deepEqual((await get(t.id)).output,output);
  });
- for(const provider of ['grok','claude','grokbot']){
+ for(const provider of ['grok','claude','grokbot','jules']){
   await test(provider+' routine disabled and missing credentials reject before outbound',async()=>{
    const before=nativeCalls.length;
-   for(const profile of ['disabled-bot','missing-bot-key','claudeduet','duet-enabled','muse','muse-enabled']){const r=await request('/v1/tasks',{method:'POST',headers:{...auth(tokens.caller),'Idempotency-Key':provider+profile},body:JSON.stringify({...taskRequest,profile,model:'configured-bot'})});assert.equal(r.status,403);}
+   for(const profile of ['disabled-bot','missing-bot-key','claudeduet','duet-enabled','muse','muse-enabled','jules-disabled','jules-bad-url']){const r=await request('/v1/tasks',{method:'POST',headers:{...auth(tokens.caller),'Idempotency-Key':provider+profile},body:JSON.stringify({...taskRequest,profile,model:'configured-bot'})});assert.equal(r.status,403);}
    assert.equal(nativeCalls.length,before);
   });
   await test(provider+' routine starts once, messages and cancellation notify once, MCP confirms stop',async()=>{

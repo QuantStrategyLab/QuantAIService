@@ -22,10 +22,10 @@ class NamedAgentTests(unittest.TestCase):
         validate_configuration({**config, 'enabled': True})
         self.assertEqual(
             set(config['providers']),
-            {'muse', 'grokbot', 'claudeduet', 'dot', 'openai', 'claude', 'gemini', 'chatgpt-plan'},
+            {'muse', 'grokbot', 'claudeduet', 'dot', 'jules', 'openai', 'claude', 'gemini', 'chatgpt-plan'},
         )
         self.assertTrue(config['providers']['muse']['enabled'])
-        for dormant in ('grokbot', 'claudeduet', 'dot'):
+        for dormant in ('grokbot', 'claudeduet', 'dot', 'jules'):
             self.assertFalse(config['providers'][dormant]['enabled'])
             self.assertNotIn('url', config['providers'][dormant])
             self.assertNotIn('key_env', config['providers'][dormant])

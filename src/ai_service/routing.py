@@ -22,7 +22,7 @@ Modes = frozenset({'api', 'agent', 'auto'})
 ConcreteModes = frozenset({'api', 'agent'})
 DEFAULT_MODE_BY_TIER = {'simple': 'api', 'standard': 'api', 'complex': 'agent'}
 _API_PROVIDER_TYPES = frozenset({'gemini_api', 'openai_api', 'anthropic_api', 'chatgpt_plan_oauth'})
-_AGENT_PROVIDER_TYPES = frozenset({'muse', 'dot_events', 'grok_webhook', 'claude_routine', 'claudeduet'})
+_AGENT_PROVIDER_TYPES = frozenset({'muse', 'dot_events', 'grok_webhook', 'claude_routine', 'claudeduet', 'jules_api'})
 Efforts = frozenset({'low', 'medium', 'high'})
 ProviderName = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$')
 RegistryId = re.compile(r'^[A-Za-z][A-Za-z0-9_-]{0,63}$')
@@ -517,7 +517,7 @@ def provider_readiness(name: str, *, env: dict[str, str] | None,
                 return False, 'missing_credential'
             return True, 'ready'
         return (True, 'ready') if has_muse_subscription else (False, 'no_subscription')
-    if kind in {'grok_webhook', 'claude_routine'}:
+    if kind in {'grok_webhook', 'claude_routine', 'jules_api'}:
         if item.get('enabled') is not True:
             return False, 'disabled'
         if name == 'grokbot' and not environment.get('AI_SERVICE_GROK_READY'):

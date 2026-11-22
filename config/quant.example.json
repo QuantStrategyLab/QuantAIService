@@ -29,6 +29,10 @@
       "type": "dot_events",
       "enabled": false
     },
+    "jules": {
+      "type": "jules_api",
+      "enabled": false
+    },
     "openai": {
       "type": "openai_api",
       "enabled": false,

@@ -39,6 +39,10 @@
       "dot": {
         "type": "dot_events",
         "enabled": false
+      },
+      "jules": {
+        "type": "jules_api",
+        "enabled": false
       }
     },
     "API_PROVIDERS": {

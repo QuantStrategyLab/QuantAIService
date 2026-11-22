@@ -94,3 +94,25 @@ class ClaudeRoutineProvider(GrokWebhookProvider):
             raise RuntimeError('routine acceptance unknown')
         if reply.status != 200:
             raise SubmissionRejected('native routine rejected the trigger')
+
+
+class JulesAPIProvider(WebhookTriggerProvider):
+    """Google Jules cloud coding agent session trigger."""
+    acceptance = 'jules_started'
+
+    def __init__(self, webhook_url, key, task_resource, *, transport=None):
+        parsed = urlsplit(webhook_url)
+        if parsed.scheme != 'https' or parsed.netloc != 'jules.googleapis.com' or parsed.path != '/v1alpha/sessions' or parsed.query or parsed.fragment:
+            raise ValueError('Jules API must use the official sessions endpoint')
+        super().__init__(webhook_url, key, task_resource, transport=transport)
+
+    def notify(self, *, task_id, owner, change, revision, handle=None):
+        event = {'type': 'task.requested', 'task_id': task_id, 'project': owner,
+                 'resource': self._resource, 'change': change, 'revision': revision}
+        reply = self._transport.request(self._url,
+            headers={'Content-Type': 'application/json', 'X-Goog-Api-Key': self._key},
+            body=json_body({'title': f'{owner}:{task_id}', 'prompt': json_body(event).decode('utf-8')}))
+        if reply.status >= 500:
+            raise RuntimeError('agent trigger acceptance unknown')
+        if not (200 <= reply.status < 300):
+            raise SubmissionRejected('Jules API rejected the trigger')
