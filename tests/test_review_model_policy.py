@@ -6,11 +6,25 @@ from unittest.mock import patch
 from scripts.review_model_policy import refresh_candidates
 
 
-POLICY = json.loads((Path(__file__).resolve().parents[1] / 'config/monthly-audit-models.json').read_text())
+POLICY = {
+    'standard': {
+        'openai': ['gpt-5.4-mini', 'gpt-5.4-mini-2026-03-17'],
+        'anthropic': ['claude-sonnet-5-5', 'claude-sonnet-5', 'claude-sonnet-4-6'],
+    },
+    'complex': {
+        'openai': ['gpt-5.4-mini', 'gpt-5.4-mini-2026-03-17'],
+        'anthropic': ['claude-sonnet-5-5', 'claude-sonnet-5', 'claude-sonnet-4-6'],
+    },
+    'rate_caps': {
+        'standard': {'openai': [0.75, 4.5], 'anthropic': [3, 15]},
+        'complex': {'openai': [0.75, 4.5], 'anthropic': [3, 15]},
+    },
+}
 OPENAI = '''### Standard pricing data
 | Model | Input | Output | Cached input |
 | --- | --- | --- | --- |
 | gpt-5.4-mini | $0.75 | $4.50 | $0.075 |
+| gpt-6-luna | $0.20 | $0.75 | $0.02 |
 | gpt-7-mini | $0.74 | $4.49 | $0.07 |
 | gpt-8-mini | $0.70 | $7.00 | $0.07 |
 | gpt-9-mini-preview | $0.10 | $1.00 | $0.01 |
@@ -43,7 +57,7 @@ CLAUDE = '''## Model pricing
 class ReviewModelPolicyTests(unittest.TestCase):
     def test_new_same_family_models_refresh_without_changing_approvals(self):
         self.assertEqual(refresh_candidates('openai', 'standard', POLICY, lambda _: OPENAI),
-                         (['gpt-7-mini', *POLICY['standard']['openai']], 'official_pricing'))
+                         (['gpt-7-mini', 'gpt-6-luna', *POLICY['standard']['openai']], 'official_pricing'))
         self.assertEqual(refresh_candidates('anthropic', 'complex', POLICY, lambda _: CLAUDE),
                          (['claude-sonnet-6-10', 'claude-sonnet-6-2', 'claude-sonnet-5-5'], 'official_pricing'))
 
@@ -52,7 +66,13 @@ class ReviewModelPolicyTests(unittest.TestCase):
             with self.subTest(base=base):
                 prices = OPENAI.replace('$0.75 | $4.50', base)
                 self.assertEqual(refresh_candidates('openai', 'standard', POLICY, lambda _: prices),
-                                 (['gpt-7-mini'], 'official_pricing'))
+                                 (['gpt-7-mini', 'gpt-6-luna'], 'official_pricing'))
+
+    def test_committed_monthly_audit_policy_has_non_empty_rosters(self):
+        committed = json.loads((Path(__file__).resolve().parents[1] / 'config/monthly-audit-models.json').read_text())
+        for tier in ('standard', 'complex'):
+            for provider in ('openai', 'anthropic'):
+                self.assertTrue(committed[tier][provider], f'{tier}.{provider}')
 
     def test_read_failure_only_preserves_reviewed_baseline(self):
         def unavailable(_):
@@ -63,5 +83,5 @@ class ReviewModelPolicyTests(unittest.TestCase):
 
     def test_empty_roster_stays_empty_if_current_prices_exceed_caps(self):
         self.assertEqual(refresh_candidates('openai', 'complex', POLICY,
-                                            lambda _: OPENAI.replace('$0.75', '$1.00').replace('$0.74', '$1.00')),
+                                            lambda _: OPENAI.replace('$0.75', '$1.00').replace('$0.74', '$1.00').replace('$0.20', '$1.00')),
                          ([], 'official_pricing'))
