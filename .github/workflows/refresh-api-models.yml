@@ -40,8 +40,9 @@ jobs:
       - name: Refresh API tier model candidates
         id: refresh
         env:
-          OPENAI_PRICING_ORIGIN: https://developers.openai.com
-          ANTHROPIC_PRICING_ORIGIN: https://platform.claude.com
+          OPENAI_PRICING_ORIGIN: ${{ vars.OPENAI_PRICING_ORIGIN }}
+          ANTHROPIC_PRICING_ORIGIN: ${{ vars.ANTHROPIC_PRICING_ORIGIN }}
+          GEMINI_PRICING_ORIGIN: ${{ vars.GEMINI_PRICING_ORIGIN }}
         run: |
           PYTHONPATH=src python3 scripts/refresh_api_models.py \
             --policy config/api-tier-models.json \
