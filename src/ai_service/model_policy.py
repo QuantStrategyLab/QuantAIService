@@ -14,13 +14,17 @@ from .gemini import MODEL_PATTERN, TIER_KEYS
 PRICE_CONFIG = {
     'openai': ('https://developers.openai.com', '/api/docs/pricing.md'),
     'anthropic': ('https://platform.claude.com', '/docs/en/about-claude/pricing.md'),
-    'gemini': ('https://ai.google.dev', '/gemini-api/docs/pricing.md'),
+    'gemini': ('https://aistudio.google.com', '/docs/pricing.md'),
 }
 _DATED_SUFFIX = re.compile(r'-(?:\d{4}-\d{2}-\d{2}|\d{8})$')
 _DOLLAR = re.compile(r'\$(\d+(?:\.\d+)?)(?:\s*/\s*(?:1M(?:\s*tokens)?|MTok))?(?:<sup>\d+</sup>)?')
 _ANTHROPIC_ROW = re.compile(r'Claude (Haiku|Sonnet|Opus) (\d+(?:\.\d+)*)')
 _GEMINI_ROW = re.compile(r'(gemini-\d+(?:\.\d+)*-[a-z0-9.-]+)', re.IGNORECASE)
 _GEMINI_HEADING = re.compile(r'Gemini\s+(\d+(?:\.\d+)*)\s+(Flash-Lite|Flash\s+Lite|Flash|Pro)(?:\s+(Preview))?', re.IGNORECASE)
+_GEMINI_IGNORED = (
+    'batch', 'caching', 'cached', 'live', 'image', 'tts', 'embedding',
+    'robotics', 'transcribe', 'omni', 'nano-banana', 'nano banana', 'decision', 'gemma',
+)
 MAX_BYTES = 512_000
 
 
@@ -158,24 +162,112 @@ def _normalize_gemini_name(text: str) -> str | None:
     return f'gemini-{heading[1]}-{variant}{suffix}'
 
 
+def _parse_markdoc_gemini_table(rows: list[list[str]]) -> tuple[Decimal, Decimal] | None:
+    if len(rows) < 2 or len(rows[0]) < 3:
+        return None
+    header = [col.lower() for col in rows[0]]
+    paid_idx = next((i for i, col in enumerate(header) if 'paid' in col), 2)
+    in_price: Decimal | None = None
+    out_price: Decimal | None = None
+    for row in rows[1:]:
+        if len(row) <= paid_idx:
+            continue
+        feature = row[0].strip().lower()
+        prices = [Decimal(match) for match in _DOLLAR.findall(row[paid_idx])]
+        if not prices:
+            continue
+        value = max(prices)
+        if feature.startswith('input price'):
+            in_price = max(in_price, value) if in_price is not None else value
+        elif feature.startswith('output price'):
+            out_price = max(out_price, value) if out_price is not None else value
+    if in_price is None or out_price is None:
+        return None
+    return (in_price, out_price)
+
+
 def _parse_gemini_rates(document: str) -> dict[str, tuple[Decimal, Decimal]]:
     rates: dict[str, tuple[Decimal, Decimal]] = {}
     current_model: str | None = None
     in_ignored_section = False
+    in_standard_tab = True
+    in_markdoc_table = False
+    markdoc_rows: list[list[str]] = []
+    markdoc_row: list[str] = []
     columns: list[str] = []
+
     for raw_line in document.splitlines():
         line = raw_line.strip()
         if line.startswith('#'):
             lower = line.lower()
-            in_ignored_section = any(word in lower for word in ('batch', 'caching', 'cached', 'live api'))
-            parsed_name = _normalize_gemini_name(line)
-            if parsed_name:
-                current_model = parsed_name
+            if line.startswith('## ') or 'gemma' in lower:
+                in_ignored_section = any(word in lower for word in _GEMINI_IGNORED)
+                current_model = None if in_ignored_section else _normalize_gemini_name(line)
+                in_standard_tab = True
+            else:
+                in_ignored_section = any(word in lower for word in _GEMINI_IGNORED)
+                parsed_name = _normalize_gemini_name(line)
+                if parsed_name and not in_ignored_section:
+                    current_model = parsed_name
+            in_markdoc_table = False
+            markdoc_rows = []
+            markdoc_row = []
             columns = []
             continue
-        if in_ignored_section or not line.startswith('|'):
-            if not line.startswith('|'):
-                columns = []
+
+        if line.startswith('{% tab '):
+            in_standard_tab = 'title="Standard"' in line or "title='Standard'" in line
+            in_markdoc_table = False
+            markdoc_rows = []
+            markdoc_row = []
+            continue
+        if line == '{% /tab %}':
+            in_standard_tab = False
+            in_markdoc_table = False
+            markdoc_rows = []
+            markdoc_row = []
+            continue
+        if line == '{% /tabs %}':
+            in_standard_tab = True
+            in_markdoc_table = False
+            markdoc_rows = []
+            markdoc_row = []
+            continue
+
+        if in_ignored_section or not in_standard_tab:
+            continue
+
+        if line == '{% table %}':
+            in_markdoc_table = True
+            markdoc_rows = []
+            markdoc_row = []
+            columns = []
+            continue
+        if line == '{% /table %}':
+            if in_markdoc_table:
+                if markdoc_row:
+                    markdoc_rows.append(markdoc_row)
+                pair = _parse_markdoc_gemini_table(markdoc_rows)
+                if current_model and MODEL_PATTERN.fullmatch(current_model) and pair is not None:
+                    prev = rates.get(current_model, (Decimal(0), Decimal(0)))
+                    rates[current_model] = (max(prev[0], pair[0]), max(prev[1], pair[1]))
+            in_markdoc_table = False
+            markdoc_rows = []
+            markdoc_row = []
+            continue
+        if in_markdoc_table:
+            if line == '---':
+                if markdoc_row:
+                    markdoc_rows.append(markdoc_row)
+                    markdoc_row = []
+            elif line.startswith('* '):
+                markdoc_row.append(line[2:].strip())
+            elif line and markdoc_row:
+                markdoc_row[-1] += ' ' + line
+            continue
+
+        if not line.startswith('|'):
+            columns = []
             continue
         fields = [field.strip() for field in line.strip('|').split('|')]
         if fields and any(col in fields for col in ('Input', 'Input price', 'Model')):
@@ -245,7 +337,12 @@ def refresh_tier_models(
     newest_baseline = max((model_version(family_regex, model) for model in baseline), default=())
     updates = sorted(
         (model for model in matching if model_version(family_regex, model) > newest_baseline),
-        key=lambda model: model_version(family_regex, model),
+        key=lambda model: (
+            model_version(family_regex, model),
+            affordable[model][1],
+            affordable[model][0],
+            model,
+        ),
         reverse=True,
     )
     approved = [
@@ -253,6 +350,8 @@ def refresh_tier_models(
         if _DATED_SUFFIX.sub('', model) in affordable
     ]
     combined = list(dict.fromkeys(updates + approved))[:8]
+    if not combined:
+        return baseline, 'approved_baseline'
     return combined, 'official_pricing'
 
 
