@@ -1,6 +1,8 @@
 // Opt-in structured-output API providers (gemini_api, openai_api, anthropic_api).
 import {field,parseJson,valueOf} from './canonical.mjs';
 import {imageMaterials} from './image-materials.mjs';
+import tierPolicy from '../../../config/api-tier-models.json' with {type: 'json'};
+const POLICY_PROVIDER_KEY = {gemini_api: 'gemini', openai_api: 'openai', anthropic_api: 'anthropic'};
 const object=v=>v!==null&&typeof v==='object'&&!Array.isArray(v);
 const rejected=()=>{throw Object.assign(new Error('inference rejected'),{name:'SubmissionRejected'});};
 const modelId = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
@@ -22,9 +24,12 @@ const REASONING_EFFORTS = new Set(['none', 'minimal', 'low', 'medium', 'high', '
 const ANTHROPIC_EFFORTS = new Set(['low', 'medium', 'high']);
 const THINKING_BUDGET = {low: 0, medium: 1024, high: 8192};
 
-function tierCandidates(item, tier) {
+export function tierCandidates(item, tier) {
   if (!Object.hasOwn(item, 'tier_models')) return [item.model];
-  const candidates = item.tier_models?.[tier];
+  const raw = item.tier_models === 'policy'
+    ? tierPolicy.tier_models?.[POLICY_PROVIDER_KEY[item.type]]
+    : item.tier_models;
+  const candidates = raw?.[tier];
   if (!Array.isArray(candidates) || !candidates.length || candidates.length > 8 ||
       candidates.some(model => typeof model !== 'string' || !modelId.test(model))) rejected();
   return candidates;
