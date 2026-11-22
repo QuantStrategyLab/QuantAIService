@@ -33,6 +33,10 @@ jobs:
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: '3.12'
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install project dependencies
+        run: python -m pip install .
       - name: Refresh API tier model candidates
         id: refresh
         run: |
@@ -50,9 +54,11 @@ jobs:
 
           report_path, updated_path, body_path = map(pathlib.Path, sys.argv[1:4])
           report = json.loads(report_path.read_text(encoding='utf-8'))
-          current_text = pathlib.Path('config/api-tier-models.json').read_text(encoding='utf-8')
-          updated_text = updated_path.read_text(encoding='utf-8')
-          changed = current_text != updated_text
+          current_policy = json.loads(pathlib.Path('config/api-tier-models.json').read_text(encoding='utf-8'))
+          updated_policy = json.loads(updated_path.read_text(encoding='utf-8'))
+          changed = current_policy != updated_policy
+          current_norm = json.dumps(current_policy, indent=2) + '\n'
+          updated_norm = json.dumps(updated_policy, indent=2) + '\n'
 
           lines = [
               '## API Tier Model Refresh',
@@ -71,8 +77,8 @@ jobs:
 
           if changed:
               diff_lines = list(difflib.unified_diff(
-                  current_text.splitlines(),
-                  updated_text.splitlines(),
+                  current_norm.splitlines(),
+                  updated_norm.splitlines(),
                   fromfile='config/api-tier-models.json',
                   tofile='refreshed/api-tier-models.json',
                   lineterm='',
