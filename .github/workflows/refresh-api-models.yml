@@ -1,0 +1,134 @@
+name: Refresh API Tier Models
+
+on:
+  schedule:
+    - cron: '17 4 * * 1'
+  workflow_dispatch:
+    inputs:
+      open_issue:
+        description: 'Create or update a tracking issue when model candidates change'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: refresh-api-models
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install project dependencies
+        run: python -m pip install .
+      - name: Refresh API tier model candidates
+        id: refresh
+        run: |
+          PYTHONPATH=src python3 scripts/refresh_api_models.py \
+            --policy config/api-tier-models.json \
+            --output "$RUNNER_TEMP/api-tier-models.json" \
+            > "$RUNNER_TEMP/refresh-report.json"
+
+          python3 - "$RUNNER_TEMP/refresh-report.json" "$RUNNER_TEMP/api-tier-models.json" "$RUNNER_TEMP/issue-body.md" <<'PY'
+          import difflib
+          import json
+          import os
+          import pathlib
+          import sys
+
+          report_path, updated_path, body_path = map(pathlib.Path, sys.argv[1:4])
+          report = json.loads(report_path.read_text(encoding='utf-8'))
+          current_policy = json.loads(pathlib.Path('config/api-tier-models.json').read_text(encoding='utf-8'))
+          updated_policy = json.loads(updated_path.read_text(encoding='utf-8'))
+          changed = current_policy != updated_policy
+          current_norm = json.dumps(current_policy, indent=2) + '\n'
+          updated_norm = json.dumps(updated_policy, indent=2) + '\n'
+
+          lines = [
+              '## API Tier Model Refresh',
+              '',
+              '| Provider | Tier | Source | Changed | Candidates |',
+              '| --- | --- | --- | --- | --- |',
+          ]
+          for provider, tiers in sorted(report.get('tiers', {}).items()):
+              for tier in ('simple', 'standard', 'complex'):
+                  entry = tiers.get(tier, {})
+                  cands = ', '.join(f'`{m}`' for m in entry.get('candidates', []))
+                  lines.append(
+                      f"| `{provider}` | `{tier}` | `{entry.get('source', 'unknown')}` "
+                      f"| `{entry.get('changed', False)}` | {cands} |"
+                  )
+
+          if changed:
+              diff_lines = list(difflib.unified_diff(
+                  current_norm.splitlines(),
+                  updated_norm.splitlines(),
+                  fromfile='config/api-tier-models.json',
+                  tofile='refreshed/api-tier-models.json',
+                  lineterm='',
+              ))
+              lines.extend([
+                  '',
+                  '### Proposed Diff',
+                  '```diff',
+                  *diff_lines,
+                  '```',
+                  '',
+                  'To apply locally and open a PR:',
+                  '```bash',
+                  'PYTHONPATH=src python3 scripts/refresh_api_models.py --policy config/api-tier-models.json',
+                  '```',
+              ])
+          else:
+              lines.extend(['', 'No changes detected against `config/api-tier-models.json`.'])
+
+          summary = '\n'.join(lines) + '\n'
+          body_path.write_text(summary, encoding='utf-8')
+          step_summary = os.environ.get('GITHUB_STEP_SUMMARY')
+          if step_summary:
+              with open(step_summary, 'a', encoding='utf-8') as fh:
+                  fh.write(summary)
+          gh_output = os.environ.get('GITHUB_OUTPUT')
+          if gh_output:
+              with open(gh_output, 'a', encoding='utf-8') as fh:
+                  fh.write(f"changed={'true' if changed else 'false'}\n")
+          PY
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: api-tier-models-refresh-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/api-tier-models.json
+            ${{ runner.temp }}/refresh-report.json
+          retention-days: 30
+      - name: Create or update tracking issue on model changes
+        if: ${{ steps.refresh.outputs.changed == 'true' && github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || inputs.open_issue == true) }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_TITLE: '[API Models] Refresh config/api-tier-models.json'
+        run: |
+          existing=$(gh issue list \
+            --state open \
+            --search "in:title \"$ISSUE_TITLE\"" \
+            --json number,title \
+            --jq '.[] | select(.title == env.ISSUE_TITLE) | .number' | head -n 1)
+          if [[ -n "$existing" ]]; then
+            gh issue edit "$existing" --body-file "$RUNNER_TEMP/issue-body.md"
+          else
+            gh issue create --title "$ISSUE_TITLE" --body-file "$RUNNER_TEMP/issue-body.md"
+          fi
