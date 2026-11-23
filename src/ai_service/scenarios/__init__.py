@@ -22,7 +22,10 @@ def schema(kind):
     """Read a bundled Draft 2020-12 schema, also available in installed wheels."""
     if kind not in {'instance', 'task'}:
         raise ContractError('unknown scenario schema')
-    return json.loads(files(__package__).joinpath(f'scenario-{kind}.v1.schema.json').read_text(encoding='utf-8'))
+    package = __package__
+    if package is None:
+        raise ContractError('scenario schema package is unavailable')
+    return json.loads(files(package).joinpath(f'scenario-{kind}.v1.schema.json').read_text(encoding='utf-8'))
 
 
 def _validate(value, kind):

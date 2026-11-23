@@ -1,0 +1,11 @@
+{
+  "include": [
+    "src/ai_service/scenarios",
+    "src/ai_service/contracts.py"
+  ],
+  "extraPaths": [
+    "src"
+  ],
+  "pythonVersion": "3.11",
+  "typeCheckingMode": "basic"
+}

@@ -1,0 +1,12 @@
+[importlinter]
+root_package = ai_service
+
+[importlinter:contract:scenarios_standalone]
+name = Scenarios SDK must not import server or runtime
+type = forbidden
+source_modules =
+    ai_service.scenarios
+forbidden_modules =
+    ai_service.server
+    ai_service.runtime
+    ai_service.wiring
