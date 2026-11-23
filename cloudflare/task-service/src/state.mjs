@@ -232,7 +232,7 @@ export class TaskStore extends DurableObject {
       await this.#wake();
       return this.#record(existing);
     }
-    const activeCount = this.sql.exec("SELECT COUNT(*) AS n FROM tasks WHERE owner=? AND status NOT IN ('completed','failed','invalid_output','cancelled')", owner).one().n;
+    const activeCount = this.#activeTaskCount(owner, now());
     if (activeCount >= policy.max_active) conflict("project active task quota exhausted");
     const timeout = Object.hasOwn(request, "timeout_seconds") ? request.timeout_seconds : policy.max_timeout_seconds;
     let provider;
@@ -321,9 +321,9 @@ export class TaskStore extends DurableObject {
         if (old.digest !== requestDigest) conflict("idempotency key already binds a different request");
         return this.#record(old);
       }
-      const count = this.sql.exec("SELECT COUNT(*) AS n FROM tasks WHERE owner=? AND status NOT IN ('completed','failed','invalid_output','cancelled')", owner).one().n;
-      if (count >= policy.max_active) conflict("project active task quota exhausted");
       const timestamp = now();
+      const count = this.#activeTaskCount(owner, timestamp);
+      if (count >= policy.max_active) conflict("project active task quota exhausted");
       const taskId = crypto.randomUUID();
       this.sql.exec("INSERT INTO tasks(id,owner,idem,digest,provider,request,status,created,updated,deadline) VALUES(?,?,?,?,?,?,?,?,?,?)",
         taskId, owner, idempotencyKey, requestDigest, provider, body, "queued", timestamp, timestamp, timestamp + timeout);
@@ -332,6 +332,14 @@ export class TaskStore extends DurableObject {
     });
     await this.#wake();
     return record;
+  }
+
+  #activeTaskCount(owner, timestamp) {
+    return this.sql.exec(
+      "SELECT COUNT(*) AS n FROM tasks WHERE owner=? AND status NOT IN ('completed','failed','invalid_output','cancelled') AND NOT (status='outcome_unknown' AND deadline<=?)",
+      owner,
+      timestamp,
+    ).one().n;
   }
 
   async lookup(owner, idempotencyKey, requestSHA256) {

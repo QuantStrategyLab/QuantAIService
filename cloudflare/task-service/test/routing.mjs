@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {readFileSync} from 'node:fs';
-import {apiConfiguration,apiModelCandidates,executeAPI,matchesModel,selectAPIModel} from '../src/api.mjs';
+import {apiConfiguration,apiModelCandidates,executeAPI,matchesModel,selectAPIModel,tierCandidates} from '../src/api.mjs';
 import {valueOf} from '../src/canonical.mjs';
 import {configuredProviderMode,decideRoute,maskProject,providerReadiness,resolveComplexity,resolveScenarioMode,validateRoutingConfig} from '../src/routing.mjs';
 
@@ -463,4 +463,29 @@ test('auto mode and mode_by_tier route simple/standard to api and escalate compl
   });
   assert.equal(dShift.mode, 'agent');
   assert.equal(dShift.provider, 'muse');
+});
+
+test('tier_models policy resolves bundled config/api-tier-models.json and preserves overrides', () => {
+  const bundled = JSON.parse(readFileSync(new URL('../../../config/api-tier-models.json', import.meta.url), 'utf8')).tier_models;
+  assert.deepEqual(
+    tierCandidates({type: 'openai_api', tier_models: 'policy', model: 'legacy'}, 'standard'),
+    bundled.openai.standard,
+  );
+  assert.deepEqual(
+    tierCandidates({type: 'anthropic_api', tier_models: 'policy', model: 'legacy'}, 'complex'),
+    bundled.anthropic.complex,
+  );
+  assert.deepEqual(
+    tierCandidates({type: 'gemini_api', tier_models: 'policy', model: 'legacy'}, 'standard'),
+    bundled.gemini.standard,
+  );
+  assert.deepEqual(
+    tierCandidates({type: 'openai_api', tier_models: {standard: ['gpt-override']}, model: 'legacy'}, 'standard'),
+    ['gpt-override'],
+  );
+  assert.deepEqual(
+    tierCandidates({type: 'openai_api', model: 'fixed-model'}, 'standard'),
+    ['fixed-model'],
+  );
+  assert.throws(() => tierCandidates({type: 'unknown_api', tier_models: 'policy', model: 'x'}, 'standard'), /inference rejected/);
 });

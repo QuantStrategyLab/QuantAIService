@@ -3,15 +3,23 @@
   "tier_models": {
     "openai": {
       "simple": [
+        "gpt-6-luna",
+        "gpt-5.6-luna",
         "gpt-5.4-mini",
         "gpt-5.4-mini-2026-03-17"
       ],
       "standard": [
+        "gpt-6-luna",
+        "gpt-5.6-luna",
         "gpt-5.4-mini",
         "gpt-5.4-mini-2026-03-17"
       ],
       "complex": [
-        "gpt-5.4",
+        "gpt-6.2-sol",
+        "gpt-6.1-sol",
+        "gpt-6.1-terra",
+        "gpt-6-sol",
+        "gpt-5.6-terra",
         "gpt-5.4-mini"
       ]
     },
@@ -20,22 +28,33 @@
         "claude-haiku-4-5"
       ],
       "standard": [
+        "claude-sonnet-5-5",
+        "claude-sonnet-5",
         "claude-sonnet-4-6"
       ],
       "complex": [
+        "claude-opus-5-5",
+        "claude-opus-5",
+        "claude-opus-4-8",
+        "claude-opus-4-7",
         "claude-opus-4-6",
         "claude-sonnet-4-6"
       ]
     },
     "gemini": {
       "simple": [
-        "gemini-2.5-flash-lite",
-        "gemini-2.5-flash"
+        "gemini-3.5-flash-lite",
+        "gemini-2.5-flash-lite"
       ],
       "standard": [
+        "gemini-4-hydrogen",
+        "gemini-3.8-flash",
+        "gemini-3.6-flash",
         "gemini-2.5-flash"
       ],
       "complex": [
+        "gemini-4-neon",
+        "gemini-4-hydrogen",
         "gemini-2.5-pro",
         "gemini-2.5-flash"
       ]
@@ -43,9 +62,9 @@
   },
   "tier_families": {
     "openai": {
-      "simple": "gpt-(\\d+(?:\\.\\d+)*)-(?:nano|mini)",
-      "standard": "gpt-(\\d+(?:\\.\\d+)*)-mini",
-      "complex": "gpt-(\\d+(?:\\.\\d+)*)"
+      "simple": "gpt-(\\d+(?:\\.\\d+)*)-(?:nano|mini|luna)",
+      "standard": "gpt-(\\d+(?:\\.\\d+)*)-(?:mini|luna|terra)",
+      "complex": "gpt-(\\d+(?:\\.\\d+)*)(?:-(?:sol|terra))?"
     },
     "anthropic": {
       "simple": "claude-haiku-(\\d+(?:-\\d+)*)",
@@ -54,25 +73,52 @@
     },
     "gemini": {
       "simple": "gemini-(\\d+(?:\\.\\d+)*)-flash-lite",
-      "standard": "gemini-(\\d+(?:\\.\\d+)*)-flash",
-      "complex": "gemini-(\\d+(?:\\.\\d+)*)-pro"
+      "standard": "gemini-(\\d+(?:\\.\\d+)*)-(?:hydrogen|flash)",
+      "complex": "gemini-(\\d+(?:\\.\\d+)*)-(?:neon|hydrogen|pro)"
     }
   },
   "rate_caps": {
     "openai": {
-      "simple": [0.75, 4.5],
-      "standard": [0.75, 4.5],
-      "complex": [5.0, 20.0]
+      "simple": [
+        0.75,
+        4.5
+      ],
+      "standard": [
+        0.75,
+        4.5
+      ],
+      "complex": [
+        5.0,
+        20.0
+      ]
     },
     "anthropic": {
-      "simple": [2.0, 10.0],
-      "standard": [4.0, 20.0],
-      "complex": [16.0, 80.0]
+      "simple": [
+        2.0,
+        10.0
+      ],
+      "standard": [
+        4.0,
+        20.0
+      ],
+      "complex": [
+        16.0,
+        80.0
+      ]
     },
     "gemini": {
-      "simple": [0.3, 1.2],
-      "standard": [0.6, 3.5],
-      "complex": [3.5, 20.0]
+      "simple": [
+        0.35,
+        2.5
+      ],
+      "standard": [
+        1.5,
+        7.5
+      ],
+      "complex": [
+        3.5,
+        20.0
+      ]
     }
   }
 }

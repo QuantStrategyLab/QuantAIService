@@ -573,6 +573,27 @@ try{
   assert.equal((await call('report_task_result',{task_id:eventTask.id,attempt_id:'muse-evt-attempt',revision:1,status:'completed',output})).body.result.structuredContent.status,'completed');
   assert.equal((await call('delete_event_subscription',{subscription_id:subReply.body.result.id})).body.result.structuredContent.status,'gone');
  });
+ await test('expired outcome_unknown tasks do not exhaust active task quota',async()=>{
+  const quotaProject=organizationId+'/QuotaProject',quotaId=projectId+'-quota';
+  policy.PROJECT_CONTEXTS[quotaId]={organization,ownerId:organizationId,project:quotaProject,providers:['dot']};
+  policy.PROJECT_POLICIES[quotaProject]={...policy.PROJECT_POLICIES[project],max_active:1};
+  const quotaAdmissions=JSON.parse(policy.ADMISSIONS_JSON);
+  quotaAdmissions.push({organization,projectId:quotaId,githubUserId:'10001',ownerId:organizationId,clientIds:[ids.caller],providers:['dot'],scopes:['tasks:read','tasks:submit']});
+  policy.ADMISSIONS_JSON=JSON.stringify(quotaAdmissions);
+  await worker.policy({PROJECT_CONTEXTS:policy.PROJECT_CONTEXTS,PROJECT_POLICIES:policy.PROJECT_POLICIES,ADMISSIONS_JSON:policy.ADMISSIONS_JSON});
+  await mf.setOptions({cf:false,handleRuntimeStdio,workers:[{name:'personal',modules:true,script:fixture,compatibilityDate:'2026-07-30',compatibilityFlags:['global_fetch_strictly_public'],bindings:policy,kvNamespaces:{OAUTH_KV:'test-oauth'},durableObjects:{TASK_STATE:{className:stateClass,useSQLite:true}},serviceBindings:{TASK_SERVICE:{name:'personal',entrypoint:'TaskService'}},outboundService}]});
+  worker=await mf.getWorker();
+  const quotaCaller=await mint(null,origin+'/v1/tasks',['tasks:read','tasks:submit'],ids.caller,{project_id:quotaId});
+  const shortApi={...apiRequest,timeout_seconds:3};
+  const unknownId=await worker.abandonAPI(quotaProject,shortApi,false);
+  await until(async()=>{const r=await request('/v1/tasks/'+unknownId,{headers:auth(quotaCaller)});return (await r.json()).status==='outcome_unknown';});
+  const blocked=await request('/v1/tasks',{method:'POST',headers:{...auth(quotaCaller),'Idempotency-Key':'quota-blocked'},body:JSON.stringify(shortApi)});
+  assert.equal(blocked.status,409);
+  await new Promise(r=>setTimeout(r,3200));
+  apiReply='success';
+  const admitted=await request('/v1/tasks',{method:'POST',headers:{...auth(quotaCaller),'Idempotency-Key':'quota-admitted'},body:JSON.stringify(shortApi)});
+  assert.equal(admitted.status,202);
+ });
  await mkdir('test-results',{recursive:true});await writeFile('test-results/native-'+organization+'.json',JSON.stringify({organization,cases,count:cases.length,realWorkerd:true,realGithub:false,realDot:false,testWebhookDeliveries:deliveries.length,externalRealRequests:0,outboundIntercepted:outbound},null,2)+'\n');
  console.log(`RESULT ${cases.length}/${cases.length} PASS; real workerd, test GitHub/webhook only`);
 }finally{await mf.dispose();}

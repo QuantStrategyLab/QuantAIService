@@ -17,11 +17,20 @@ def main(argv: list[str] | None = None, *, fetch=None) -> int:
 
     policy = json.loads(args.policy.read_text(encoding='utf-8'))
     updated, report = refresh_policy(policy, fetch=fetch)
-    if not args.check:
+    empty_tiers = [
+        f'{provider}.{tier}'
+        for provider, tiers in updated.get('tier_models', {}).items()
+        for tier, candidates in tiers.items()
+        if not candidates
+    ]
+    if not empty_tiers and not args.check:
         target = args.output or args.policy
         target.write_text(json.dumps(updated, indent=2) + '\n', encoding='utf-8')
-    print(json.dumps({'schema_version': updated.get('schema_version'), 'tiers': report}, sort_keys=True))
-    return 0
+    payload = {'schema_version': updated.get('schema_version'), 'tiers': report}
+    if empty_tiers:
+        payload['empty_tiers'] = empty_tiers
+    print(json.dumps(payload, sort_keys=True))
+    return 1 if empty_tiers else 0
 
 
 if __name__ == '__main__':

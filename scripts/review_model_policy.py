@@ -11,7 +11,7 @@ PRICE_PATH = {
     'anthropic': '/docs/en/about-claude/pricing.md',
 }
 FAMILY = {
-    'openai': re.compile(r'gpt-(\d+(?:\.\d+)*)-mini'),
+    'openai': re.compile(r'gpt-(\d+(?:\.\d+)*)-(?:mini|luna|nano)'),
     'anthropic': re.compile(r'claude-sonnet-(\d+(?:-\d+)*)'),
 }
 HEADINGS = {'openai': '### Standard pricing data', 'anthropic': '## Model pricing'}
@@ -108,7 +108,7 @@ def refresh_candidates(provider, tier, policy, fetch=None):
                   if price[0] <= caps[0] and price[1] <= caps[1]}
     newest_approved = max(version(provider, model) for model in baseline)
     updates = sorted((model for model in affordable if version(provider, model) > newest_approved),
-                     key=lambda model: version(provider, model), reverse=True)
+                     key=lambda model: (version(provider, model), model), reverse=True)
     # Dated GPT snapshots share the base alias price. Unknown or over-cap rows are excluded.
     approved = [model for model in baseline
                 if re.sub(r'-\d{4}-\d{2}-\d{2}$', '', model) in affordable]
