@@ -1258,6 +1258,10 @@ def static_adoption_identity(unit, env, origins, reader, monitor, entry, checks)
     path_before, path_origin_before = env.get("PATH"), origins.get("PATH", "absent")
     result["roots"] = {"entrypoint": classify(entry), "monitor": classify(monitor)}
     captured_aab = env.get("AIAUDIT_BRIDGE_ROOT")
+    venv = None
+    aab = captured_aab
+    qpk = None
+    childenv = env
     if unit == "codex-quant.service":
         common(env, origins, monitor)
         venv = env["QUANT_MONITOR_VENV"] if env["QUANT_MONITOR_VENV"] not in (None, "") else monitor + "/.venv"
