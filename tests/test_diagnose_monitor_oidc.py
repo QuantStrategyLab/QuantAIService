@@ -1134,3 +1134,29 @@ def test_invalid_bucket_cli_reports_only_fixed_reason(tmp_path, monkeypatch, cap
     captured = capsys.readouterr()
     assert json.loads(captured.out) == expected
     assert not captured.err
+
+
+def test_retired_legacy_url_closes_stale_legacy_pending_and_allows_native(tmp_path):
+    state_dir = tmp_path / "actions-state"
+    state_dir.mkdir()
+    stale_path = state_dir / "2026-10-20.json"
+    stale_path.write_text(json.dumps({
+        "job_id": ID,
+        "request_sha256": "a" * 64,
+        "service_sha256": caller.digest("https://audit.invalid"),
+        "route": {k: job()[k] for k in ("provider", "research_stage", "model", "reasoning_effort")},
+        "deadline": NOW.timestamp() - 1,
+        "observed_at": NOW.isoformat(),
+    }))
+    snapshot(tmp_path)
+    env = native_environment()
+    env.pop("CODEX_AUDIT_SERVICE_URL", None)
+    env.pop("AI_SERVICE_DIAGNOSIS_LEGACY_CODEX", None)
+    opener = NativeOpener()
+    result = caller.diagnose(tmp_path, state_dir, env=env, opener=opener, now=NOW, sleep=lambda _: None)
+    assert result["status"] == "succeeded"
+    assert result["protocol"] == "native_tasks_v1"
+    stale = json.loads(stale_path.read_text())
+    assert stale["receipt"]["status"] == "legacy_service_retired"
+    assert stale["receipt"]["advisory_only"] is True
+    assert stale["receipt"]["execution_authority_granted"] is False
