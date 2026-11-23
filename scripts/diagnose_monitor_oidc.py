@@ -349,6 +349,29 @@ def diagnose(root, state_dir, *, include_healthy=False, env=None, opener=None,
                                     include_healthy=include_healthy, prepare_observation=prepare_observation)
         if not legacy_pending and not legacy_codex_diagnosis_allowed(env):
             return {"status": "skipped", "reason": "cli_diagnosis_retired"}
+        if legacy_pending and not service and not legacy_codex_diagnosis_allowed(env):
+            for prev_path, prev_state in pending:
+                if prev_state.get("protocol") != "native_tasks_v1":
+                    persist(
+                        prev_path,
+                        {
+                            **prev_state,
+                            "receipt": {
+                                "status": "legacy_service_retired",
+                                "job_id": prev_state.get("job_id"),
+                                "advisory_only": True,
+                                "execution_authority_granted": False,
+                            },
+                        },
+                    )
+            if native_diagnosis_ready(env):
+                pending = unresolved_attempts(state_dir)
+                return native_diagnosis(
+                    root, state_dir, path, pending, env=env, opener=opener, now=now,
+                    monotonic=monotonic, sleep=sleep, persist=persist,
+                    include_healthy=include_healthy, prepare_observation=prepare_observation,
+                )
+            return {"status": "skipped", "reason": "cli_diagnosis_retired"}
         https_url(service, base=True)
         for previous, state in pending:
             if previous != path and not state.get("job_id"):
