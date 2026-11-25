@@ -9,7 +9,8 @@ from typing import Callable
 from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
-from .gemini import MODEL_PATTERN, TIER_KEYS
+MODEL_PATTERN = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,127}')
+TIER_KEYS = frozenset({'simple', 'standard', 'complex'})
 
 PRICE_CONFIG = {
     'openai': ('https://developers.openai.com', '/api/docs/pricing.md'),

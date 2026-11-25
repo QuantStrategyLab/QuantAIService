@@ -153,6 +153,26 @@ class MonthlyApiAuditTests(unittest.TestCase):
         self.assertEqual(review('gemini', transport2),
                          {'status': 'incomplete', 'selection': 'account_catalog'})
 
+    def test_monthly_audit_scripts_import_without_runtime_third_party_deps(self):
+        import subprocess
+        import sys
+        root = Path(__file__).resolve().parents[1]
+        proc = subprocess.run(
+            [
+                sys.executable,
+                '-I',
+                '-c',
+                f"import sys; sys.path[:0] = [{str(root)!r}, {str(root / 'src')!r}]; "
+                "sys.modules['jsonschema'] = None; sys.modules['jwt'] = None; "
+                "import ai_service.model_policy, scripts.review_model_policy, scripts.monthly_api_audit",
+            ],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+
     def _run_main(self, argv, *, env, transport_side_effect):
         with tempfile.TemporaryDirectory() as tmpdir:
             report_path = Path(tmpdir) / 'report.json'
