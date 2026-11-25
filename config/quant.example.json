@@ -223,7 +223,8 @@
             "mode": "api",
             "providers": [
               "openai",
-              "claude"
+              "claude",
+              "gemini"
             ],
             "matching": {
               "hints": [
@@ -238,7 +239,8 @@
             "mode": "api",
             "providers": [
               "openai",
-              "claude"
+              "claude",
+              "gemini"
             ],
             "matching": {
               "hints": [

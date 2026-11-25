@@ -71,8 +71,48 @@ class ReviewModelPolicyTests(unittest.TestCase):
     def test_committed_monthly_audit_policy_has_non_empty_rosters(self):
         committed = json.loads((Path(__file__).resolve().parents[1] / 'config/monthly-audit-models.json').read_text())
         for tier in ('standard', 'complex'):
-            for provider in ('openai', 'anthropic'):
+            for provider in ('openai', 'anthropic', 'gemini'):
                 self.assertTrue(committed[tier][provider], f'{tier}.{provider}')
+
+    @patch.dict('os.environ', {'GEMINI_PRICING_ORIGIN': 'https://example.org'})
+    def test_gemini_tier_family_refresh_and_rate_caps(self):
+        gemini_policy = {
+            'standard': {'gemini': ['gemini-4-hydrogen', 'gemini-3.8-flash', 'gemini-2.5-flash']},
+            'complex': {'gemini': ['gemini-4-neon', 'gemini-4-hydrogen', 'gemini-2.5-pro']},
+            'rate_caps': {
+                'standard': {'gemini': [1.5, 7.5]},
+                'complex': {'gemini': [3.5, 20.0]},
+            },
+        }
+        doc = '''## gemini-4-hydrogen
+{% tabs %}
+{% tab title="Standard" %}
+{% table %}
+* Feature
+* Free Tier
+* Paid Tier, per 1M tokens (USD)
+---
+* Input price
+* Free
+* $0.50
+---
+* Output price
+* Free
+* $3.00
+{% /table %}
+{% /tab %}
+{% /tabs %}
+
+## gemini-5-flash
+| Model | Input price | Output price |
+| --- | --- | --- |
+| gemini-5-flash | $1.00 | $6.00 |
+| gemini-5-pro | $2.50 | $12.00 |
+'''
+        self.assertEqual(refresh_candidates('gemini', 'standard', gemini_policy, lambda _: doc),
+                         (['gemini-5-flash', 'gemini-4-hydrogen'], 'official_pricing'))
+        self.assertEqual(refresh_candidates('gemini', 'complex', gemini_policy, lambda _: doc),
+                         (['gemini-5-pro', 'gemini-4-hydrogen'], 'official_pricing'))
 
     def test_read_failure_only_preserves_reviewed_baseline(self):
         def unavailable(_):

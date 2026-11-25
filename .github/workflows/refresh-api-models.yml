@@ -62,7 +62,7 @@ jobs:
           empty = []
           for tier in ('standard', 'complex'):
               report[tier] = {}
-              for provider in ('openai', 'anthropic'):
+              for provider in ('openai', 'anthropic', 'gemini'):
                   candidates, source = refresh_candidates(provider, tier, policy)
                   updated[tier][provider] = candidates
                   report[tier][provider] = {
@@ -121,7 +121,7 @@ jobs:
               '| --- | --- | --- | --- | --- |',
           ])
           for tier in ('standard', 'complex'):
-              for provider in ('openai', 'anthropic'):
+              for provider in ('openai', 'anthropic', 'gemini'):
                   entry = monthly_report.get('tiers', {}).get(tier, {}).get(provider, {})
                   cands = ', '.join(f'`{m}`' for m in entry.get('candidates', []))
                   lines.append(

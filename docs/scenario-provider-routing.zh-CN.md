@@ -37,14 +37,14 @@ QuantAIService 使用与私有路由服务共享的 `task.routing.v1` 注册契�
 | `strategy_research_summary` | quant_research | auto | openai, claude, gemini, muse | research-summary, strategy-brief, portfolio-note |
 | `reconciliation_anomaly` | quant_ops | agent | muse | recon-diff, ops-anomaly, ledger-mismatch |
 | `signal_context` | quant_signals | auto | openai, claude, gemini, muse | signal-context, feature-note |
-| `report_audit` | quant_notify | api | openai, claude | report-audit, audit-summary |
-| `document_translation` | quant_notify | api | openai, claude | document-translation, translate |
+| `report_audit` | quant_notify | api | openai, claude, gemini | report-audit, audit-summary |
+| `document_translation` | quant_notify | api | openai, claude, gemini | document-translation, translate |
 | `quick_notification` | quant_notify | api | openai, claude, gemini | short-alert, status-ping |
 
 示例显式设置 `matching.default_complexity`：`pr_code_review`、`strategy_backtest_review` 和 `reconciliation_anomaly` 为 `complex`，`strategy_research_summary`、`signal_context` 和 `report_audit` 为 `standard`，`document_translation` 与 `quick_notification` 为 `simple`。
 省略该字段时沿类别链继承；显式 `null` 无效。图片 / 体积下限使用 `matching.min_with_image`、`matching.size_thresholds` 与全局 `heuristics`，语义为共享契约中的只升不降。
 
-Quant 与 PersonalAIService 共用 `task.routing.v1` 契约，各自维护场景目录。独立的定期双 API 审计（`scripts/monthly_api_audit.py`）基于冻结证据分别调用 OpenAI 和 Anthropic（`api` 模式）生成独立结论。
+Quant 与 PersonalAIService 共用 `task.routing.v1` 契约，各自维护场景目录。独立的定期月审（`scripts/monthly_api_audit.py`）基于冻结证据分别调用 OpenAI 和 Anthropic（在配置 `GEMINI_API_KEY` 时纳入 Gemini 作为可选第三独立审计方，`api` 模式）生成独立结论。
 
 各场景按配置与复杂度档位解析执行模式：
 
