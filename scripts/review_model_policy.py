@@ -6,13 +6,21 @@ from decimal import Decimal
 from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
+from ai_service.model_policy import _parse_gemini_rates
+
 PRICE_PATH = {
     'openai': '/api/docs/pricing.md',
     'anthropic': '/docs/en/about-claude/pricing.md',
+    'gemini': '/docs/pricing.md',
 }
 FAMILY = {
     'openai': re.compile(r'gpt-(\d+(?:\.\d+)*)-(?:mini|luna|nano)'),
     'anthropic': re.compile(r'claude-sonnet-(\d+(?:-\d+)*)'),
+    'gemini': re.compile(r'gemini-(\d+(?:\.\d+)*)-(?:neon|hydrogen|flash|pro)'),
+}
+GEMINI_TIER_FAMILY = {
+    'standard': re.compile(r'gemini-(\d+(?:\.\d+)*)-(?:hydrogen|flash)'),
+    'complex': re.compile(r'gemini-(\d+(?:\.\d+)*)-(?:neon|hydrogen|pro)'),
 }
 HEADINGS = {'openai': '### Standard pricing data', 'anthropic': '## Model pricing'}
 MAX_BYTES = 512_000
@@ -33,8 +41,9 @@ def fetch_pricing(url):
     return body.decode('utf-8')
 
 
-def version(provider, model):
-    match = FAMILY[provider].fullmatch(model)
+def version(provider, model, tier=None):
+    pattern = GEMINI_TIER_FAMILY[tier] if provider == 'gemini' and tier in GEMINI_TIER_FAMILY else FAMILY[provider]
+    match = pattern.fullmatch(model)
     if match:
         return tuple(int(part) for part in re.split(r'[.-]', match[1]))
     return ()
@@ -42,6 +51,8 @@ def version(provider, model):
 
 def standard_rates(provider, document):
     """Parse only the base/standard table, ignoring cached, batch and premium sections."""
+    if provider == 'gemini':
+        return _parse_gemini_rates(document)
     lines = document.splitlines()
     try:
         start = lines.index(HEADINGS[provider]) + 1
@@ -106,9 +117,9 @@ def refresh_candidates(provider, tier, policy, fetch=None):
 
     affordable = {model for model, price in rates.items()
                   if price[0] <= caps[0] and price[1] <= caps[1]}
-    newest_approved = max(version(provider, model) for model in baseline)
-    updates = sorted((model for model in affordable if version(provider, model) > newest_approved),
-                     key=lambda model: (version(provider, model), model), reverse=True)
+    newest_approved = max((version(provider, model, tier=tier) for model in baseline), default=())
+    updates = sorted((model for model in affordable if version(provider, model, tier=tier) > newest_approved),
+                     key=lambda model: (version(provider, model, tier=tier), model), reverse=True)
     # Dated GPT snapshots share the base alias price. Unknown or over-cap rows are excluded.
     approved = [model for model in baseline
                 if re.sub(r'-\d{4}-\d{2}-\d{2}$', '', model) in affordable]
