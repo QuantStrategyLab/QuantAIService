@@ -10,9 +10,9 @@ class MonitorProjectConfigTests(unittest.TestCase):
                             ("quant-monitor-operational-diagnosis.yml", 1)):
             with self.subTest(workflow=name):
                 text = (root / ".github/workflows" / name).read_text()
-                self.assertEqual(text.count("project_id: ${{ vars.QUANT_MONITOR_GCP_PROJECT_ID }}"), count)
+                self.assertEqual(text.count("project_id: ${{ secrets.QUANT_MONITOR_GCP_PROJECT_ID }}"), count)
                 self.assertEqual(text.count("- name: Validate cloud project configuration"), count)
-                self.assertEqual(text.count("GCP_PROJECT_ID: ${{ vars.QUANT_MONITOR_GCP_PROJECT_ID }}"), count)
+                self.assertEqual(text.count("GCP_PROJECT_ID: ${{ secrets.QUANT_MONITOR_GCP_PROJECT_ID }}"), count)
                 self.assertEqual(text.count('[[ "$GCP_PROJECT_ID" =~ ^[a-z][a-z0-9-]{4,28}[a-z0-9]$ ]]'), count)
 
 
