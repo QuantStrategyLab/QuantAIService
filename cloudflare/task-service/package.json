@@ -10,7 +10,7 @@
   },
   "dependencies": {
     "@cloudflare/workers-oauth-provider": "1.2.4",
-    "@hyperjump/browser": "1.6.0",
+    "@hyperjump/browser": "2.0.0",
     "@hyperjump/json-schema": "1.18.1"
   },
   "devDependencies": {
