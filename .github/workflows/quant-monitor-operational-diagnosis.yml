@@ -28,11 +28,29 @@ jobs:
     timeout-minutes: 15
     env:
       QUANT_MONITOR_GCS_BUCKET: ${{ secrets.QUANT_MONITOR_GCS_BUCKET }}
-      MONITOR_CORE_AZURE_URL: ${{ vars.QUANT_MONITOR_CORE_AZURE_URL }}
     permissions:
       contents: read
       id-token: write
     steps:
+      - name: Mask infrastructure identifiers
+        env:
+          MONITOR_CORE_AZURE_URL: ${{ vars.QUANT_MONITOR_CORE_AZURE_URL }}
+          QUANT_MONITOR_GCP_PROJECT_ID: ${{ vars.QUANT_MONITOR_GCP_PROJECT_ID }}
+          QUANT_MONITOR_GCS_BUCKET: ${{ secrets.QUANT_MONITOR_GCS_BUCKET }}
+        run: |
+          set -euo pipefail
+          mask() {
+            local value="$1"
+            if [ -n "$value" ]; then
+              printf '%s\n' "::add-mask::${value}"
+            fi
+          }
+          mask "$MONITOR_CORE_AZURE_URL"
+          mask "$QUANT_MONITOR_GCP_PROJECT_ID"
+          mask "$QUANT_MONITOR_GCS_BUCKET"
+          if [[ "$MONITOR_CORE_AZURE_URL" =~ ^https://([^/?#]+) ]]; then
+            mask "${BASH_REMATCH[1]}"
+          fi
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           ref: ${{ github.sha }}
@@ -63,7 +81,7 @@ jobs:
           create_credentials_file: true
           export_environment_variables: true
       - name: Authenticate the Azure observation reader
-        if: env.MONITOR_CORE_AZURE_URL != ''
+        if: vars.QUANT_MONITOR_CORE_AZURE_URL != ''
         uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6 # v2
         with:
           tenant-id: ${{ vars.QUANT_MONITOR_AZURE_TENANT_ID }}
@@ -84,6 +102,7 @@ jobs:
           PYTHONDONTWRITEBYTECODE: '1'
           MANUAL_DISPATCH: ${{ github.event_name == 'workflow_dispatch' }}
           VERIFY_STATE_ONLY: ${{ github.event_name == 'workflow_dispatch' && inputs.verify_state_only }}
+          MONITOR_CORE_AZURE_URL: ${{ vars.QUANT_MONITOR_CORE_AZURE_URL }}
         run: |
           set -euo pipefail
           if [[ -n "$MONITOR_CORE_AZURE_URL" ]]; then

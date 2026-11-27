@@ -1,6 +1,6 @@
 # Security Policy
 
-Thanks for helping keep `AIAuditBridge` safe.
+Thanks for helping keep `QuantAIService` safe.
 
 This repository is part of the QuantStrategyLab automation, research, or trading-support surface. Please do **not** open a public issue for vulnerabilities involving credentials, broker or exchange access, cloud resources, workflow tokens, private market data, account identifiers, order execution, or secret material.
 

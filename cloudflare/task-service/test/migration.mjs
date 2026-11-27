@@ -53,21 +53,37 @@ function makeBindings(extra = {}) {
   };
 }
 
-test('admin migration endpoints require valid MIGRATION_ADMIN_TOKEN', async (t) => {
-  const script = await buildFixture();
-  const mfDisabled = new Miniflare({
+function workerOptions(script, bindings, kv = 'kv') {
+  return {
     cf: false,
-    workers: [{name: 'svc', modules: true, script, compatibilityDate: '2026-07-30', compatibilityFlags: ['global_fetch_strictly_public'], bindings: makeBindings(), kvNamespaces: {OAUTH_KV: 'kv'}, durableObjects: {TASK_STATE: {className: 'QuantFixtureStore', useSQLite: true}}, serviceBindings: {TASK_SERVICE: {name: 'svc', entrypoint: 'TaskService'}}}],
-  });
-  t.after(() => mfDisabled.dispose());
-  const r404 = await mfDisabled.dispatchFetch('https://tasks.example.test/_admin/migration/drain-status');
-  assert.equal(r404.status, 404);
+    workers: [{name: 'svc', modules: true, script, compatibilityDate: '2026-07-30', compatibilityFlags: ['global_fetch_strictly_public'], bindings, kvNamespaces: {OAUTH_KV: kv}, durableObjects: {TASK_STATE: {className: 'QuantFixtureStore', useSQLite: true}}, serviceBindings: {TASK_SERVICE: {name: 'svc', entrypoint: 'TaskService'}}}],
+  };
+}
 
+test('admin migration endpoints require an explicit enable flag and a long token', async (t) => {
+  const script = await buildFixture();
   const adminToken = randomBytes(24).toString('hex');
-  const mf = new Miniflare({
-    cf: false,
-    workers: [{name: 'svc', modules: true, script, compatibilityDate: '2026-07-30', compatibilityFlags: ['global_fetch_strictly_public'], bindings: makeBindings({MIGRATION_ADMIN_TOKEN: adminToken}), kvNamespaces: {OAUTH_KV: 'kv'}, durableObjects: {TASK_STATE: {className: 'QuantFixtureStore', useSQLite: true}}, serviceBindings: {TASK_SERVICE: {name: 'svc', entrypoint: 'TaskService'}}}],
-  });
+  const cases = [
+    makeBindings(),
+    makeBindings({MIGRATION_ADMIN_TOKEN: adminToken}),
+    makeBindings({MIGRATION_ADMIN_ENABLED: 'true', MIGRATION_ADMIN_TOKEN: 'short-token'}),
+    makeBindings({MIGRATION_ADMIN_ENABLED: 'TRUE', MIGRATION_ADMIN_TOKEN: adminToken}),
+    makeBindings({MIGRATION_ADMIN_ENABLED: '1', MIGRATION_ADMIN_TOKEN: adminToken}),
+  ];
+  for (const bindings of cases) {
+    const hidden = new Miniflare(workerOptions(script, bindings, 'kv-' + randomBytes(4).toString('hex')));
+    t.after(() => hidden.dispose());
+    for (const path of ['drain-status', 'export', 'import']) {
+      const hiddenReply = await hidden.dispatchFetch('https://tasks.example.test/_admin/migration/' + path, {
+        method: path === 'import' ? 'POST' : 'GET',
+        headers: {Authorization: `Bearer ${adminToken}`, 'Content-Type': 'application/json'},
+        body: path === 'import' ? '{}' : undefined,
+      });
+      assert.equal(hiddenReply.status, 404, path);
+    }
+  }
+
+  const mf = new Miniflare(workerOptions(script, makeBindings({MIGRATION_ADMIN_ENABLED: 'true', MIGRATION_ADMIN_TOKEN: adminToken})));
   t.after(() => mf.dispose());
   const r401 = await mf.dispatchFetch('https://tasks.example.test/_admin/migration/drain-status', {headers: {Authorization: 'Bearer wrong'}});
   assert.equal(r401.status, 401);
@@ -134,7 +150,7 @@ test('export, import, alarm reconstruction, and DISPATCH_PAUSED preserve state w
   };
 
   // 1. Source store with WRITE_FROZEN=true & DISPATCH_PAUSED=true
-  const srcFrozen = makeWorker(makeBindings({MIGRATION_ADMIN_TOKEN: adminToken, WRITE_FROZEN: 'true', DISPATCH_PAUSED: 'true'}));
+  const srcFrozen = makeWorker(makeBindings({MIGRATION_ADMIN_ENABLED: 'true', MIGRATION_ADMIN_TOKEN: adminToken, WRITE_FROZEN: 'true', DISPATCH_PAUSED: 'true'}));
   t.after(() => srcFrozen.dispose());
 
   const seedRes = await srcFrozen.dispatchFetch('https://tasks.example.test/_admin/migration/import', {
@@ -166,7 +182,7 @@ test('export, import, alarm reconstruction, and DISPATCH_PAUSED preserve state w
   assert.equal(snapshot.tables.task_metadata_cursor_key.length, 1);
 
   // 2. Import into fresh target store with DISPATCH_PAUSED=false
-  const dst = makeWorker(makeBindings({MIGRATION_ADMIN_TOKEN: adminToken}), 'kv-dst');
+  const dst = makeWorker(makeBindings({MIGRATION_ADMIN_ENABLED: 'true', MIGRATION_ADMIN_TOKEN: adminToken}), 'kv-dst');
   t.after(() => dst.dispose());
   const importRes = await dst.dispatchFetch('https://tasks.example.test/_admin/migration/import', {
     method: 'POST',
@@ -178,13 +194,36 @@ test('export, import, alarm reconstruction, and DISPATCH_PAUSED preserve state w
   assert.equal(importBody.imported, true);
   assert.ok(importBody.alarm_scheduled_at > 0);
 
-  // Re-importing without replace=1 must fail (non-empty guard -> 409 Conflict)
+  for (const flag of ['1', 'true']) {
+    const replaced = await dst.dispatchFetch('https://tasks.example.test/_admin/migration/import?replace=' + flag, {
+      method: 'POST',
+      headers: {Authorization: `Bearer ${adminToken}`, 'Content-Type': 'application/json'},
+      body: JSON.stringify(snapshot),
+    });
+    assert.equal(replaced.status, 403);
+    assert.deepEqual(await replaced.json(), {error: 'migration_import_replace_forbidden'});
+  }
+
+  // Re-importing without replace must fail (non-empty guard -> 409 Conflict) and omit exception text.
   const dupImport = await dst.dispatchFetch('https://tasks.example.test/_admin/migration/import', {
     method: 'POST',
     headers: {Authorization: `Bearer ${adminToken}`, 'Content-Type': 'application/json'},
     body: JSON.stringify(snapshot),
   });
   assert.equal(dupImport.status, 409);
+  const dupBody = await dupImport.json();
+  assert.deepEqual(dupBody, {error: 'Conflict'});
+  assert.equal(JSON.stringify(dupBody).includes('not empty'), false);
+
+  const malformed = await dst.dispatchFetch('https://tasks.example.test/_admin/migration/import', {
+    method: 'POST',
+    headers: {Authorization: `Bearer ${adminToken}`, 'Content-Type': 'application/json'},
+    body: '{',
+  });
+  assert.equal(malformed.status, 400);
+  const malformedBody = await malformed.json();
+  assert.deepEqual(malformedBody, {error: 'SyntaxError'});
+  assert.equal(Object.hasOwn(malformedBody, 'message'), false);
 
   // Reconstructed alarm should process queued task (task-queued-2 -> failed because no live muse poll/sub),
   // while leaving task-completed-1 untouched.

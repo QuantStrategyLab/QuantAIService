@@ -31,7 +31,7 @@ const nativeCalls=[];let nativeReply=200;
 policy.PROJECT_CONTEXTS[projectId+'-second']={organization,ownerId:organizationId,project:secondProject,providers:['dot']};
 policy.PROJECT_POLICIES[secondProject]={...policy.PROJECT_POLICIES[project]};
 
-const deliveries=[],probeCalls=[],key=randomBytes(32),secret='whsec_'+key.toString('base64');let failedOnce=false,githubUser=10001,outbound=0;
+const deliveries=[],probeCalls=[],key=randomBytes(32),secret='whsec_'+key.toString('base64');let failedOnce=false,githubUser=10001,githubUserAgent=null,outbound=0;
 let batchReplies=[],verificationRejected=false;
 const runtimeLogs=[];
 const handleRuntimeStdio=(stdout,stderr)=>{
@@ -44,7 +44,7 @@ const outboundService=async request=>{outbound++;const url=new URL(request.url);
  if(url.hostname==='api.anthropic.com')assert.equal(request.headers.get('anthropic-version'),'2026-10-21');
  assert.deepEqual(Object.keys(event).sort(),['change','project','resource','revision','task_id','type']);
  nativeCalls.push(event);if(nativeReply==='timeout')throw Error('private upstream error');return new Response('',{status:nativeReply});
-} if(url.hostname==='github.com')return Response.json({access_token:'synthetic-github-token'});if(url.hostname==='api.github.com')return Response.json({id:githubUser});
+} if(url.hostname==='github.com')return Response.json({access_token:'synthetic-github-token'});if(url.hostname==='api.github.com'){githubUserAgent=request.headers.get('user-agent');return Response.json({id:githubUser});}
  if(url.hostname==='generativelanguage.googleapis.com'){
   assert.equal(url.pathname,'/v1beta/models/synthetic-fixed:generateContent');assert.equal(request.headers.get('x-goog-api-key'),'synthetic-api-key');
   const body=await request.json();assert.equal(body.generationConfig.candidateCount,1);assert.ok(body.generationConfig.responseJsonSchema);assert.ok(!body.tools);assert.ok(!body.safetySettings);apiCalls.push(body);
@@ -184,7 +184,7 @@ try{
   const approved=await request('/authorize',{method:'POST',headers:{cookie},body:new URLSearchParams({handle,decision:'approve',scope:'tasks:read'})});assert.equal(approved.status,302);
   const upstreamURL=new URL(approved.headers.get('location'));assert.equal(upstreamURL.hostname,'github.com');assert.equal(upstreamURL.searchParams.get('code_challenge_method'),'S256');
   const path='/callback?state='+encodeURIComponent(upstreamURL.searchParams.get('state'))+'&code=synthetic-code';assert.equal((await request(path)).status,400);
-  const binding=approved.headers.getSetCookie().find(c=>c.startsWith('__Host-oauth-upstream-')&&!c.includes('Max-Age=0')).split(';')[0];const callback=await request(path,{headers:{cookie:binding}});assert.equal(callback.status,302,callback.status===302?'':(await callback.text())+'; outbound='+outbound);assert.equal(new URL(callback.headers.get('location')).searchParams.get('state'),'browser-bound-test');
+  const binding=approved.headers.getSetCookie().find(c=>c.startsWith('__Host-oauth-upstream-')&&!c.includes('Max-Age=0')).split(';')[0];const callback=await request(path,{headers:{cookie:binding}});assert.equal(callback.status,302,callback.status===302?'':(await callback.text())+'; outbound='+outbound);assert.equal(new URL(callback.headers.get('location')).searchParams.get('state'),'browser-bound-test');assert.equal(githubUserAgent,'quant-ai-cloudflare');
  });
  // The callback issued a separate official grant for caller and revokes earlier grant.
  tokens.caller=await mint(null,origin+'/v1/tasks',['tasks:read','tasks:submit'],ids.caller);

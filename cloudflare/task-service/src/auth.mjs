@@ -244,7 +244,7 @@ export function createAuthApplication(config, { taskHandler } = {}) {
       const token=await exchanged.json();
       if(!exchanged.ok||typeof token.access_token!=='string')return deny('github_exchange_failed',403);
       stage='github_identity';
-      const userReply=await fetch('https://api.github.com/user',{headers:{Authorization:'Bearer '+token.access_token,Accept:'application/vnd.github+json','User-Agent':'personal-ai-cloudflare','X-GitHub-Api-Version':'2022-11-28'},redirect:'manual',signal:AbortSignal.timeout(10000)});
+      const userReply=await fetch('https://api.github.com/user',{headers:{Authorization:'Bearer '+token.access_token,Accept:'application/vnd.github+json','User-Agent':'quant-ai-cloudflare','X-GitHub-Api-Version':'2022-11-28'},redirect:'manual',signal:AbortSignal.timeout(10000)});
       const user=await userReply.json();
       if(!userReply.ok||!Number.isSafeInteger(user.id)||user.id<1)return deny('github_identity_failed',403);
       const clientPolicy=env.AUTH_CLIENTS?.[upstream.request.clientId];
@@ -265,7 +265,8 @@ export function createAuthApplication(config, { taskHandler } = {}) {
       try {
         if (url.pathname.startsWith('/_admin/migration/')) {
           const expected = env.MIGRATION_ADMIN_TOKEN;
-          if (typeof expected !== 'string' || expected.length < 32) return deny('not_found', 404);
+          // A token alone does not publish the routes. Default is off.
+          if (env.MIGRATION_ADMIN_ENABLED !== 'true' || typeof expected !== 'string' || expected.length < 32) return deny('not_found', 404);
           const header = request.headers.get('Authorization') ?? '';
           const match = header.match(/^Bearer\s+(.+)$/);
           if (!match) return deny('unauthorized', 401);
@@ -282,13 +283,15 @@ export function createAuthApplication(config, { taskHandler } = {}) {
             return Response.json(await env.TASK_SERVICE.migrationExport(), { headers: { 'Cache-Control': 'no-store' } });
           }
           if (url.pathname === '/_admin/migration/import' && request.method === 'POST') {
+            const replace = url.searchParams.get('replace');
+            if (replace === '1' || replace === 'true') return deny('migration_import_replace_forbidden', 403);
             try {
               const payload = await request.json();
-              const replace = url.searchParams.get('replace') === '1';
-              return Response.json(await env.TASK_SERVICE.migrationImport(payload, replace), { headers: { 'Cache-Control': 'no-store' } });
+              return Response.json(await env.TASK_SERVICE.migrationImport(payload, false), { headers: { 'Cache-Control': 'no-store' } });
             } catch (err) {
-              const status = err?.name === 'Conflict' ? 409 : err?.name === 'ValueError' ? 400 : 500;
-              return Response.json({ error: err?.name ?? 'Error', message: err?.message ?? 'migration_import_failed' }, { status, headers: { 'Cache-Control': 'no-store' } });
+              const code = err?.name === 'Conflict' ? 'Conflict' : err?.name === 'ValueError' ? 'ValueError' : err?.name === 'SyntaxError' ? 'SyntaxError' : 'migration_import_failed';
+              const status = code === 'Conflict' ? 409 : code === 'ValueError' || code === 'SyntaxError' ? 400 : 500;
+              return Response.json({ error: code }, { status, headers: { 'Cache-Control': 'no-store' } });
             }
           }
           return deny('not_found', 404);
