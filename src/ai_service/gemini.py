@@ -9,11 +9,10 @@ from __future__ import annotations
 import json
 import re
 
+from .model_policy import MODEL_PATTERN, TIER_KEYS
 from .runtime import ProviderReply, SubmissionRejected
 from .transport import PublicHTTPS, json_body
 
-MODEL_PATTERN = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,127}')
-TIER_KEYS = frozenset({'simple', 'standard', 'complex'})
 _DATED_SUFFIX = r'-(?:\d{4}-\d{2}-\d{2}|\d{8})'
 
 

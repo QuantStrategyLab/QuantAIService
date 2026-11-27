@@ -12,7 +12,7 @@ on:
       probe_provider:
         description: 'Provider to verify for a synthetic probe'
         type: choice
-        options: [both, openai, anthropic]
+        options: [both, all, openai, anthropic, gemini]
         default: both
       month:
         description: 'Report month (YYYY-MM); empty uses current UTC month'
@@ -54,13 +54,15 @@ jobs:
             arguments+=(--publish)
           fi
           python scripts/monthly_audit_report.py --month "$REPORT_MONTH" "${arguments[@]}" > "$RUNNER_TEMP/qar-monthly.json"
-      - name: Run independent GPT and Claude audits
+      - name: Run independent AI audits
         if: ${{ github.repository == 'QuantStrategyLab/QuantAIService' && github.ref == 'refs/heads/main' && github.run_attempt == 1 && (inputs.api_probe || (github.event_name == 'schedule' && vars.MONTHLY_API_AUDIT_READY == 'true')) }}
         env:
           OPENAI_PRICING_ORIGIN: ${{ vars.OPENAI_PRICING_ORIGIN }}
           ANTHROPIC_PRICING_ORIGIN: ${{ vars.ANTHROPIC_PRICING_ORIGIN }}
+          GEMINI_PRICING_ORIGIN: ${{ vars.GEMINI_PRICING_ORIGIN }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           PROBE_PROVIDER: ${{ inputs.probe_provider }}
           AUDIT_PROBE: ${{ inputs.api_probe }}
           PYTHONPATH: src

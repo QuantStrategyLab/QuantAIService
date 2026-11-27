@@ -44,8 +44,6 @@ class NamedAgentTests(unittest.TestCase):
                     self.assertEqual(scenario['providers'], ['muse'])
                 elif scenario['mode'] == 'auto':
                     self.assertEqual(scenario['providers'], ['openai', 'claude', 'gemini', 'muse'])
-                elif name in {'report_audit', 'document_translation'}:
-                    self.assertEqual(scenario['providers'], ['openai', 'claude'])
                 else:
                     self.assertEqual(scenario['providers'], ['openai', 'claude', 'gemini'])
 

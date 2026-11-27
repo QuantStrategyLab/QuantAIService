@@ -1,0 +1,26 @@
+target-version = "py311"
+
+[lint]
+extend-select = ["B", "C901"]
+
+[lint.mccabe]
+max-complexity = 15
+
+[lint.per-file-ignores]
+"tests/**/*.py" = ["E402", "B", "C901"]
+"scripts/**/*.py" = ["B", "C901"]
+"ops/**/*.py" = ["B", "C901"]
+"deploy/**/*.py" = ["B", "C901"]
+"governance/**/*.py" = ["B", "C901"]
+"src/ai_service/application/mcp.py" = ["C901"]
+"src/ai_service/application/tasks.py" = ["C901"]
+"src/ai_service/events.py" = ["C901"]
+"src/ai_service/gemini.py" = ["C901"]
+"src/ai_service/image_command.py" = ["C901"]
+"src/ai_service/inference.py" = ["C901"]
+"src/ai_service/model_policy.py" = ["B", "C901"]
+"src/ai_service/routing.py" = ["C901"]
+"src/ai_service/runtime.py" = ["C901"]
+"src/ai_service/server.py" = ["C901"]
+"src/ai_service/wiring.py" = ["C901"]
+"src/quant_ai_service/task_routing.py" = ["C901"]

@@ -441,7 +441,9 @@ class Deployer:
                 receipt['rolled_back'] = True
                 receipt['ok'] = receipt['health']['healthy']
             else:
-                release_id, bundle_hash = args
+                if len(args) != 2:
+                    raise DeployError('invalid_deploy_args')
+                release_id, bundle_hash = args[0], args[1]
                 receipt['requested_release'] = release_id
                 receipt['phase'] = 'stage'
                 release = self.stager.stage(release_id, bundle_hash, source)
