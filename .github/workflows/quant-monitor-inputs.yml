@@ -32,8 +32,8 @@ jobs:
     env:
       PYTHONDONTWRITEBYTECODE: '1'
       PYTHONPATH: ops/quant-monitor/scripts:ops/quant-monitor
-      MONITOR_INPUT_GCS_URI: ${{ vars.QUANT_MONITOR_INPUT_GCS_URI }}
-      MONITOR_CORE_GCS_URI: ${{ vars.QUANT_MONITOR_CORE_GCS_URI }}
+      MONITOR_INPUT_GCS_URI: ${{ secrets.QUANT_MONITOR_INPUT_GCS_URI }}
+      MONITOR_CORE_GCS_URI: ${{ secrets.QUANT_MONITOR_CORE_GCS_URI }}
       MONITOR_INPUT_AZURE_URL: ${{ vars.QUANT_MONITOR_INPUT_AZURE_URL }}
       MONITOR_CORE_AZURE_URL: ${{ vars.QUANT_MONITOR_CORE_AZURE_URL }}
       VERIFY_STATE_ONLY: ${{ github.event_name == 'workflow_dispatch' && inputs.verify_state_only }}
@@ -59,7 +59,7 @@ jobs:
           python -m pip --isolated install --no-deps --no-build-isolation "$RUNNER_TEMP/qpk"
       - name: Validate cloud project configuration
         env:
-          GCP_PROJECT_ID: ${{ vars.QUANT_MONITOR_GCP_PROJECT_ID }}
+          GCP_PROJECT_ID: ${{ secrets.QUANT_MONITOR_GCP_PROJECT_ID }}
         run: |
           if ! [[ "$GCP_PROJECT_ID" =~ ^[a-z][a-z0-9-]{4,28}[a-z0-9]$ ]]; then
             echo "::error::Set QUANT_MONITOR_GCP_PROJECT_ID to a valid project ID"
@@ -67,8 +67,8 @@ jobs:
           fi
       - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
         with:
-          project_id: ${{ vars.QUANT_MONITOR_GCP_PROJECT_ID }}
-          workload_identity_provider: ${{ vars.QUANT_MONITOR_INPUTS_GCP_WIF_PROVIDER }}
+          project_id: ${{ secrets.QUANT_MONITOR_GCP_PROJECT_ID }}
+          workload_identity_provider: ${{ secrets.QUANT_MONITOR_INPUTS_GCP_WIF_PROVIDER }}
           create_credentials_file: true
           export_environment_variables: true
       - name: Authenticate the Azure input writer
@@ -155,7 +155,7 @@ jobs:
           python -m pip --isolated install --require-hashes --only-binary=:all: -r ops/quant-monitor/requirements-linux-py312.lock
       - name: Validate cloud project configuration
         env:
-          GCP_PROJECT_ID: ${{ vars.QUANT_MONITOR_GCP_PROJECT_ID }}
+          GCP_PROJECT_ID: ${{ secrets.QUANT_MONITOR_GCP_PROJECT_ID }}
         run: |
           if ! [[ "$GCP_PROJECT_ID" =~ ^[a-z][a-z0-9-]{4,28}[a-z0-9]$ ]]; then
             echo "::error::Set QUANT_MONITOR_GCP_PROJECT_ID to a valid project ID"
@@ -163,8 +163,8 @@ jobs:
           fi
       - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
         with:
-          project_id: ${{ vars.QUANT_MONITOR_GCP_PROJECT_ID }}
-          workload_identity_provider: ${{ vars.QUANT_MONITOR_INPUTS_GCP_WIF_PROVIDER }}
+          project_id: ${{ secrets.QUANT_MONITOR_GCP_PROJECT_ID }}
+          workload_identity_provider: ${{ secrets.QUANT_MONITOR_INPUTS_GCP_WIF_PROVIDER }}
           create_credentials_file: true
           export_environment_variables: true
       - name: Transfer existing reader configuration once
