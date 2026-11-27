@@ -39,8 +39,8 @@ Python validates the document, inherits category defaults, and runs scenario rou
 | `strategy_research_summary` | quant_research | auto | openai, claude, gemini, muse | research-summary, strategy-brief, portfolio-note |
 | `reconciliation_anomaly` | quant_ops | agent | muse | recon-diff, ops-anomaly, ledger-mismatch |
 | `signal_context` | quant_signals | auto | openai, claude, gemini, muse | signal-context, feature-note |
-| `report_audit` | quant_notify | api | openai, claude | report-audit, audit-summary |
-| `document_translation` | quant_notify | api | openai, claude | document-translation, translate |
+| `report_audit` | quant_notify | api | openai, claude, gemini | report-audit, audit-summary |
+| `document_translation` | quant_notify | api | openai, claude, gemini | document-translation, translate |
 | `quick_notification` | quant_notify | api | openai, claude, gemini | short-alert, status-ping |
 
 The example explicitly sets `matching.default_complexity` to `complex` for
@@ -51,8 +51,8 @@ category chain; an explicit `null` is invalid. Image / size floors use
 `matching.min_with_image`, `matching.size_thresholds` and global `heuristics` with raise-only semantics from the shared contract.
 
 Quant scenarios are independent of PersonalAIService's business scenarios; only the
-`task.routing.v1` contract is shared. Separate scheduled Dual-API audits
-(`scripts/monthly_api_audit.py`) invoke OpenAI and Anthropic independently in `api`
+`task.routing.v1` contract is shared. Separate scheduled monthly audits
+(`scripts/monthly_api_audit.py`) invoke OpenAI and Anthropic (plus optional Gemini when `GEMINI_API_KEY` is configured) independently in `api`
 mode using their own frozen evidence pipeline.
 
 Execution modes resolve cleanly per scenario and complexity tier:

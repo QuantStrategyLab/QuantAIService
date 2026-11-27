@@ -7,10 +7,10 @@ workflow runs from `QuantStrategyLab/HkEquitySnapshotPipelines` and
 `QuantStrategyLab/UsEquitySnapshotPipelines`. Both source repositories are public;
 the workflow uses its existing `GITHUB_TOKEN` to read public evidence and create
 only a central `monthly-review` issue in QuantAIService. When `MONTHLY_API_AUDIT_READY=true`, a scheduled run also sends the public evidence to the
-configured OpenAI and Anthropic APIs for two independent advisory reviews.
+configured OpenAI and Anthropic APIs (plus Gemini when `GEMINI_API_KEY` is configured) for independent advisory reviews under a strict `union_of_blockers_no_majority_override` arbitration policy.
 Existing repository secrets and model variables configure these paid calls.
 
-本任务按月汇总两个公开源仓库的现有报告。设置 `MONTHLY_API_AUDIT_READY=true` 后，定时运行会各调用一次 GPT 和 Claude，
+本任务按月汇总两个公开源仓库的现有报告。设置 `MONTHLY_API_AUDIT_READY=true` 后，定时运行会各自独立调用 GPT 与 Claude（并在配置 `GEMINI_API_KEY` 时纳入 Gemini 作为可选第三独立审计方，采用“任一阻塞即阻塞、不以多数票覆盖”的 `union_of_blockers_no_majority_override` 原则），
 将独立建议与模型回执写入审计工件。源问题仍由源 issue 跟踪，
 `quality_accepted` 始终为 `false`。
 
@@ -40,12 +40,16 @@ source body excerpts, comment excerpts and full-text SHA256 hashes at observatio
 time. Hashes do not prove historical completeness or remediation. Long texts are
 explicitly truncated; read linked sources for the full text.
 
-`api_probe=true` submits one synthetic request per provider from `main`.
-It only publishes a verification artifact and incurs provider usage. When both
+`api_probe=true` submits one synthetic request per selected provider (`both` for OpenAI + Anthropic, `all` for OpenAI + Anthropic + Gemini, or a single named provider) from `main`.
+It only publishes a verification artifact and incurs provider usage. When the
 probes report the configured models successfully, set
-`MONTHLY_API_AUDIT_READY=true` to activate scheduled inference. Each
-scheduled audit stores provider outputs separately from the evidence report.
-Automatic reruns skip paid requests and retain the original run's results.
+`MONTHLY_API_AUDIT_READY=true` to activate scheduled inference. In `--report`
+mode, `GEMINI_API_KEY` is optional: when unset, Gemini records
+`skipped_unconfigured` with zero external requests and runs in `dual_ai` mode;
+when configured, all three providers must complete (`triple_ai`, no 2-vs-1
+majority override). Each scheduled audit stores provider outputs separately from
+the evidence report. Automatic reruns skip paid requests and retain the
+original run's results.
 
 已有同月 issue（含已关闭项）时只复用链接，不覆盖正文、不追加重复评论、不重开或关闭
 任何 issue。重跑的新读取结果留在该 run 的 artifact / summary。若首次汇总缺少源报告，
